@@ -23,6 +23,7 @@
 pub mod contract;
 pub mod pathguard;
 
+use crate::audit::{self, AuditRecord};
 use crate::config::Config;
 use crate::firewall::refetch::{ContentSource, Surface, UreqSource};
 use crate::firewall::{self, FirewallInput};
@@ -73,7 +74,92 @@ pub fn run_with_source(
     };
 
     let verdict = dispatch(&input, config, src);
+
+    // Best-effort audit (D): record Block/Warn gate + firewall decisions. This
+    // call is verdict-isolated — it NEVER alters `verdict` or the returned
+    // (stdout, exit). Allow is not logged (keep the log minimal).
+    audit_decision(&input, &verdict, config);
+
     contract::emit(&input.hook_event_name, &verdict)
+}
+
+/// Record a Block/Warn decision to the audit log (no-op when audit is disabled,
+/// or the verdict is Allow). Best-effort and verdict-isolated.
+fn audit_decision(input: &HookInput, verdict: &Verdict, config: &Config) {
+    if !config.audit.enabled {
+        return;
+    }
+    let decision = match verdict.tier {
+        Tier::Block => "block",
+        Tier::Warn => "warn",
+        Tier::Allow => return,
+    };
+
+    // Determine the audited event + surface + command text from the input.
+    let (event, surface, command) = match (
+        input.hook_event_name.as_str(),
+        input.tool_name.as_deref().unwrap_or(""),
+    ) {
+        ("PreToolUse", "Bash") => ("gate", None, input.bash_command().map(str::to_string)),
+        ("PreToolUse", "Read") => (
+            "firewall",
+            Some("read_file"),
+            input.file_path().map(str::to_string),
+        ),
+        ("PreToolUse", "Write") | ("PreToolUse", "Edit") => (
+            "firewall",
+            Some("path_guard"),
+            input.file_path().map(str::to_string),
+        ),
+        ("PreToolUse", "WebFetch") => (
+            "firewall",
+            Some("web_fetch"),
+            input.web_url().map(str::to_string),
+        ),
+        ("PreToolUse", "WebSearch") => (
+            "firewall",
+            Some("web_search"),
+            input.web_query().map(str::to_string),
+        ),
+        ("PostToolUse", "Bash") => ("firewall", Some("bash_stdout"), None),
+        ("UserPromptSubmit", _) => ("firewall", Some("user_prompt"), None),
+        _ => return,
+    };
+
+    let (rule_id, category) = parse_rule_label(&verdict.reason);
+    let rec = AuditRecord::new(
+        event,
+        decision,
+        rule_id,
+        category,
+        surface.map(str::to_string),
+        command,
+    );
+    audit::record(&config.audit, &rec);
+}
+
+/// Extract a `(rule_id, category)` hint from a verdict reason. The gate emits
+/// `"... (category [rule_id])"`; the firewall emits `"firewall rule {id} ..."`.
+/// Returns `(None, None)` when neither shape is present.
+fn parse_rule_label(reason: &str) -> (Option<String>, Option<String>) {
+    // Gate shape: trailing `(category [rule_id])`.
+    if let Some(open) = reason.rfind('[') {
+        if let Some(close) = reason[open..].find(']') {
+            let rule_id = reason[open + 1..open + close].to_string();
+            // Category is the word(s) between the last '(' and the '['.
+            let category = reason[..open]
+                .rfind('(')
+                .map(|p| reason[p + 1..open].trim().to_string())
+                .filter(|c| !c.is_empty());
+            return (Some(rule_id), category);
+        }
+    }
+    // Firewall shape: `firewall rule {id} matched ...`.
+    if let Some(rest) = reason.strip_prefix("firewall rule ") {
+        let id = rest.split_whitespace().next().map(str::to_string);
+        return (id, Some("firewall".to_string()));
+    }
+    (None, None)
 }
 
 /// Whether the emergency kill-switch is engaged (env OR config).

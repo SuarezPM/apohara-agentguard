@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+pub use crate::audit::AuditConfig;
 pub use crate::verdict::Thresholds;
 
 /// A user-added block pattern with its severity and category.
@@ -45,6 +46,10 @@ pub struct Config {
     /// positive surfaces, without disabling the rest of the gate.
     #[serde(default = "default_true")]
     pub normalize: bool,
+    /// Local audit-log settings (`[audit]`). Off by default; metadata-only
+    /// unless `include_command` is set. See [`AuditConfig`].
+    #[serde(default)]
+    pub audit: AuditConfig,
 }
 
 /// Default for [`Config::normalize`] — the pre-pass is on by default.
@@ -62,6 +67,8 @@ impl Default for Config {
             // The normalization pre-pass is ON by default (matches the serde
             // `default_true`), so `Config::default()` and an empty TOML agree.
             normalize: true,
+            // Audit log off by default, metadata-only.
+            audit: AuditConfig::default(),
         }
     }
 }
@@ -175,6 +182,12 @@ mod tests {
             disable: true,
             // Non-default (default is true) so the round-trip exercises the field.
             normalize: false,
+            // Non-default audit settings so the round-trip exercises [audit].
+            audit: AuditConfig {
+                enabled: true,
+                path: Some(PathBuf::from("/tmp/agentguard-audit.jsonl")),
+                include_command: true,
+            },
         }
     }
 
@@ -196,6 +209,30 @@ mod tests {
     fn empty_toml_is_defaults() {
         let cfg: Config = toml::from_str("").expect("parse empty");
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn empty_toml_keeps_audit_disabled() {
+        // The new [audit] field must default to disabled + metadata-only when
+        // absent from the TOML.
+        let cfg: Config = toml::from_str("").expect("parse empty");
+        assert!(!cfg.audit.enabled);
+        assert!(cfg.audit.path.is_none());
+        assert!(!cfg.audit.include_command);
+    }
+
+    #[test]
+    fn audit_section_round_trips() {
+        let text = r#"
+            [audit]
+            enabled = true
+            path = "/tmp/x.jsonl"
+            include_command = true
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parse [audit]");
+        assert!(cfg.audit.enabled);
+        assert_eq!(cfg.audit.path, Some(PathBuf::from("/tmp/x.jsonl")));
+        assert!(cfg.audit.include_command);
     }
 
     #[test]

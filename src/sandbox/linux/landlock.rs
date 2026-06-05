@@ -149,7 +149,15 @@ pub fn apply(tier: PermissionTier, workspace_root: &Path) -> Result<()> {
     let granted = match tier {
         PermissionTier::ReadOnly => AccessFs::from_read(TARGET_ABI),
         PermissionTier::WorkspaceWrite => AccessFs::from_all(TARGET_ABI),
-        PermissionTier::DangerFullAccess => unreachable!("handled above"),
+        // DangerFullAccess early-returns Ok(()) at the top of this fn, so this
+        // arm is dead today. Make the invariant explicit and fail-closed (a
+        // propagated Err -> the runner maps it to a setup-error refusal) rather
+        // than an `unreachable!` panic in the post-fork grandchild.
+        PermissionTier::DangerFullAccess => {
+            return Err(SandboxError::Landlock(
+                "DangerFullAccess has no ruleset".into(),
+            ))
+        }
     };
 
     let root_fd = PathFd::new(workspace_root).map_err(|e| {

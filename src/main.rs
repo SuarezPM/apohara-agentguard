@@ -7,6 +7,7 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use agentguard::audit::{self, AuditRecord};
 use agentguard::config::Config;
 use agentguard::hook;
 use agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
@@ -147,6 +148,43 @@ fn run_check(args: CheckArgs) -> ExitCode {
     }
 }
 
+/// Print a loud, multi-line, unmissable warning for the `danger_full_access`
+/// tier to STDERR, and record the invocation to the audit log (if enabled).
+/// Called only when the tier is DangerFullAccess and the user already passed
+/// `--i-know-what-im-doing`.
+fn warn_danger_full_access(command: &[String]) {
+    eprintln!();
+    eprintln!("============================================================");
+    eprintln!("  !!!  DANGER_FULL_ACCESS  —  THE SANDBOX IS DISABLED  !!!");
+    eprintln!("============================================================");
+    eprintln!("  This tier installs NO seccomp filter AND NO Landlock");
+    eprintln!("  ruleset. The command runs with your FULL host access:");
+    eprintln!("  it can read, write, and delete ANY file you can, and");
+    eprintln!("  make unrestricted network connections.");
+    eprintln!();
+    eprintln!("  There is NO confinement of any kind. Only proceed if you");
+    eprintln!("  fully trust this command.");
+    eprintln!();
+    eprintln!("  This invocation is being logged to the audit log");
+    eprintln!("  (if one is configured).");
+    eprintln!("============================================================");
+    eprintln!();
+
+    // Record the danger invocation (best-effort; never affects the exit code).
+    // Command text is opt-in + secret-redacted per the audit config; the
+    // default (metadata-only) records no command.
+    let config = Config::load_default_locations().unwrap_or_default();
+    let rec = AuditRecord::new(
+        "danger_full_access",
+        "warn",
+        None,
+        Some("danger".to_string()),
+        None,
+        Some(command.join(" ")),
+    );
+    audit::record(&config.audit, &rec);
+}
+
 /// Run a command under the sandbox. `danger_full_access` requires the explicit
 /// `--i-know-what-im-doing` flag. On non-Linux, the runner fails closed and we
 /// print an explicit refusal and exit non-zero.
@@ -165,6 +203,13 @@ fn run_sandbox(args: SandboxArgs) -> ExitCode {
              (this tier installs NO seccomp filter and NO Landlock ruleset)"
         );
         return ExitCode::from(2);
+    }
+
+    // Loud, unmissable warning for the danger tier (the --i-know-what-im-doing
+    // flag is present at this point). Printed to STDERR BEFORE running, and the
+    // invocation is recorded to the audit log (if enabled).
+    if matches!(tier, PermissionTier::DangerFullAccess) {
+        warn_danger_full_access(&args.command);
     }
 
     let workspace_root = match args.workspace_root {

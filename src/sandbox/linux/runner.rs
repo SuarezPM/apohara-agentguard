@@ -259,11 +259,14 @@ fn run_grandchild(
         unsafe { libc::_exit(86) };
     }
 
-    // Final hop. execvpe only returns on failure.
-    let errno = match execvpe(&argv[0], argv, env) {
-        Ok(_) => unreachable!("execvpe returned Ok"),
-        Err(e) => e as i32,
-    };
+    // Final hop. execvpe replaces the process image on success, so it only ever
+    // returns on FAILURE (its `Ok` variant is `Infallible`, hence this `let`
+    // binds the `Err` irrefutably). We run in the grandchild AFTER fork, where a
+    // panic could unwind/abort across a forked address space — so there is NO
+    // `unreachable!` here: on the (only) error path we write the errno to the
+    // exec-error pipe and `_exit` (fail-closed).
+    let Err(e) = execvpe(&argv[0], argv, env);
+    let errno = e as i32;
     let _ = write(exec_err_w.as_fd(), &errno.to_le_bytes());
     unsafe { libc::_exit(126) };
 }
