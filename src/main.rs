@@ -29,8 +29,14 @@ enum Command {
     Sandbox(SandboxArgs),
     /// Scan stdin content through the input firewall (prints a verdict).
     Scan,
-    /// Check a command through the anti-bypass gate. TODO(US-003).
-    Check,
+    /// Check a command through the anti-bypass gate (prints a verdict).
+    Check(CheckArgs),
+}
+
+#[derive(Args)]
+struct CheckArgs {
+    /// The command to evaluate against the gate.
+    command: String,
 }
 
 #[derive(Args)]
@@ -59,10 +65,7 @@ fn main() -> ExitCode {
         Command::Hook => run_hook(),
         Command::Sandbox(args) => run_sandbox(args),
         Command::Scan => run_scan(),
-        Command::Check => {
-            println!("check: not yet implemented");
-            ExitCode::SUCCESS
-        }
+        Command::Check(args) => run_check(args),
     }
 }
 
@@ -102,6 +105,31 @@ fn run_scan() -> ExitCode {
         return ExitCode::from(2);
     }
     let verdict = agentguard::firewall::scan_content(&content, &Default::default());
+    use agentguard::verdict::Tier;
+    match verdict.tier {
+        Tier::Allow => {
+            println!("allow");
+            ExitCode::SUCCESS
+        }
+        Tier::Warn => {
+            println!("warn: {}", verdict.reason);
+            ExitCode::SUCCESS
+        }
+        Tier::Block => {
+            eprintln!("block: {}", verdict.reason);
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Check a command through the anti-bypass gate with the loaded user config.
+///
+/// Prints the verdict and exits 2 on a Block (so it composes in shell
+/// pipelines), 0 otherwise (Allow/Warn). The config supplies allow_list,
+/// custom_blocks, thresholds, and the disable kill-switch.
+fn run_check(args: CheckArgs) -> ExitCode {
+    let config = Config::load_default_locations().unwrap_or_default();
+    let verdict = agentguard::gate::evaluate(&args.command, &config);
     use agentguard::verdict::Tier;
     match verdict.tier {
         Tier::Allow => {

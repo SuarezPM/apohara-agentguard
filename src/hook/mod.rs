@@ -27,10 +27,16 @@ use crate::config::Config;
 use crate::firewall::refetch::{ContentSource, Surface, UreqSource};
 use crate::firewall::{self, FirewallInput};
 use crate::gate;
-use crate::verdict::{Thresholds, Tier, Verdict};
+use crate::verdict::{Tier, Verdict};
 use contract::HookInput;
 
 /// Run the hook against raw stdin JSON and a config.
+///
+/// The `config` is honored across every path: the gate (allow_list,
+/// custom_blocks, thresholds), the firewall surfaces (thresholds), and the
+/// kill-switch (`config.disable` as well as the `AGENTGUARD_DISABLE` env var).
+/// The caller loads it once (see `Config::load_default_locations`) and threads
+/// the same `&Config` through.
 ///
 /// Returns `(Some(stdout_json), exit_code)` or `(None, 0)` for an allow/no-op.
 /// Never panics on malformed input: unparseable JSON fails OPEN (allow) so a
@@ -66,7 +72,7 @@ pub fn run_with_source(
         Err(_) => return (None, 0),
     };
 
-    let verdict = dispatch(&input, src);
+    let verdict = dispatch(&input, config, src);
     contract::emit(&input.hook_event_name, &verdict)
 }
 
@@ -88,12 +94,12 @@ fn kill_switch_active(config: &Config) -> bool {
 }
 
 /// Route a parsed input to the right evaluator and return its [`Verdict`].
-fn dispatch(input: &HookInput, src: &dyn ContentSource) -> Verdict {
+fn dispatch(input: &HookInput, config: &Config, src: &dyn ContentSource) -> Verdict {
     match input.hook_event_name.as_str() {
-        "PreToolUse" => dispatch_pretooluse(input, src),
+        "PreToolUse" => dispatch_pretooluse(input, config, src),
 
         // PostToolUse + Bash: scan captured stdout, WARN-only (cannot block).
-        "PostToolUse" => dispatch_posttooluse(input, src),
+        "PostToolUse" => dispatch_posttooluse(input, config, src),
 
         // UserPromptSubmit: scan the prompt text, WARN-only (exit 2 erases it).
         "UserPromptSubmit" => match input.prompt.as_deref() {
@@ -101,7 +107,7 @@ fn dispatch(input: &HookInput, src: &dyn ContentSource) -> Verdict {
                 Surface::UserPrompt,
                 &FirewallInput::inline(text),
                 src,
-                &Thresholds::default(),
+                &config.thresholds,
             ),
             None => Verdict::allow(),
         },
@@ -116,14 +122,15 @@ fn dispatch(input: &HookInput, src: &dyn ContentSource) -> Verdict {
 /// - Read -> pathguard (secret-path) THEN firewall content scan (injection)
 /// - Write/Edit -> pathguard
 /// - WebFetch/WebSearch -> firewall out-of-band re-fetch + content scan
-fn dispatch_pretooluse(input: &HookInput, src: &dyn ContentSource) -> Verdict {
+fn dispatch_pretooluse(input: &HookInput, config: &Config, src: &dyn ContentSource) -> Verdict {
     let tool = input.tool_name.as_deref().unwrap_or("");
-    let thresholds = Thresholds::default();
+    let thresholds = &config.thresholds;
     match tool {
         "Bash" => match input.bash_command() {
-            // Note: the gate also short-circuits on config.disable, but the
-            // kill-switch already returned earlier, so this is the live path.
-            Some(cmd) => gate::evaluate(cmd, &gate_config()),
+            // The gate honors the user config: allow_list, custom_blocks, and
+            // thresholds all apply here. (config.disable already returned earlier
+            // via the kill-switch, so this is the live path.)
+            Some(cmd) => gate::evaluate(cmd, config),
             None => Verdict::allow(),
         },
 
@@ -139,7 +146,7 @@ fn dispatch_pretooluse(input: &HookInput, src: &dyn ContentSource) -> Verdict {
                     Surface::ReadFile,
                     &FirewallInput::file(path),
                     src,
-                    &thresholds,
+                    thresholds,
                 ),
                 None => Verdict::allow(),
             }
@@ -148,12 +155,9 @@ fn dispatch_pretooluse(input: &HookInput, src: &dyn ContentSource) -> Verdict {
 
         // WebFetch / WebSearch: re-fetch out-of-band and scan; BLOCK-capable.
         "WebFetch" => match input.web_url() {
-            Some(url) => firewall::scan_surface(
-                Surface::WebFetch,
-                &FirewallInput::url(url),
-                src,
-                &thresholds,
-            ),
+            Some(url) => {
+                firewall::scan_surface(Surface::WebFetch, &FirewallInput::url(url), src, thresholds)
+            }
             None => Verdict::allow(),
         },
         "WebSearch" => match input.web_query() {
@@ -163,7 +167,7 @@ fn dispatch_pretooluse(input: &HookInput, src: &dyn ContentSource) -> Verdict {
                 Surface::WebSearch,
                 &FirewallInput::url(query),
                 src,
-                &thresholds,
+                thresholds,
             ),
             None => Verdict::allow(),
         },
@@ -174,7 +178,7 @@ fn dispatch_pretooluse(input: &HookInput, src: &dyn ContentSource) -> Verdict {
 }
 
 /// PostToolUse dispatch: only Bash stdout is scanned (WARN-only, cannot block).
-fn dispatch_posttooluse(input: &HookInput, src: &dyn ContentSource) -> Verdict {
+fn dispatch_posttooluse(input: &HookInput, config: &Config, src: &dyn ContentSource) -> Verdict {
     if input.tool_name.as_deref() != Some("Bash") {
         return Verdict::allow();
     }
@@ -183,7 +187,7 @@ fn dispatch_posttooluse(input: &HookInput, src: &dyn ContentSource) -> Verdict {
             Surface::BashStdout,
             &FirewallInput::inline(stdout),
             src,
-            &Thresholds::default(),
+            &config.thresholds,
         ),
         None => Verdict::allow(),
     }
@@ -195,16 +199,6 @@ fn path_verdict(input: &HookInput, tool: &str, write: bool) -> Verdict {
         Some(p) => pathguard::check_path(tool, p, write),
         None => Verdict::allow(),
     }
-}
-
-/// The config handed to the gate.
-///
-/// `run` already loads the user config and applies the kill-switch; the gate
-/// re-reads `config.disable` defensively but we are past that point, so default
-/// thresholds suffice here. Kept as a seam in case `run` later threads the live
-/// config through (US-008).
-fn gate_config() -> Config {
-    Config::default()
 }
 
 #[cfg(test)]
