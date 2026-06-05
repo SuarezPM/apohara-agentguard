@@ -65,6 +65,30 @@ fn destructive_text_in_non_executing_quoted_arg_allows() {
     }
 }
 
+/// FP guard for the live-substitution fix (closing the A5 verb-aware FN must NOT
+/// over-block): a single-quoted `$()` is LITERAL, and a `$()` whose body is a
+/// harmless literal-emitter (`echo …`) is captured as an inert string — both
+/// Allow. This is the no-regress contract paired with the new Block group.
+#[test]
+fn inert_or_literal_substitution_in_quoted_arg_allows() {
+    let allow = [
+        // Harmless literal-emitter body: `echo rm -rf` just prints a string.
+        r#"git commit -m "$(echo rm -rf helper)""#,
+        r#"echo "$(echo rm -rf)""#,
+        r#"echo "$(echo rm)""#,
+        // Single quotes: bash does NOT expand `$()` inside them.
+        r#"git commit -m 'literal $(rm -rf ~)'"#,
+        r#"echo 'no $(rm -rf ~) here'"#,
+    ];
+    for cmd in allow {
+        assert_eq!(
+            evaluate(cmd, &Config::default()).tier,
+            Tier::Allow,
+            "inert/literal substitution must Allow: `{cmd}`"
+        );
+    }
+}
+
 /// A5 FN guard: an EXECUTING verb runs its quoted content, so a destructive
 /// substring there MUST still Block — the verb-aware suppression must not weaken
 /// these.

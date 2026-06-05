@@ -223,8 +223,16 @@ destructive leg surfaces and Blocks:
   decoded in place).
 - **Command-substitution-produced verbs** — `$(echo rm) -rf ~` and the backtick
   `` `echo rm` -rf ~ `` (a leg-head `echo`/`printf` literal substitution is
-  spliced into the verb it emits; argument-position substitutions are left
-  untouched, so a commit message like `git commit -m "$(echo rm -rf)"` is safe).
+  spliced into the verb it emits).
+- **Live command substitutions inside a double-quoted argument** — a `$(...)`/
+  backtick inside a DOUBLE-quoted argument to a non-executing verb is **live**
+  bash code: bash runs the body and interpolates its result, so `echo "$(rm -rf ~)"`
+  and `git commit -m "$(rm -rf ~)"` actually delete the home dir. The body is
+  therefore **extracted and scanned as a command** (`$(rm -rf ~)` Blocks;
+  `$(curl … | sh)` Blocks). Only a harmless literal-emitter Allows: `$(echo …)`
+  just prints a string, so `git commit -m "$(echo rm -rf)"` is safe (the body
+  runs `echo`, not `rm`). Inside SINGLE quotes a `$()` is literal and not
+  expanded by bash, so `git commit -m 'literal $(rm -rf ~)'` is also safe.
 - **IFS reassignment** — `IFS=X; cmdXrmX-rfX~` (the recorded separator is
   word-joined into subsequent legs and re-scanned, gated on surfacing a hit so
   benign `IFS`-driven loops/`read`s never false-positive).
@@ -244,8 +252,11 @@ positive ever surfaces, without disabling the rest of the gate.
   decode level, or word-concatenation like `` $(printf '\x72')m -rf ``.
 - **Deliberate parameter expansion** — beyond the incidental cases below.
 - **Real here-document parsing** — the body is matched incidentally, not parsed.
-- **Non-literal command substitutions** — `$(curl ...)`-produced verbs and any
-  substitution whose body is not a literal `echo`/`printf`.
+- **Non-literal command-substitution-produced VERBS** — a substitution in
+  *command (verb) position* whose output is not a literal `echo`/`printf`, e.g.
+  `$(curl ...) -rf ~` where the fetched text becomes the verb. (A substitution in
+  *argument* position inside double quotes — `echo "$(curl … | sh)"` — IS now
+  scanned and Blocks; only the verb-producing case is still out of scope.)
 
 Two forms are caught **incidentally** (not by deliberate construct handling, so
 do not rely on them): parameter expansion with defaults (`${x:-rm}` / `${x:=rm}`)

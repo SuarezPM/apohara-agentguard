@@ -211,14 +211,21 @@ pub fn rules() -> &'static [DestructiveRule] {
 /// The text a leg's destructive matchers should run against, after accounting
 /// for verb-awareness.
 ///
-/// A destructive substring inside a QUOTED ARGUMENT to a NON-EXECUTING verb
-/// (`git commit -m/-F`, `git tag -m`, `echo`, `printf`, a leading `#` comment)
-/// is DATA, not a command — so this strips those quoted spans, suppressing the
-/// match. For an EXECUTING verb (`sh -c`, `bash -c`, `zsh -c`, `dash -c`,
-/// `eval`, `xargs … rm/sh/bash`, `env … sh`, `find … -exec`) the quoted content
-/// IS run, so the leg is returned unchanged and still matches. Anything not
-/// clearly non-executing is treated as executing (fail toward Block — FN
-/// preserved).
+/// PLAIN text inside a QUOTED ARGUMENT to a NON-EXECUTING verb
+/// (`git commit -m/-F`, `git tag -m`, `git notes add -m`, `echo`, `printf`, a
+/// leading `#` comment) is DATA, not a command — so this strips those quoted
+/// spans, suppressing the match (the commit-message false-positive fix). For an
+/// EXECUTING verb (`sh -c`, `bash -c`, `zsh -c`, `dash -c`, `eval`,
+/// `xargs … rm/sh/bash`, `env … sh`, `find … -exec`) the quoted content IS run,
+/// so the leg is returned unchanged and still matches. Anything not clearly
+/// non-executing is treated as executing (fail toward Block — FN preserved).
+///
+/// IMPORTANT: stripping a quoted span here only removes the INERT plain text.
+/// A `$(...)`/backtick substitution inside a DOUBLE-quoted span is LIVE bash
+/// code that bash runs regardless of the outer verb; those bodies are surfaced
+/// separately by [`live_substitution_bodies`] and scanned as commands, so this
+/// stripping cannot hide them. (Inside SINGLE quotes a substitution is literal,
+/// so it is correctly suppressed by the strip.)
 pub fn effective_match_text(leg: &str) -> String {
     // A comment line is entirely inert text.
     if leg.trim_start().starts_with('#') {
@@ -231,9 +238,34 @@ pub fn effective_match_text(leg: &str) -> String {
     }
 }
 
+/// The bodies of LIVE command substitutions (`$(...)`, `` `...` ``) that a
+/// non-executing verb's quoted argument would still cause bash to execute.
+///
+/// A `$()`/backtick inside a DOUBLE-quoted span is live code: bash runs its body
+/// and interpolates the result, so `echo "$(rm -rf ~)"` deletes the home dir
+/// even though `echo` itself is non-executing. [`effective_match_text`] strips
+/// the inert plain text of such an argument (preserving the commit-message FP
+/// fix), which would also delete these substitutions before matching — so this
+/// returns each live body for the caller to re-scan AS A COMMAND through the
+/// normal pipeline. The substitution body is always evaluated as a command,
+/// independent of the outer verb, which is exactly bash's behavior.
+///
+/// Returns empty for EXECUTING verbs (their whole content is already kept and
+/// matched by [`effective_match_text`]) and for comments (inert). Single-quoted
+/// substitutions are literal and are NOT returned.
+pub fn live_substitution_bodies(leg: &str) -> Vec<String> {
+    if leg.trim_start().starts_with('#') {
+        return Vec::new();
+    }
+    if !is_non_executing_verb(leg) {
+        return Vec::new();
+    }
+    crate::gate::compound::extract_double_quoted_substitutions(leg)
+}
+
 /// True iff the leg's HEAD verb is one whose quoted arguments are DATA, not a
 /// command to execute.
-fn is_non_executing_verb(leg: &str) -> bool {
+pub fn is_non_executing_verb(leg: &str) -> bool {
     let trimmed = leg.trim_start();
     let mut tokens = trimmed.split_whitespace();
     let verb = match tokens.next() {
@@ -492,5 +524,48 @@ mod tests {
     #[test]
     fn comment_line_is_inert() {
         assert!(!m_rm_rf(&effective_match_text("# rm -rf ~ would be bad")));
+    }
+
+    #[test]
+    fn live_substitution_bodies_extracts_double_quoted_subst() {
+        // A `$()`/backtick inside a DOUBLE-quoted arg to a non-executing verb is
+        // LIVE code — its body must be surfaced for command scanning.
+        assert_eq!(
+            live_substitution_bodies(r#"echo "$(rm -rf ~)""#),
+            vec!["rm -rf ~".to_string()]
+        );
+        assert_eq!(
+            live_substitution_bodies(r#"git commit -m "$(rm -rf ~)""#),
+            vec!["rm -rf ~".to_string()]
+        );
+        assert_eq!(
+            live_substitution_bodies(r#"git commit -m "`rm -rf ~`""#),
+            vec!["rm -rf ~".to_string()]
+        );
+    }
+
+    #[test]
+    fn live_substitution_bodies_ignores_single_quoted_subst() {
+        // Inside SINGLE quotes a `$()` is literal — bash does not expand it.
+        assert!(live_substitution_bodies(r#"git commit -m 'literal $(rm -rf ~)'"#).is_empty());
+        assert!(live_substitution_bodies(r#"echo 'no $(rm -rf ~) here'"#).is_empty());
+    }
+
+    #[test]
+    fn live_substitution_bodies_empty_for_executing_verbs_and_plain_text() {
+        // Executing verbs already keep their whole content (handled elsewhere).
+        assert!(live_substitution_bodies(r#"sh -c "$(rm -rf ~)""#).is_empty());
+        // Plain (substitution-free) quoted text yields nothing to scan.
+        assert!(live_substitution_bodies(r#"git commit -m "remove the rm -rf helper""#).is_empty());
+        // A comment is inert.
+        assert!(live_substitution_bodies(r#"# echo "$(rm -rf ~)""#).is_empty());
+    }
+
+    #[test]
+    fn live_substitution_bodies_surfaces_multiple() {
+        assert_eq!(
+            live_substitution_bodies(r#"echo "$(rm -rf ~)" "$(find . -delete)""#),
+            vec!["rm -rf ~".to_string(), "find . -delete".to_string()]
+        );
     }
 }

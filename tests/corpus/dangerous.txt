@@ -58,3 +58,9 @@ eval "rm -rf ~"
 find . -name '*.tmp' | xargs rm -rf
 echo rm -rf ~ | sh
 $(echo $'\x72\x6d') -rf ~
+
+# --- live command substitution inside a DOUBLE-quoted arg to a non-executing ---
+# --- verb (A5 verb-aware FN regression): bash runs the $() body regardless of ---
+# --- the outer echo / git-commit verb, so these MUST Block. ---
+echo "$(rm -rf ~)"
+git commit -m "$(rm -rf ~)"

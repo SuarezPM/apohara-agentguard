@@ -77,4 +77,21 @@ fuzz_target!(|data: &[u8]| {
         Tier::Allow,
         "INVARIANT 2 violated: a constructed `rm -rf {path}` leg was Allowed for input {constructed:?}"
     );
+
+    // INVARIANT 2b (constructed): a `$(rm -rf <path>)` LIVE command substitution
+    // placed inside a DOUBLE-quoted argument to a non-executing verb (`echo`) is
+    // run by bash regardless of the outer verb. This closes the structural blind
+    // spot of the A5 verb-aware taxonomy (which used to strip the whole quoted
+    // span, deleting the live substitution). The body is fixed by us to the
+    // unambiguous destructive `rm -rf <path>` shape, so the gate MUST NOT Allow.
+    // The path is the same sanitized plain shell word (no quotes/separators that
+    // would legitimately change parsing), keeping the assertion narrow.
+    let smuggled = format!("echo \"$(rm -rf {path})\"");
+    let smuggled_verdict = gate::evaluate(&smuggled, &config);
+    assert_ne!(
+        smuggled_verdict.tier,
+        Tier::Allow,
+        "INVARIANT 2b violated: a live `$(rm -rf {path})` inside a double-quoted \
+         non-exec verb arg was Allowed for input {smuggled:?}"
+    );
 });

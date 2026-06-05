@@ -128,6 +128,69 @@ pub fn is_compound(command: &str) -> bool {
     split_compound(command).len() > 1
 }
 
+/// Extract the bodies of command substitutions (`$(...)`, `` `...` ``) that live
+/// inside DOUBLE-quoted spans of `leg`.
+///
+/// In bash a `$()`/backtick inside double quotes is LIVE code: its body is run as
+/// a command and the result interpolated. Inside SINGLE quotes it is literal, so
+/// those spans are skipped. This is what lets the verb-aware taxonomy strip the
+/// plain text of a non-executing verb's quoted argument (the C2 false-positive
+/// fix) while still scanning any live substitution smuggled inside it.
+///
+/// Bodies are returned verbatim (caller re-feeds them through the normal
+/// `split_compound` + taxonomy pipeline). Bounded by [`MAX_SUBST_BODIES`] and the
+/// substitution depth-tracking already present in the extractors, so a crafted
+/// nest cannot blow up.
+pub fn extract_double_quoted_substitutions(leg: &str) -> Vec<String> {
+    let bytes = leg.as_bytes();
+    let mut bodies: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    let mut in_double = false;
+    let mut in_single = false;
+
+    while i < bytes.len() && bodies.len() < MAX_SUBST_BODIES {
+        let c = bytes[i];
+        let next = bytes.get(i + 1).copied();
+
+        // Backslash escape (bash does not honor `\` inside single quotes).
+        if !in_single && c == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if c == b'"' && !in_single {
+            in_double = !in_double;
+            i += 1;
+            continue;
+        }
+        if c == b'\'' && !in_double {
+            in_single = !in_single;
+            i += 1;
+            continue;
+        }
+        // Only INSIDE a double-quoted span is a substitution live.
+        if in_double && !in_single {
+            if c == b'$' && next == Some(b'(') {
+                let (inner, advanced) = extract_paren_body(bytes, i + 2);
+                i = advanced;
+                bodies.push(inner);
+                continue;
+            }
+            if c == b'`' {
+                let (inner, advanced) = extract_backtick_body(bytes, i + 1);
+                i = advanced;
+                bodies.push(inner);
+                continue;
+            }
+        }
+        i += 1;
+    }
+    bodies
+}
+
+/// Cap on how many double-quoted substitution bodies a single leg may surface,
+/// consistent with the normalize/decode bounds (no unbounded fan-out).
+pub const MAX_SUBST_BODIES: usize = 64;
+
 /// Trim and push `current` as a leg if non-empty, then clear it.
 fn push_leg(current: &mut String, result: &mut Vec<String>) {
     let trimmed = current.trim();
@@ -338,6 +401,48 @@ mod tests {
         assert_eq!(
             split_compound_with_separators("aXb; c", &['X']),
             vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn extract_double_quoted_substitutions_finds_live_bodies() {
+        // `$()`/backtick inside DOUBLE quotes is live -> extracted.
+        assert_eq!(
+            extract_double_quoted_substitutions(r#"echo "$(rm -rf ~)""#),
+            vec!["rm -rf ~".to_string()]
+        );
+        assert_eq!(
+            extract_double_quoted_substitutions(r#"git commit -m "`rm -rf ~`""#),
+            vec!["rm -rf ~".to_string()]
+        );
+        assert_eq!(
+            extract_double_quoted_substitutions(r#"echo "$(rm -rf ~)" "$(echo ok)""#),
+            vec!["rm -rf ~".to_string(), "echo ok".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_double_quoted_substitutions_skips_single_quotes_and_outside() {
+        // Inside SINGLE quotes a `$()` is literal -> not extracted.
+        assert!(extract_double_quoted_substitutions(r#"echo '$(rm -rf ~)'"#).is_empty());
+        // Outside any quotes, the body is its own leg (handled by split_compound),
+        // not surfaced as a "double-quoted" live substitution here.
+        assert!(extract_double_quoted_substitutions("echo $(rm -rf ~)").is_empty());
+        // Plain double-quoted text with no substitution -> nothing.
+        assert!(extract_double_quoted_substitutions(r#"echo "just text""#).is_empty());
+    }
+
+    #[test]
+    fn extract_double_quoted_substitutions_bounded() {
+        // More than MAX_SUBST_BODIES live substitutions are capped, not unbounded.
+        let mut s = String::from("echo \"");
+        for _ in 0..(MAX_SUBST_BODIES + 10) {
+            s.push_str("$(rm -rf ~)");
+        }
+        s.push('"');
+        assert_eq!(
+            extract_double_quoted_substitutions(&s).len(),
+            MAX_SUBST_BODIES
         );
     }
 
