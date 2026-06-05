@@ -1,0 +1,7 @@
+CLAUDE.local.md
+.claude/settings.local.json
+.gitnexus/
+.cocoindex_code/
+# CocoIndex Code (ccc)
+/.cocoindex_code/
+/target
