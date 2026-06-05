@@ -286,13 +286,36 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        // `max` may land inside a multi-byte UTF-8 char; slicing there panics.
+        // Step back to the largest char boundary at or below `max`.
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_does_not_split_multibyte_char() {
+        // Regression (found by the cargo-fuzz `gate_evaluate` target): `max`
+        // landing inside a multi-byte UTF-8 char must not panic. The byte at
+        // index 200 here is the middle of a two-byte 'Â'.
+        let s = format!("{}Â{}", "a".repeat(199), "b".repeat(50));
+        let out = truncate(&s, 200);
+        assert!(out.ends_with('…'));
+        // Stepped back to the boundary before 'Â' (the 199 'a's).
+        assert_eq!(out, format!("{}…", "a".repeat(199)));
+    }
+
+    #[test]
+    fn truncate_keeps_short_strings_intact() {
+        assert_eq!(truncate("rm -rf ~", 200), "rm -rf ~");
+    }
 
     #[test]
     fn allow_list_short_circuits() {

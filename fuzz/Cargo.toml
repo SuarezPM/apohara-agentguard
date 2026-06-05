@@ -1,0 +1,28 @@
+[package]
+name = "agentguard-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# This is its OWN workspace so the fuzz crate never enters the main build graph
+# (`cargo build`/`cargo test` at the repo root are unaffected, and the nightly-
+# only `-Z` flags cargo-fuzz injects never leak into the stable workspace).
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+agentguard = { path = ".." }
+
+[[bin]]
+name = "gate_evaluate"
+path = "fuzz_targets/gate_evaluate.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

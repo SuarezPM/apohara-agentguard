@@ -5,3 +5,9 @@ CLAUDE.local.md
 # CocoIndex Code (ccc)
 /.cocoindex_code/
 /target
+
+# cargo-fuzz (fuzz/ is its own separate crate; build + run artifacts)
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/Cargo.lock
