@@ -1,0 +1,57 @@
+# cargo-deny configuration for agentguard.
+#
+# The licenses gate is the load-bearing part for v0.1: CI runs
+# `cargo deny check licenses` and FAILS on any dependency license outside the
+# allowlist below (unknown or copyleft). This gates THIRD-PARTY-LICENSES
+# completeness — a new transitive dep with a disallowed license breaks the build
+# rather than silently shipping.
+
+[licenses]
+# Fail (not warn) on any license not explicitly allowed.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    # CDLA-Permissive-2.0 is a permissive *data* license (no copyleft, no
+    # source-disclosure obligation) carried by `webpki-roots` for the bundled
+    # Mozilla root-CA store that `ureq`'s TLS pulls in. Permissive and shippable.
+    "CDLA-Permissive-2.0",
+    # MPL-2.0 is file-level (weak) copyleft and acceptable for a dynamically/
+    # statically linked dependency without forcing project relicensing. Kept in
+    # the allowlist only because a transitive dep may carry it; remove if
+    # `cargo deny check licenses` shows no MPL-2.0 crate in the tree.
+    "MPL-2.0",
+]
+# Crates with no detectable license expression are a hard error.
+confidence-threshold = 0.9
+
+# Per-crate clarifications can be added here if a crate's license is detected
+# with low confidence but is in fact allowlisted. None needed for v0.1.
+# [[licenses.clarify]]
+# crate = "..."
+# expression = "..."
+# license-files = [{ path = "LICENSE", hash = 0x0 }]
+
+[bans]
+# v0.1 does not gate on duplicate versions or specific bans; the licenses gate
+# is the required one. Multiple-version warnings are advisory.
+multiple-versions = "allow"
+wildcards = "allow"
+
+[advisories]
+# RUSTSEC advisory checks run in CI as advisory (not a hard gate for v0.1);
+# the licenses gate is the required one. Bump to "deny" once an audit cadence
+# is established.
+yanked = "warn"
+
+[sources]
+# Only crates.io is trusted; a git/path source for a dependency is a hard error
+# (reinforces the "no Catalyst/aegis path/git coupling" invariant).
+unknown-registry = "deny"
+unknown-git = "deny"

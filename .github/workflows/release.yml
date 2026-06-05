@@ -1,0 +1,133 @@
+name: Release
+
+# Builds the v0.1 cross-platform binaries, regenerates THIRD-PARTY-LICENSES,
+# and emits a SHA256 manifest of the artifacts. It does NOT auto-publish: tag
+# creation, GitHub Release submission, and crates.io/npm publish are left to a
+# maintainer. Trigger manually (workflow_dispatch) or on a v* tag to assemble
+# the artifact set for review.
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  third-party-licenses:
+    name: regenerate THIRD-PARTY-LICENSES
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-about
+        run: cargo install --locked cargo-about
+      - name: Generate THIRD-PARTY-LICENSES
+        run: cargo about generate about.hbs -o THIRD-PARTY-LICENSES
+      - uses: actions/upload-artifact@v4
+        with:
+          name: THIRD-PARTY-LICENSES
+          path: THIRD-PARTY-LICENSES
+
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            ext: ""
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            ext: ""
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            ext: ".exe"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      # aarch64 Linux is cross-compiled with `cross` (provides the aarch64
+      # glibc toolchain + runner). The other four build natively.
+      - name: Install cross (aarch64 Linux)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: Build (native)
+        if: matrix.cross != true
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          src="target/${{ matrix.target }}/release/agentguard${{ matrix.ext }}"
+          dst="dist/agentguard-${{ matrix.target }}${{ matrix.ext }}"
+          cp "$src" "$dst"
+
+      - name: Compute SHA256
+        shell: bash
+        run: |
+          cd dist
+          f="agentguard-${{ matrix.target }}${{ matrix.ext }}"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$f" > "$f.sha256"
+          else
+            shasum -a 256 "$f" > "$f.sha256"
+          fi
+          cat "$f.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agentguard-${{ matrix.target }}
+          path: dist/*
+
+  manifest:
+    name: assemble SHA256 manifest
+    needs: [build, third-party-licenses]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Build combined SHA256SUMS
+        shell: bash
+        run: |
+          mkdir -p release
+          # Collect every binary + its per-file .sha256 into one manifest.
+          find artifacts -type f -name 'agentguard-*' ! -name '*.sha256' -exec cp {} release/ \;
+          cp -f artifacts/THIRD-PARTY-LICENSES/THIRD-PARTY-LICENSES release/ || true
+          cd release
+          : > SHA256SUMS
+          for f in agentguard-*; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$f" >> SHA256SUMS
+            else
+              shasum -a 256 "$f" >> SHA256SUMS
+            fi
+          done
+          echo "----- SHA256SUMS -----"
+          cat SHA256SUMS
+      - name: Upload release bundle (for maintainer review — NOT auto-published)
+        uses: actions/upload-artifact@v4
+        with:
+          name: agentguard-v0.1.0-release
+          path: release/*

@@ -1,0 +1,193 @@
+# agentguard
+
+**A deterministic, offline safety layer for Claude Code.** One self-contained
+Rust binary that ships as a Claude Code plugin and combines three independent
+defenses:
+
+1. **Anti-bypass command gate** — a structural Bash compound parser with
+   variable-assignment resolution and base64 decode-and-rescan, plus a broad
+   destructive-operation taxonomy. It blocks obfuscated destructive commands that
+   naive fixed-list regex gates let through.
+2. **Local seccomp + Landlock sandbox** — defense-in-depth process confinement on
+   Linux: a default-deny seccomp-bpf syscall filter (network blocked, `EPERM`
+   fail-closed) **and** real Landlock LSM filesystem confinement to a workspace
+   root. (Linux-only — see *Known limitations*.)
+3. **Deterministic injection firewall** — 78 DJL rules + 24 OWASP ASI patterns
+   ported to Rust `regex`, scanning prompts, fetched web content, read files, and
+   command output for prompt-injection / exfiltration / harmful-content
+   signatures.
+
+## Positioning (the honest version)
+
+agentguard is **deterministic and offline**: the scanning logic is pure regex +
+structural parsing with **no model, no ML, no network call at scan time**. The
+only network use is the firewall's optional out-of-band re-fetch (described
+below), which is the *inspection mechanism* for web content, not part of the
+scoring. Detection is **parser-bounded**: it is exactly as good as the compound
+parser and the rule set, and it makes no "blocks 100% of attacks" claim. The
+seccomp + Landlock sandbox is **Linux-only**; on macOS and Windows the sandbox
+subcommand fails closed (refuses to run) while the gate, path-guard, and firewall
+remain fully functional.
+
+This is a structural-and-deterministic complement to model-based safety, not a
+replacement for it.
+
+## Install
+
+### Via npx (recommended)
+
+```sh
+npx agentguard --help
+```
+
+The npm package is a thin launcher: it resolves the right release binary by
+platform × arch × libc, **downloads it, verifies its SHA256 against a pinned
+manifest, and refuses to run on a checksum mismatch** (a security tool must never
+execute an unverified binary). musl Linux is detected and refused in v0.1 — use
+`cargo install` instead.
+
+### Via the install script
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SuarezPM/agentguard/main/packaging/install.sh | sh
+```
+
+Same checksum discipline: detects the platform, downloads, SHA256-verifies, and
+places the binary under `~/.local/share/agentguard` along with the plugin/hook
+config.
+
+### Via cargo (builds from source)
+
+```sh
+cargo install --git https://github.com/SuarezPM/agentguard --locked
+```
+
+This is the supported path for **musl Linux** and any platform without a pinned
+release artifact.
+
+## Usage
+
+### As a Claude Code hook
+
+agentguard ships a plugin manifest (`packaging/plugin.json`) and hook config
+(`packaging/hooks.json`) that wire the `agentguard hook` binary to every relevant
+tool surface:
+
+- **PreToolUse**: `Bash` (gate), `Read`/`Write`/`Edit` (secret-path guard +
+  file-content firewall), `WebFetch`/`WebSearch` (out-of-band re-fetch + firewall).
+- **PostToolUse**: `Bash` (scan command output, warn-only).
+- **UserPromptSubmit**: scan the prompt text (warn-only).
+
+The hook reads the event JSON on stdin and emits a decision via the nested
+`hookSpecificOutput` shape. A block on a `PreToolUse` event sets
+`permissionDecision: "deny"` (and also exits 2 with the reason on stderr).
+
+Manual sanity check:
+
+```sh
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"x=rm; $x -rf ~"}}' \
+  | agentguard hook ; echo "exit=$?"   # -> permissionDecision=deny, exit 2
+```
+
+### Sandbox subcommand (Linux)
+
+```sh
+# Run a command confined to the current directory with seccomp + Landlock.
+agentguard sandbox --tier workspace_write --workspace-root "$PWD" -- cargo build
+
+# Tiers: read_only | workspace_write (default) | danger_full_access
+# danger_full_access installs NO seccomp filter and NO Landlock ruleset and
+# REQUIRES the explicit acknowledgement flag:
+agentguard sandbox --tier danger_full_access --i-know-what-im-doing -- some-command
+```
+
+On a kernel without Landlock, the sandbox **fails closed** with an actionable
+message (it never runs unconfined). On macOS/Windows it refuses with a clear
+message and a non-zero exit.
+
+### Scan subcommand
+
+```sh
+echo "some untrusted text" | agentguard scan   # prints allow / warn / block
+```
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the work by you, as defined in the Apache-2.0 license, shall be
+dual licensed as above, without any additional terms or conditions.
+
+Third-party dependency licenses are enumerated in
+[THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES), generated by `cargo about` and
+gated by `cargo deny check licenses` against an explicit allowlist.
+
+## Known limitations
+
+- **C1 re-fetch double-fetch and latency.** For `WebFetch`/`WebSearch` the hook
+  re-fetches the URL out-of-band to scan it before the tool runs. The URL is
+  therefore fetched twice (once by the hook, once by Claude), adding latency and
+  load.
+- **TOCTOU on web content.** The content the hook scans may differ from what
+  Claude fetches on its subsequent request (a time-of-check/time-of-use gap). A
+  server can serve clean content to the hook and malicious content to Claude.
+- **WebSearch re-run nondeterminism.** agentguard cannot reproduce Claude's
+  search backend, so it performs a best-effort plain GET against the query URL.
+  Results may differ from Claude's; the load-bearing guarantee is the per-surface
+  posture and the SSRF guard, not byte-identical search results.
+- **SSRF mitigation (and its bounds).** The out-of-band fetcher resolves the
+  hostname and **denies** the request if any resolved IP is private (RFC1918),
+  loopback, link-local (`169.254.0.0/16`, `fe80::/10`), ULA (`fc00::/7`), or a
+  cloud-metadata address (`169.254.169.254`). It checks the *resolved* IP (not
+  the hostname) to defeat DNS rebinding, and re-checks every redirect hop.
+- **seccomp + Landlock are Linux-only.** The sandbox requires **Linux ≥ 5.13 with
+  Landlock enabled** (`lsm=landlock` on the kernel cmdline). On macOS/Windows the
+  sandbox subcommand fails closed; the gate, path-guard, and firewall still work.
+
+## Known evasions / out-of-scope (v0.1)
+
+The command gate's soundness is parser-bounded. The following Bash obfuscation
+forms are **not caught in v0.1** and are honestly out of scope:
+
+- **ANSI-C quoting** — `$'\x72\x6d'` (hex/octal escapes that decode to `rm`).
+- **Parameter expansion with defaults** — `${x:-rm}` / `${x:=rm}`.
+- **Command-substitution-produced verbs** — `$(echo rm) -rf ~`.
+- **Here-documents** — payloads fed via `<<EOF ... EOF`.
+- **IFS reassignment** — rebuilding a command by manipulating the field separator.
+- **Backslash line-continuation** — splitting a verb across `\`-continued lines.
+
+These are tracked for a future version (see the plan's deferred items). Variable
+assignment (`x=rm; $x ...`) and single-level base64 decode-and-rescan **are**
+caught.
+
+## Disabling / kill-switch
+
+agentguard has an **all-or-nothing emergency kill-switch** so a fail-closed bug
+can never brick your Bash tool:
+
+```sh
+export AGENTGUARD_DISABLE=1      # or: disable = true  in the config file
+```
+
+When set, the hook immediately allows everything and exits 0 — it disables the
+gate, path-guard, **and** firewall together.
+
+It is read from the **hook process's environment**, not the inspected (agent)
+command's environment. A malicious Bash command that sets
+`AGENTGUARD_DISABLE=1` runs in a *different* process and therefore **cannot
+self-disarm** the gate. A granular form (e.g. `AGENTGUARD_DISABLE=gate,firewall`)
+is a planned v0.2 follow-up.
+
+## Demo
+
+See [docs/demo.md](docs/demo.md) for the bypass-resistance demo script (three
+obfuscated destructive commands shown side-by-side against a naive regex, plus
+the seccomp network-deny and Landlock `/etc/passwd`-deny demonstrations).

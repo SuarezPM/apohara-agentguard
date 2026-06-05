@@ -1,0 +1,43 @@
+{
+  "description": "agentguard: anti-bypass command gate, secret-path guard, and deterministic injection firewall wired to the `agentguard hook` binary across all relevant tool surfaces.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Write|Edit|WebFetch|WebSearch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentguard",
+            "args": ["hook"],
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentguard",
+            "args": ["hook"],
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentguard",
+            "args": ["hook"],
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,96 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  deny:
+    name: cargo-deny (licenses)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cargo-deny
+        run: cargo install --locked cargo-deny
+      # Fails on any dependency license outside the allowlist in deny.toml.
+      - run: cargo deny check licenses
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # ----- Cross-platform hard gate (all OSes) -----
+      # The gate, firewall, path-guard, hook contract, and (on macOS/Windows)
+      # the off-Linux sandbox refusal are portable and MUST pass everywhere.
+      # We exclude the Linux-kernel-capability sandbox tests here so a runner
+      # lacking userns/Landlock cannot fail the required gate; those tests run
+      # in the dedicated non-blocking step below on Linux.
+      - name: Run portable tests (hard gate)
+        shell: bash
+        run: |
+          cargo test --lib --bins
+          cargo test --test headline_bypass --test gate_fp --test hook_contract \
+                     --test pathguard --test firewall_posture
+          # sandbox_offlinux only exists (and matters) off Linux.
+          if [ "${{ runner.os }}" != "Linux" ]; then
+            cargo test --test sandbox_offlinux
+          fi
+
+      # ReDoS guard: the bench compiles as a no-harness binary and runs under
+      # both `cargo bench` and `cargo test --benches`. Pathological inputs must
+      # stay sub-millisecond.
+      - name: ReDoS bench
+        shell: bash
+        run: cargo test --benches
+
+      # ----- Linux kernel-capability sandbox gate (non-blocking on CI) -----
+      # The seccomp + Landlock + build-e2e tests require an unprivileged user
+      # namespace AND a Landlock-capable kernel (Linux >= 5.13 with Landlock
+      # enabled). GitHub-hosted runners do not reliably provide both, so a
+      # capability gap here must NOT hard-fail CI. These tests are NOT marked
+      # #[ignore] — they compile and RUN; we only mark this STEP
+      # continue-on-error so a kernel limitation is surfaced (logged) without
+      # failing the required gate. They are a HARD gate locally (Pablo's box is
+      # Landlock-capable) and asserted there.
+      - name: Run Linux sandbox tests (kernel-capability, non-blocking)
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        run: |
+          echo "::group::sandbox tests (require userns + Landlock; non-blocking on CI)"
+          cargo test --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e -- --nocapture
+          echo "::endgroup::"

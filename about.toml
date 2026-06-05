@@ -1,0 +1,35 @@
+# cargo-about configuration for agentguard.
+#
+# `cargo about generate` walks the dependency tree and emits THIRD-PARTY-LICENSES
+# from the template. The accepted-license list mirrors deny.toml's allowlist so
+# the two tools agree on what is shippable.
+
+# Licenses accepted in the dependency tree. Must stay in sync with deny.toml.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+    "MPL-2.0",
+]
+
+# Build the full target matrix so platform-specific deps (Linux-only seccompiler/
+# nix/libc/landlock; Windows/macOS std deps) are all attributed in
+# THIRD-PARTY-LICENSES, not just the host target.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+# Ignore build/dev-only crates that are not distributed in the release binary.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
