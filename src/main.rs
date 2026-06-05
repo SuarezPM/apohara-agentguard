@@ -4,11 +4,13 @@
 //! stories; only `version` is wired for the US-000 scaffold.
 
 use std::io::Read as _;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use agentguard::config::Config;
 use agentguard::hook;
-use clap::{Parser, Subcommand};
+use agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "agentguard", version, about)]
@@ -23,12 +25,28 @@ enum Command {
     Version,
     /// Run as a Claude Code hook (reads stdin JSON, emits a decision).
     Hook,
-    /// Run a command inside the local sandbox. TODO(US-005).
-    Sandbox,
+    /// Run a command inside the local seccomp + Landlock sandbox.
+    Sandbox(SandboxArgs),
     /// Scan content through the input firewall. TODO(US-006).
     Scan,
     /// Check a command through the anti-bypass gate. TODO(US-003).
     Check,
+}
+
+#[derive(Args)]
+struct SandboxArgs {
+    /// Permission tier: read_only | workspace_write | danger_full_access.
+    #[arg(long, default_value = "workspace_write")]
+    tier: String,
+    /// Workspace root the command is confined to (default: current directory).
+    #[arg(long)]
+    workspace_root: Option<PathBuf>,
+    /// Required acknowledgement for the danger_full_access (no-sandbox) tier.
+    #[arg(long = "i-know-what-im-doing")]
+    i_know_what_im_doing: bool,
+    /// The command to run, after `--`.
+    #[arg(last = true, required = true)]
+    command: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -39,10 +57,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Command::Hook => run_hook(),
-        Command::Sandbox => {
-            println!("sandbox: not yet implemented");
-            ExitCode::SUCCESS
-        }
+        Command::Sandbox(args) => run_sandbox(args),
         Command::Scan => {
             println!("scan: not yet implemented");
             ExitCode::SUCCESS
@@ -77,4 +92,60 @@ fn run_hook() -> ExitCode {
     }
 
     ExitCode::from(code as u8)
+}
+
+/// Run a command under the sandbox. `danger_full_access` requires the explicit
+/// `--i-know-what-im-doing` flag. On non-Linux, the runner fails closed and we
+/// print an explicit refusal and exit non-zero.
+fn run_sandbox(args: SandboxArgs) -> ExitCode {
+    let tier: PermissionTier = match args.tier.parse() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("agentguard sandbox: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    if matches!(tier, PermissionTier::DangerFullAccess) && !args.i_know_what_im_doing {
+        eprintln!(
+            "agentguard sandbox: refusing danger_full_access without --i-know-what-im-doing \
+             (this tier installs NO seccomp filter and NO Landlock ruleset)"
+        );
+        return ExitCode::from(2);
+    }
+
+    let workspace_root = match args.workspace_root {
+        Some(p) => p,
+        None => match std::env::current_dir() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("agentguard sandbox: cannot determine current directory: {e}");
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    let req = SandboxRequest {
+        command: args.command,
+        workspace_root,
+        tier,
+        timeout: None,
+    };
+
+    match SandboxRunner::new().run(req) {
+        Ok(result) => {
+            print!("{}", result.stdout);
+            eprint!("{}", result.stderr);
+            for v in &result.violations {
+                eprintln!("agentguard sandbox: violation: {v}");
+            }
+            ExitCode::from(result.exit_code.clamp(0, 255) as u8)
+        }
+        Err(e) => {
+            // Fail-closed: a setup error (incl. non-Linux Unavailable) must
+            // never be mistaken for a successful unconfined run.
+            eprintln!("agentguard sandbox: REFUSED (fail-closed): {e}");
+            ExitCode::from(70)
+        }
+    }
 }
