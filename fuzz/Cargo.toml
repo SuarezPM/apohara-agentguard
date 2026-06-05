@@ -1,5 +1,5 @@
 [package]
-name = "agentguard-fuzz"
+name = "apohara-agentguard-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -15,7 +15,7 @@ members = ["."]
 
 [dependencies]
 libfuzzer-sys = "0.4"
-agentguard = { path = ".." }
+apohara-agentguard = { path = ".." }
 
 [[bin]]
 name = "gate_evaluate"

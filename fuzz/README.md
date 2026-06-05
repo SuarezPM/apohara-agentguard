@@ -1,4 +1,4 @@
-# agentguard fuzzing
+# apohara-agentguard fuzzing
 
 `cargo-fuzz` (libFuzzer) harness that hardens the gate's core soundness claim
 ("parser-bounded"): the gate must **never panic / never hang** on arbitrary

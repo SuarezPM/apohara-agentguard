@@ -1,6 +1,6 @@
 # Architecture
 
-agentguard is one self-contained Rust binary that ships as a Claude Code plugin.
+apohara-agentguard is one self-contained Rust binary that ships as a Claude Code plugin.
 It combines four independent, deterministic defenses behind a single hook
 contract: a **command gate**, a **path-guard**, a Linux **seccomp + Landlock
 sandbox**, and an **injection firewall**. This document describes the design and,
@@ -41,7 +41,7 @@ It is a **total reimplementation in Rust** — see
    PostToolUse + Bash  → firewall scan of stdout (WARN-only; cannot block)
    UserPromptSubmit    → firewall scan of prompt (WARN-only; exit 2 erases it)
 
-   agentguard sandbox <cmd>  (separate subcommand, Linux)
+   apohara-agentguard sandbox <cmd>  (separate subcommand, Linux)
         │ two forks → grandchild (PID 1 in new namespaces)
         ▼
    NO_NEW_PRIVS  →  Landlock  →  seccomp (LAST)  →  execvpe
@@ -127,7 +127,7 @@ at 4096 bytes.
 - **PostToolUse** cannot block — a Block gracefully downgrades to a Warn
   (`additionalContext`, exit 0).
 - **UserPromptSubmit** can technically block, but exit 2 there *erases the
-  prompt*, so agentguard only ever Warns (downgrade to `additionalContext`,
+  prompt*, so apohara-agentguard only ever Warns (downgrade to `additionalContext`,
   exit 0).
 - **Malformed input fails OPEN** (allow): a schema surprise must never brick the
   user's tools. The kill-switch is checked *before* any parsing.
@@ -156,7 +156,7 @@ pinned order**:
   are deliberately **absent from every seccomp allowlist**. If seccomp were
   installed first, its `mismatch_action = EPERM` would EPERM those
   un-allowlisted Landlock syscalls, Landlock setup would fail, and — because
-  setup failure **fails closed** — agentguard would refuse *every* run, even on
+  setup failure **fails closed** — apohara-agentguard would refuse *every* run, even on
   a fully capable kernel. Ordering seccomp last (rather than allowlisting
   444–446) is the deliberate choice: it means **no Landlock syscall is callable
   by the child after setup**, so the child cannot weaken its own ruleset. The
@@ -202,7 +202,7 @@ the invocation to the audit log when enabled.
 
 ## Independence (self-contained)
 
-agentguard is **a fully self-contained, dependency-free implementation** (no
+apohara-agentguard is **a fully self-contained, dependency-free implementation** (no
 external policy engine, no shared runtime, no network at scan time) — no link, no
 path dependency, and no vendored code. The destructive taxonomy, the DJL/OWASP
 rule sets, the verdict spine, and the path utilities are all implemented in-tree

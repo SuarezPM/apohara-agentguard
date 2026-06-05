@@ -37,7 +37,7 @@ pub struct Config {
     /// Severity-to-tier cutoffs.
     #[serde(default)]
     pub thresholds: Thresholds,
-    /// Kill-switch: when true, agentguard emits Allow and gets out of the way.
+    /// Kill-switch: when true, apohara-agentguard emits Allow and gets out of the way.
     #[serde(default)]
     pub disable: bool,
     /// Whether the in-place normalization pre-pass (ANSI-C / echo-substitution /

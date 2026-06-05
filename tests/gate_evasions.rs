@@ -16,9 +16,9 @@
 //! substring/leg matching, not by deliberate construct handling; we pin that
 //! real behavior too and label it as incidental.
 
-use agentguard::config::Config;
-use agentguard::gate::evaluate;
-use agentguard::verdict::Tier;
+use apohara_agentguard::config::Config;
+use apohara_agentguard::gate::evaluate;
+use apohara_agentguard::verdict::Tier;
 
 /// ANSI-C quoting: `$'\x72\x6d'` decodes to `rm`. The normalize pre-pass decodes
 /// ANSI-C `$'...'` spans in place -> now DELIBERATELY Blocks (v0.1.x).

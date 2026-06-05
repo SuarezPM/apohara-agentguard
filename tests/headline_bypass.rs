@@ -1,13 +1,13 @@
-//! Headline differentiator: agentguard BLOCKS the three bypasses that the
+//! Headline differentiator: apohara-agentguard BLOCKS the three bypasses that the
 //! legacy fixed-list engine (`inv_bash_scope.rs:64-110`) silently let through.
 //!
-//! Each test asserts agentguard returns `Block`, and the side-by-side test
+//! Each test asserts apohara-agentguard returns `Block`, and the side-by-side test
 //! proves the contrast: a faithful reimplementation of the legacy fixed-list
-//! gate returns Safe (no block) for all three, while agentguard blocks.
+//! gate returns Safe (no block) for all three, while apohara-agentguard blocks.
 
-use agentguard::config::Config;
-use agentguard::gate::evaluate;
-use agentguard::verdict::Tier;
+use apohara_agentguard::config::Config;
+use apohara_agentguard::gate::evaluate;
+use apohara_agentguard::verdict::Tier;
 
 mod common;
 use common::naive_fixed_list;
@@ -50,11 +50,11 @@ fn side_by_side_legacy_misses_what_agentguard_blocks() {
             "legacy fixed-list gate unexpectedly flagged `{cmd}`; \
              the side-by-side contrast requires it to MISS this"
         );
-        // agentguard: Block — it CLOSES the gap.
+        // apohara-agentguard: Block — it CLOSES the gap.
         assert_eq!(
             evaluate(cmd, &Config::default()).tier,
             Tier::Block,
-            "agentguard must block `{cmd}` the legacy gate missed"
+            "apohara-agentguard must block `{cmd}` the legacy gate missed"
         );
     }
 }

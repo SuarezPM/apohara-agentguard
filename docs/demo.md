@@ -1,4 +1,4 @@
-# agentguard demo script
+# apohara-agentguard demo script
 
 This is the **script** for the bypass-resistance demo. Recording (asciinema /
 video) is done separately; this file is just the commands and the expected
@@ -8,7 +8,7 @@ All commands assume a release build:
 
 ```sh
 cargo build --release
-BIN=./target/release/agentguard
+BIN=./target/release/apohara-agentguard
 ```
 
 ---
@@ -17,7 +17,7 @@ BIN=./target/release/agentguard
 
 The differentiator: three obfuscated destructive commands that a naive
 fixed-list regex gate (substring-match a list like `rm -rf`, `mkfs`, …) treats as
-**safe**, while agentguard **blocks** all three.
+**safe**, while apohara-agentguard **blocks** all three.
 
 ### Block 1 — variable-assignment resolution
 
@@ -28,7 +28,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 Expected: `permissionDecision":"deny"` in the JSON, **exit 2**.
 A naive regex never sees the literal `rm -rf` because the verb is hidden behind
-`$x`. agentguard resolves the `x=rm` assignment across compound legs first.
+`$x`. apohara-agentguard resolves the `x=rm` assignment across compound legs first.
 
 ### Block 2 — base64 decode + rescan
 
@@ -39,7 +39,7 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 ```
 
 Expected: **deny / exit 2**.
-A naive regex sees only `echo`, `base64`, `sh` — all benign. agentguard decodes
+A naive regex sees only `echo`, `base64`, `sh` — all benign. apohara-agentguard decodes
 the literal base64 payload and rescans the decoded `rm -rf ~`.
 
 ### Block 3 — `find -delete`
@@ -51,12 +51,12 @@ echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command"
 
 Expected: **deny / exit 2**.
 `find . -delete` contains no `rm` at all; a fixed `rm`-centric list misses it
-entirely. agentguard's destructive taxonomy includes `find … -delete`.
+entirely. apohara-agentguard's destructive taxonomy includes `find … -delete`.
 
 ### Side-by-side proof
 
 `tests/headline_bypass.rs` asserts a naive fixed-list matcher returns *Safe* for
-all three while `agentguard::gate::evaluate` returns *Block*. Run it live:
+all three while `apohara_agentguard::gate::evaluate` returns *Block*. Run it live:
 
 ```sh
 cargo test --test headline_bypass -- --nocapture

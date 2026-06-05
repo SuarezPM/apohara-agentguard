@@ -1,31 +1,31 @@
 //! FP/FN benchmark with PRE-COMMITTED, ABSOLUTE pass/fail gates.
 //!
 //! Runs BOTH engines over the SAME two corpora:
-//!   (a) agentguard — `gate::evaluate(cmd, &Config::default())`, where a `Block`
+//!   (a) apohara-agentguard — `gate::evaluate(cmd, &Config::default())`, where a `Block`
 //!       counts as "flagged" (and `Warn` on benign is reported separately);
 //!   (b) the naive fixed-list baseline (`common::naive_fixed_list`, the exact
 //!       hookify-class substring gate lifted from `inv_bash_scope.rs`).
 //!
 //! Metrics (raw counts + rates):
-//!   - agentguard FP  = benign commands that BLOCK (per spec, FP = benign Block)
-//!   - agentguard FN  = dangerous commands NOT Blocked
+//!   - apohara-agentguard FP  = benign commands that BLOCK (per spec, FP = benign Block)
+//!   - apohara-agentguard FN  = dangerous commands NOT Blocked
 //!   - naive FP       = benign commands the baseline flags
 //!   - naive FN       = dangerous commands the baseline misses
 //!   - Warn-on-benign = informational only (kept low, NOT a hard fail)
 //!
 //! PRE-COMMITTED HARD GATES (asserted, NOT tuned to the measured values):
-//!   1. agentguard FP_block == 0 on the benign corpus
-//!   2. agentguard FN       == 0 on the dangerous corpus
-//!   3. agentguard FN       <  naive FN  (the quantified differentiator)
+//!   1. apohara-agentguard FP_block == 0 on the benign corpus
+//!   2. apohara-agentguard FN       == 0 on the dangerous corpus
+//!   3. apohara-agentguard FN       <  naive FN  (the quantified differentiator)
 //!
 //! If any gate fails, this test fails. The corpus is NOT to be tuned to make it
 //! pass: a benign command that Blocks is a real bug (or a mis-curated entry), and
 //! a dangerous command that slips is a real false negative. A summary table is
 //! printed to stdout (run with `--nocapture`) for transcription into the README.
 
-use agentguard::config::Config;
-use agentguard::gate::evaluate;
-use agentguard::verdict::Tier;
+use apohara_agentguard::config::Config;
+use apohara_agentguard::gate::evaluate;
+use apohara_agentguard::verdict::Tier;
 
 mod common;
 use common::naive_fixed_list;
@@ -137,7 +137,7 @@ fn fp_fn_benchmark_vs_naive_baseline() {
     let b = measure(&benign);
     let d = measure(&dangerous);
 
-    // agentguard: FP = benign that BLOCK; FN = dangerous NOT blocked.
+    // apohara-agentguard: FP = benign that BLOCK; FN = dangerous NOT blocked.
     let ag_fp = b.ag_block;
     let ag_warn_benign = b.ag_warn;
     let ag_fn = d.n - d.ag_block;
@@ -147,8 +147,8 @@ fn fp_fn_benchmark_vs_naive_baseline() {
 
     // --- Summary table (raw counts + rates) for README transcription ---------
     println!();
-    println!("== FP/FN benchmark: agentguard vs naive fixed-list baseline ==");
-    println!("Corpus: {} benign, {} dangerous (same corpus, both engines; author-curated; dangerous.txt deliberately includes agentguard-targeted constructs).", b.n, d.n);
+    println!("== FP/FN benchmark: apohara-agentguard vs naive fixed-list baseline ==");
+    println!("Corpus: {} benign, {} dangerous (same corpus, both engines; author-curated; dangerous.txt deliberately includes apohara-agentguard-targeted constructs).", b.n, d.n);
     println!();
     println!(
         "| Engine     | Benign N | FP (block) | FP rate | Dangerous N | FN (miss) | FN rate |"
@@ -157,7 +157,7 @@ fn fp_fn_benchmark_vs_naive_baseline() {
         "|------------|---------:|-----------:|--------:|------------:|----------:|--------:|"
     );
     println!(
-        "| agentguard | {:>8} | {:>10} | {:>6.1}% | {:>11} | {:>9} | {:>6.1}% |",
+        "| apohara-agentguard | {:>8} | {:>10} | {:>6.1}% | {:>11} | {:>9} | {:>6.1}% |",
         b.n,
         ag_fp,
         rate(ag_fp, b.n),
@@ -176,7 +176,7 @@ fn fp_fn_benchmark_vs_naive_baseline() {
     );
     println!();
     println!(
-        "Informational (NOT a hard gate): agentguard Warn-on-benign = {} of {} ({:.1}%).",
+        "Informational (NOT a hard gate): apohara-agentguard Warn-on-benign = {} of {} ({:.1}%).",
         ag_warn_benign,
         b.n,
         rate(ag_warn_benign, b.n)
@@ -209,17 +209,17 @@ fn fp_fn_benchmark_vs_naive_baseline() {
     // --- PRE-COMMITTED, ABSOLUTE GATES ---------------------------------------
     assert_eq!(
         ag_fp, 0,
-        "GATE 1 FAILED: agentguard has {ag_fp} false positive(s) (benign that BLOCK). \
+        "GATE 1 FAILED: apohara-agentguard has {ag_fp} false positive(s) (benign that BLOCK). \
          A benign command blocking is a real bug or a mis-curated corpus entry — fix it honestly, do not relax the gate."
     );
     assert_eq!(
         ag_fn, 0,
-        "GATE 2 FAILED: agentguard has {ag_fn} false negative(s) (dangerous NOT blocked). \
+        "GATE 2 FAILED: apohara-agentguard has {ag_fn} false negative(s) (dangerous NOT blocked). \
          A dangerous command slipping is a real FN — fix the gate, do not relax the corpus."
     );
     assert!(
         ag_fn < naive_fn,
-        "GATE 3 FAILED: agentguard FN ({ag_fn}) must be strictly < naive baseline FN ({naive_fn}); \
+        "GATE 3 FAILED: apohara-agentguard FN ({ag_fn}) must be strictly < naive baseline FN ({naive_fn}); \
          the quantified differentiator does not hold."
     );
 }

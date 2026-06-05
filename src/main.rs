@@ -1,4 +1,4 @@
-//! agentguard CLI entry point.
+//! apohara-agentguard CLI entry point.
 //!
 //! Thin clap (derive) dispatch over the subcommands: `version`, `hook`,
 //! `sandbox`, `scan`, and `check`.
@@ -7,14 +7,14 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use agentguard::audit::{self, AuditRecord};
-use agentguard::config::Config;
-use agentguard::hook;
-use agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
+use apohara_agentguard::audit::{self, AuditRecord};
+use apohara_agentguard::config::Config;
+use apohara_agentguard::hook;
+use apohara_agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
 use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "agentguard", version, about)]
+#[command(name = "apohara-agentguard", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Print the agentguard version.
+    /// Print the apohara-agentguard version.
     Version,
     /// Run as a Claude Code hook (reads stdin JSON, emits a decision).
     Hook,
@@ -60,7 +60,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::Version => {
-            println!("agentguard {}", env!("CARGO_PKG_VERSION"));
+            println!("apohara-agentguard {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
         Command::Hook => run_hook(),
@@ -102,11 +102,11 @@ fn run_hook() -> ExitCode {
 fn run_scan() -> ExitCode {
     let mut content = String::new();
     if std::io::stdin().read_to_string(&mut content).is_err() {
-        eprintln!("agentguard scan: could not read stdin");
+        eprintln!("apohara-agentguard scan: could not read stdin");
         return ExitCode::from(2);
     }
-    let verdict = agentguard::firewall::scan_content(&content, &Default::default());
-    use agentguard::verdict::Tier;
+    let verdict = apohara_agentguard::firewall::scan_content(&content, &Default::default());
+    use apohara_agentguard::verdict::Tier;
     match verdict.tier {
         Tier::Allow => {
             println!("allow");
@@ -130,8 +130,8 @@ fn run_scan() -> ExitCode {
 /// custom_blocks, thresholds, and the disable kill-switch.
 fn run_check(args: CheckArgs) -> ExitCode {
     let config = Config::load_default_locations().unwrap_or_default();
-    let verdict = agentguard::gate::evaluate(&args.command, &config);
-    use agentguard::verdict::Tier;
+    let verdict = apohara_agentguard::gate::evaluate(&args.command, &config);
+    use apohara_agentguard::verdict::Tier;
     match verdict.tier {
         Tier::Allow => {
             println!("allow");
@@ -192,14 +192,14 @@ fn run_sandbox(args: SandboxArgs) -> ExitCode {
     let tier: PermissionTier = match args.tier.parse() {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("agentguard sandbox: {e}");
+            eprintln!("apohara-agentguard sandbox: {e}");
             return ExitCode::from(2);
         }
     };
 
     if matches!(tier, PermissionTier::DangerFullAccess) && !args.i_know_what_im_doing {
         eprintln!(
-            "agentguard sandbox: refusing danger_full_access without --i-know-what-im-doing \
+            "apohara-agentguard sandbox: refusing danger_full_access without --i-know-what-im-doing \
              (this tier installs NO seccomp filter and NO Landlock ruleset)"
         );
         return ExitCode::from(2);
@@ -217,7 +217,7 @@ fn run_sandbox(args: SandboxArgs) -> ExitCode {
         None => match std::env::current_dir() {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("agentguard sandbox: cannot determine current directory: {e}");
+                eprintln!("apohara-agentguard sandbox: cannot determine current directory: {e}");
                 return ExitCode::from(2);
             }
         },
@@ -235,14 +235,14 @@ fn run_sandbox(args: SandboxArgs) -> ExitCode {
             print!("{}", result.stdout);
             eprint!("{}", result.stderr);
             for v in &result.violations {
-                eprintln!("agentguard sandbox: violation: {v}");
+                eprintln!("apohara-agentguard sandbox: violation: {v}");
             }
             ExitCode::from(result.exit_code.clamp(0, 255) as u8)
         }
         Err(e) => {
             // Fail-closed: a setup error (incl. non-Linux Unavailable) must
             // never be mistaken for a successful unconfined run.
-            eprintln!("agentguard sandbox: REFUSED (fail-closed): {e}");
+            eprintln!("apohara-agentguard sandbox: REFUSED (fail-closed): {e}");
             ExitCode::from(70)
         }
     }

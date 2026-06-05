@@ -20,9 +20,9 @@
 
 #![no_main]
 
-use agentguard::config::Config;
-use agentguard::gate::{self, compound, normalize};
-use agentguard::verdict::Tier;
+use apohara_agentguard::config::Config;
+use apohara_agentguard::gate::{self, compound, normalize};
+use apohara_agentguard::verdict::Tier;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

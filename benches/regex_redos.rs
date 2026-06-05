@@ -21,8 +21,8 @@
 
 use std::time::{Duration, Instant};
 
-use agentguard::firewall::scan_content;
-use agentguard::verdict::Thresholds;
+use apohara_agentguard::firewall::scan_content;
+use apohara_agentguard::verdict::Thresholds;
 
 /// Generous absolute cap for a single ~2 KB scan. Release-mode cost is ~tens of
 /// microseconds; the unoptimized debug build (what `cargo test` runs) is ~50-100x

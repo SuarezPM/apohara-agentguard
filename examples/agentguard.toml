@@ -1,4 +1,4 @@
-# Example agentguard configuration.
+# Example apohara-agentguard configuration.
 #
 # Every key here is OPTIONAL: an absent file (or an empty one) uses the built-in
 # defaults. Each field carries `#[serde(default)]`, so you only set what you want
@@ -54,7 +54,7 @@ allow_list = []
 # warn_at = 5                  # default
 
 # --- disable (kill-switch) ---------------------------------------------------
-# All-or-nothing emergency kill-switch. When true, agentguard allows everything
+# All-or-nothing emergency kill-switch. When true, apohara-agentguard allows everything
 # and gets out of the way (gate + path-guard + firewall all off). Equivalent to
 # the AGENTGUARD_DISABLE=1 environment variable (read from the HOOK process env,
 # so a malicious command cannot self-disarm the gate). Default false.

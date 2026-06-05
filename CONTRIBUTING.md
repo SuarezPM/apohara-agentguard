@@ -1,6 +1,6 @@
-# Contributing to agentguard
+# Contributing to apohara-agentguard
 
-Thanks for considering a contribution. agentguard is a security tool, so two
+Thanks for considering a contribution. apohara-agentguard is a security tool, so two
 rules are non-negotiable: **the build stays green** and **every claim is
 code-verifiable** (no doc or README assertion ships without a test that pins it).
 

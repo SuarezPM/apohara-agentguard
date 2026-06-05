@@ -1,4 +1,4 @@
-# cargo-deny configuration for agentguard.
+# cargo-deny configuration for apohara-agentguard.
 #
 # The licenses gate is the load-bearing part for v0.1: CI runs
 # `cargo deny check licenses` and FAILS on any dependency license outside the

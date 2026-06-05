@@ -3,7 +3,7 @@
 //! Topology:
 //!
 //! ```text
-//!  parent (agentguard)
+//!  parent (apohara-agentguard)
 //!    | pipes: stdout / stderr / exec-error
 //!    | fork() ----------------------------------------+
 //!    | read pipes + waitpid(middle)                   v

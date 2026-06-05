@@ -350,7 +350,7 @@ fn build_verdict(tier: Tier, hit: &Hit) -> Verdict {
     let feedback = match tier {
         Tier::Block => format!(
             "This command was blocked because the leg `{}` matches {}. \
-             If this is intentional, add it to the agentguard allow-list.",
+             If this is intentional, add it to the apohara-agentguard allow-list.",
             truncate(&hit.leg, 200),
             hit.label
         ),

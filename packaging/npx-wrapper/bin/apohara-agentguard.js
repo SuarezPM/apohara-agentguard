@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 //
-// agentguard npx launcher.
+// apohara-agentguard npx launcher.
 //
-// agentguard is a security tool, so this launcher NEVER runs an unverified
+// apohara-agentguard is a security tool, so this launcher NEVER runs an unverified
 // binary. It resolves the correct release artifact by platform x arch x libc,
 // downloads it, verifies its SHA256 against a pinned manifest, and only then
 // execs it — forwarding argv and stdio unchanged. A checksum mismatch aborts.
@@ -32,7 +32,7 @@ const VERSION = "0.1.0";
 // Base URL for release artifacts. Overridable for testing / mirrors.
 const BASE_URL =
   process.env.AGENTGUARD_DOWNLOAD_BASE ||
-  `https://github.com/SuarezPM/agentguard/releases/download/v${VERSION}`;
+  `https://github.com/SuarezPM/apohara-agentguard/releases/download/v${VERSION}`;
 
 // SHA256 manifest, keyed by Rust target triple. These are the canonical hashes
 // of the v0.1.0 release artifacts; they are filled in by the release workflow
@@ -49,7 +49,7 @@ const SHA256 = {
 };
 
 function fail(msg) {
-  process.stderr.write(`agentguard: ${msg}\n`);
+  process.stderr.write(`apohara-agentguard: ${msg}\n`);
   process.exit(1);
 }
 
@@ -89,23 +89,23 @@ function resolveTarget() {
     if (isMusl()) {
       fail(
         "musl libc is not yet supported in v0.1. Install from source instead:\n" +
-          "  cargo install --git https://github.com/SuarezPM/agentguard --locked\n" +
+          "  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked\n" +
           "(musl release binaries are planned for v0.2.)"
       );
     }
-    if (arch === "x64") return { triple: "x86_64-unknown-linux-gnu", bin: "agentguard" };
-    if (arch === "arm64") return { triple: "aarch64-unknown-linux-gnu", bin: "agentguard" };
+    if (arch === "x64") return { triple: "x86_64-unknown-linux-gnu", bin: "apohara-agentguard" };
+    if (arch === "arm64") return { triple: "aarch64-unknown-linux-gnu", bin: "apohara-agentguard" };
     fail(`unsupported Linux architecture: ${arch} (supported: x64, arm64)`);
   }
 
   if (platform === "darwin") {
-    if (arch === "x64") return { triple: "x86_64-apple-darwin", bin: "agentguard" };
-    if (arch === "arm64") return { triple: "aarch64-apple-darwin", bin: "agentguard" };
+    if (arch === "x64") return { triple: "x86_64-apple-darwin", bin: "apohara-agentguard" };
+    if (arch === "arm64") return { triple: "aarch64-apple-darwin", bin: "apohara-agentguard" };
     fail(`unsupported macOS architecture: ${arch} (supported: x64, arm64)`);
   }
 
   if (platform === "win32") {
-    if (arch === "x64") return { triple: "x86_64-pc-windows-msvc", bin: "agentguard.exe" };
+    if (arch === "x64") return { triple: "x86_64-pc-windows-msvc", bin: "apohara-agentguard.exe" };
     fail(`unsupported Windows architecture: ${arch} (supported: x64)`);
   }
 
@@ -122,7 +122,7 @@ function download(url, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     if (redirectsLeft < 0) return reject(new Error("too many redirects"));
     https
-      .get(url, { headers: { "user-agent": `agentguard-npx/${VERSION}` } }, (res) => {
+      .get(url, { headers: { "user-agent": `apohara-agentguard-npx/${VERSION}` } }, (res) => {
         const { statusCode, headers } = res;
         if (statusCode >= 300 && statusCode < 400 && headers.location) {
           res.resume();
@@ -155,9 +155,9 @@ function sha256(buf) {
 }
 
 // Cache the verified binary under the OS temp dir keyed by version + triple, so
-// repeated `npx agentguard` invocations don't re-download.
+// repeated `npx apohara-agentguard` invocations don't re-download.
 function cachePath(triple, bin) {
-  const dir = path.join(os.tmpdir(), `agentguard-${VERSION}-${triple}`);
+  const dir = path.join(os.tmpdir(), `apohara-agentguard-${VERSION}-${triple}`);
   return { dir, file: path.join(dir, bin) };
 }
 
@@ -168,7 +168,7 @@ async function ensureBinary() {
     fail(
       `no pinned SHA256 for target ${triple}. This build of the launcher was\n` +
         "published without a release manifest. Install from source instead:\n" +
-        "  cargo install --git https://github.com/SuarezPM/agentguard --locked"
+        "  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked"
     );
   }
 
@@ -182,7 +182,7 @@ async function ensureBinary() {
     }
   }
 
-  const url = `${BASE_URL}/agentguard-${triple}${bin.endsWith(".exe") ? ".exe" : ""}`;
+  const url = `${BASE_URL}/apohara-agentguard-${triple}${bin.endsWith(".exe") ? ".exe" : ""}`;
   let buf;
   try {
     buf = await download(url);
@@ -218,7 +218,7 @@ async function main() {
 }
 
 // Only run when invoked as a script. When `require`d (e.g. `node -e
-// "require('./bin/agentguard.js')"` in CI smoke tests), do not auto-execute —
+// "require('./bin/apohara-agentguard.js')"` in CI smoke tests), do not auto-execute —
 // just expose the resolver for inspection.
 if (require.main === module) {
   main().catch((e) => fail(e && e.message ? e.message : String(e)));

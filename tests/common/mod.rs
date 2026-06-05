@@ -49,7 +49,7 @@ impl Drop for TempDir {
 /// (`inv_bash_scope.rs:64-110`): split on separators, then substring-match each
 /// leg against a fixed 12-item list. No variable expansion, no base64 decode,
 /// and the `| sh` entries are dead after splitting (the pipe is gone). This is
-/// the hookify-class baseline agentguard is measured against.
+/// the hookify-class baseline apohara-agentguard is measured against.
 ///
 /// Returns `true` if the legacy gate would flag the command (Unsafe), `false`
 /// for Safe. Shared by `headline_bypass.rs` (the side-by-side contrast) and

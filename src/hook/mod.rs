@@ -2,7 +2,7 @@
 //!
 //! [`run`] is the single testable seam: it takes the raw stdin JSON plus a
 //! [`Config`] and returns `(optional stdout JSON, exit code)`. The CLI
-//! (`agentguard hook`) is a thin wrapper that reads stdin, calls [`run`], prints
+//! (`apohara-agentguard hook`) is a thin wrapper that reads stdin, calls [`run`], prints
 //! the JSON, and exits with the code.
 //!
 //! Dispatch:

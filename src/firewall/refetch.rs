@@ -22,7 +22,7 @@
 //! [`MAX_FETCH_BYTES`] and the firewall scans that prefix.
 //!
 //! ## Honesty note (README / US-009)
-//! WebSearch re-run is **best-effort**: agentguard cannot reproduce Claude's
+//! WebSearch re-run is **best-effort**: apohara-agentguard cannot reproduce Claude's
 //! exact search backend, so [`UreqSource`] performs a plain GET against the
 //! target query URL. The load-bearing guarantees here are the per-surface
 //! posture and the SSRF guard, not byte-identical search results.

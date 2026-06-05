@@ -7,7 +7,7 @@
 //! `additionalContext` is IGNORED. PreToolUse uses
 //! `permissionDecision` (allow/deny/ask) + `permissionDecisionReason`; PostToolUse
 //! cannot block. UserPromptSubmit can block, but exit 2 ERASES the prompt, so
-//! agentguard only ever WARNs there (additionalContext + exit 0).
+//! apohara-agentguard only ever WARNs there (additionalContext + exit 0).
 //!
 //! Output is ALWAYS serde-serialized — never string-concatenated JSON — and every
 //! free-text field is length-capped at [`MAX_CONTEXT_BYTES`] so a runaway reason
@@ -32,7 +32,7 @@ const ELLIPSIS: &str = "…";
 
 /// Permissive view of the hook stdin JSON.
 ///
-/// Only the fields agentguard dispatches on are modeled; everything else
+/// Only the fields apohara-agentguard dispatches on are modeled; everything else
 /// (`session_id`, `cwd`, `permission_mode`, …) is ignored via
 /// `#[serde(default)]` + the absence of `deny_unknown_fields`, so a schema
 /// addition upstream can never break parsing.
@@ -198,7 +198,7 @@ pub fn emit(event: &str, verdict: &Verdict) -> (Option<String>, i32) {
 ///
 /// Only `PreToolUse` blocks a tool. `PostToolUse` runs after the tool (cannot
 /// block) and `UserPromptSubmit` exit-2 erases the prompt, so neither is a
-/// blocking surface for agentguard — both downgrade to WARN.
+/// blocking surface for apohara-agentguard — both downgrade to WARN.
 fn is_blocking_event(event: &str) -> bool {
     event == "PreToolUse"
 }

@@ -6,7 +6,7 @@
 
 #![cfg(target_os = "linux")]
 
-use agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
+use apohara_agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
 use std::path::PathBuf;
 
 mod common;
@@ -16,7 +16,7 @@ fn run(
     tier: PermissionTier,
     root: &std::path::Path,
     argv: &[&str],
-) -> agentguard::sandbox::SandboxResult {
+) -> apohara_agentguard::sandbox::SandboxResult {
     let req = SandboxRequest {
         command: argv.iter().map(|s| s.to_string()).collect(),
         workspace_root: root.to_path_buf(),

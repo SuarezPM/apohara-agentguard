@@ -5,10 +5,10 @@
 //! `$HOME` dependency) and additionally exercise the full `hook::run` PreToolUse
 //! path for the `.env` read case to prove the tool-level deny.
 
-use agentguard::config::Config;
-use agentguard::hook::pathguard::check_path;
-use agentguard::hook::run;
-use agentguard::verdict::Tier;
+use apohara_agentguard::config::Config;
+use apohara_agentguard::hook::pathguard::check_path;
+use apohara_agentguard::hook::run;
+use apohara_agentguard::verdict::Tier;
 use serde_json::Value;
 
 #[test]

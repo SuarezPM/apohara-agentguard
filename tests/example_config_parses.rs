@@ -3,7 +3,7 @@
 //! has all overrides commented out, so it parses to the defaults — but that
 //! still exercises the `[audit]` section and every top-level key serde-wise.
 
-use agentguard::config::Config;
+use apohara_agentguard::config::Config;
 
 #[test]
 fn example_config_parses_to_a_valid_config() {

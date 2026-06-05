@@ -1,4 +1,4 @@
-//! agentguard library crate.
+//! apohara-agentguard library crate.
 //!
 //! Public module surface for the CLI binary and integration tests.
 

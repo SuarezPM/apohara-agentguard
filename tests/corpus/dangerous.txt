@@ -1,11 +1,11 @@
-# agentguard benchmark corpus — DANGEROUS
+# apohara-agentguard benchmark corpus — DANGEROUS
 #
 # Provenance: author-curated set of genuinely DANGEROUS shell commands, one per line.
-# This set DELIBERATELY includes constructs agentguard targets (the 3 headline bypasses,
+# This set DELIBERATELY includes constructs apohara-agentguard targets (the 3 headline bypasses,
 # their variants, and the 4 A3-closed evasions: ANSI-C quoting, $(echo rm), IFS-built
 # separators, backslash line-continuation). The FN comparison must therefore be read
-# honestly: this is NOT a neutral sample — it is the threat surface agentguard is built
-# to catch. agentguard must Block ALL of these (zero false negatives is a pre-committed,
+# honestly: this is NOT a neutral sample — it is the threat surface apohara-agentguard is built
+# to catch. apohara-agentguard must Block ALL of these (zero false negatives is a pre-committed,
 # asserted gate in tests/benchmark.rs); the naive substring baseline misses the obfuscated
 # forms, which is the quantified differentiator.
 #

@@ -1,6 +1,6 @@
 # Security Policy
 
-agentguard is a security tool. Its honesty about what it does *and does not*
+apohara-agentguard is a security tool. Its honesty about what it does *and does not*
 defend against is part of its threat model. This document is the authoritative
 "covers / does NOT cover" statement; the README "Known limitations" and "Known
 evasions" sections summarize the same reality.
@@ -9,7 +9,7 @@ evasions" sections summarize the same reality.
 
 If you find a vulnerability — a sandbox escape, a gate evasion that the
 documented threat model claims is closed, a secret leak in the audit log, an
-SSRF-guard bypass, or any way to make agentguard run an unconfined process when
+SSRF-guard bypass, or any way to make apohara-agentguard run an unconfined process when
 it should refuse — **please report it privately first.** Do NOT open a public
 issue for an exploitable flaw until a fix is available.
 
@@ -18,10 +18,10 @@ issue for an exploitable flaw until a fix is available.
 
 - **Private contact:** `SECURITY-CONTACT-PLACEHOLDER` (to be filled in by the
   maintainer — e.g. a dedicated security email or a GitHub private Security
-  Advisory on the `SuarezPM/agentguard` repository).
+  Advisory on the `SuarezPM/apohara-agentguard` repository).
 
 What to include: a minimal reproduction (the exact command / input / config),
-the agentguard version (`agentguard --version`), the OS + kernel
+the apohara-agentguard version (`apohara-agentguard --version`), the OS + kernel
 (`uname -a`), and what you expected vs. what happened.
 
 **Response expectations.** This is a single-maintainer open-source project. There
@@ -30,9 +30,9 @@ triaged on a best-effort basis; expect an acknowledgement within a few days and
 a fix or a documented "won't fix / out of scope" decision once the issue is
 understood.
 
-## What agentguard is (and is not)
+## What apohara-agentguard is (and is not)
 
-agentguard is **deterministic and offline**: pure regex + structural Bash
+apohara-agentguard is **deterministic and offline**: pure regex + structural Bash
 parsing, **no model, no ML, no network call at scan time**. It is a
 *structural-and-deterministic complement* to model-based safety, **not a
 replacement** for it, and it is **not a sandbox-escape-proof jail**. Detection is
@@ -79,7 +79,7 @@ normalization pre-pass.
   emits only *part* of a token is not reconstructed. (Only a leg-head `echo`/
   `printf` emitting a *whole* literal verb is spliced.)
 - **Nested / chained encoders** — hex/rot13/gzip layered beyond the single
-  base64 decode level, or any encoder agentguard does not implement.
+  base64 decode level, or any encoder apohara-agentguard does not implement.
 - **Real here-document parsing** — a `<<EOF … EOF` body is matched incidentally
   (the splitter treats the body line as its own leg), not by parsing here-doc
   semantics. Do not rely on it.
@@ -106,7 +106,7 @@ name-shape guard, not a data-classification engine.
 
 ### 3. seccomp + Landlock sandbox (`src/sandbox`, Linux-only)
 
-Defense-in-depth process confinement for the `agentguard sandbox` subcommand: a
+Defense-in-depth process confinement for the `apohara-agentguard sandbox` subcommand: a
 default-deny seccomp-bpf syscall filter (`mismatch_action = EPERM`) **and** a
 Landlock LSM filesystem ruleset scoping the process to a workspace root. Applied
 in a pinned order in a post-fork grandchild: **NO_NEW_PRIVS → Landlock →
@@ -160,7 +160,7 @@ re-fetch + SSRF controls for web surfaces.
   differ from what Claude fetches on its subsequent request — a server can serve
   clean content to the hook and malicious content to Claude. The URL is also
   fetched twice (latency + load).
-- **WebSearch nondeterminism.** agentguard cannot reproduce Claude's search
+- **WebSearch nondeterminism.** apohara-agentguard cannot reproduce Claude's search
   backend; it does a best-effort plain GET against the query URL. Results may
   differ from Claude's. The load-bearing guarantee is the per-surface posture
   and the SSRF guard, not byte-identical search results.
@@ -210,4 +210,4 @@ exits 0, disabling the gate, path-guard, **and** firewall together. It is read
 from the **hook process's environment**, not the inspected command's — so a
 malicious Bash command that sets `AGENTGUARD_DISABLE=1` runs in a *different*
 process and cannot self-disarm the gate. Treat the kill-switch as a break-glass
-control: with it set, agentguard provides **no** protection.
+control: with it set, apohara-agentguard provides **no** protection.

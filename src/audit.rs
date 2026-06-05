@@ -127,14 +127,17 @@ pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
     let mut line = match serde_json::to_string(&rec) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("agentguard audit: failed to serialize record: {e}");
+            eprintln!("apohara-agentguard audit: failed to serialize record: {e}");
             return;
         }
     };
     line.push('\n');
 
     if let Err(e) = append_line(path, line.as_bytes()) {
-        eprintln!("agentguard audit: write to {} failed: {e}", path.display());
+        eprintln!(
+            "apohara-agentguard audit: write to {} failed: {e}",
+            path.display()
+        );
     }
 }
 

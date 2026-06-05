@@ -1,18 +1,18 @@
 [package]
-name = "agentguard"
+name = "apohara-agentguard"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 description = "Deterministic, offline, no-model safety hook + local seccomp+Landlock sandbox + input firewall for Claude Code."
-repository = "https://github.com/SuarezPM/agentguard"
+repository = "https://github.com/SuarezPM/apohara-agentguard"
 
 [lib]
-name = "agentguard"
+name = "apohara_agentguard"
 path = "src/lib.rs"
 
 [[bin]]
-name = "agentguard"
+name = "apohara-agentguard"
 path = "src/main.rs"
 
 [dependencies]

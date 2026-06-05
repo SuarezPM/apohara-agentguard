@@ -7,7 +7,7 @@ use common::TempDir;
 use std::process::Command;
 
 fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_agentguard")
+    env!("CARGO_BIN_EXE_apohara-agentguard")
 }
 
 #[test]
@@ -28,7 +28,7 @@ fn danger_full_access_prints_loud_warning() {
             "hi",
         ])
         .output()
-        .expect("run agentguard sandbox");
+        .expect("run apohara-agentguard sandbox");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -60,7 +60,7 @@ fn danger_without_flag_still_refuses() {
             "hi",
         ])
         .output()
-        .expect("run agentguard sandbox");
+        .expect("run apohara-agentguard sandbox");
 
     assert_eq!(
         out.status.code(),
@@ -102,7 +102,7 @@ fn danger_invocation_is_audited_when_enabled() {
             "hi",
         ])
         .output()
-        .expect("run agentguard sandbox");
+        .expect("run apohara-agentguard sandbox");
     assert!(
         out.status.success() || out.status.code() == Some(0),
         "the echo command should succeed; stderr=\n{}",

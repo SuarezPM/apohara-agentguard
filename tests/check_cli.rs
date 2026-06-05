@@ -1,7 +1,7 @@
-//! Smoke test for the `agentguard check "<command>"` subcommand.
+//! Smoke test for the `apohara-agentguard check "<command>"` subcommand.
 //!
 //! Invokes the compiled binary (Cargo injects its path as
-//! `CARGO_BIN_EXE_agentguard` for integration tests) and asserts the exit code
+//! `CARGO_BIN_EXE_apohara-agentguard` for integration tests) and asserts the exit code
 //! contract: 2 on a Block, 0 otherwise. Run from a fresh temp cwd so a stray
 //! `./agentguard.toml` in the repo cannot perturb the verdict.
 
@@ -23,13 +23,13 @@ fn temp_cwd() -> PathBuf {
 
 fn run_check(command: &str) -> std::process::Output {
     let cwd = temp_cwd();
-    let out = Command::new(env!("CARGO_BIN_EXE_agentguard"))
+    let out = Command::new(env!("CARGO_BIN_EXE_apohara-agentguard"))
         .args(["check", command])
         .current_dir(&cwd)
         // Make sure the env kill-switch isn't inherited from the test runner.
         .env_remove("AGENTGUARD_DISABLE")
         .output()
-        .expect("run agentguard check");
+        .expect("run apohara-agentguard check");
     let _ = std::fs::remove_dir_all(&cwd);
     out
 }

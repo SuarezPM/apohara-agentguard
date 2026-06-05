@@ -1,4 +1,4 @@
-# cargo-about configuration for agentguard.
+# cargo-about configuration for apohara-agentguard.
 #
 # `cargo about generate` walks the dependency tree and emits THIRD-PARTY-LICENSES
 # from the template. The accepted-license list mirrors deny.toml's allowlist so

@@ -10,7 +10,7 @@
 
 #![cfg(not(target_os = "linux"))]
 
-use agentguard::sandbox::{PermissionTier, SandboxError, SandboxRequest, SandboxRunner};
+use apohara_agentguard::sandbox::{PermissionTier, SandboxError, SandboxRequest, SandboxRunner};
 use std::path::PathBuf;
 
 #[test]

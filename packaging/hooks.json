@@ -1,5 +1,5 @@
 {
-  "description": "agentguard: anti-bypass command gate, secret-path guard, and deterministic injection firewall wired to the `agentguard hook` binary across all relevant tool surfaces.",
+  "description": "apohara-agentguard: anti-bypass command gate, secret-path guard, and deterministic injection firewall wired to the `apohara-agentguard hook` binary across all relevant tool surfaces.",
   "hooks": {
     "PreToolUse": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentguard",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/apohara-agentguard",
             "args": ["hook"],
             "timeout": 20
           }
@@ -20,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentguard",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/apohara-agentguard",
             "args": ["hook"],
             "timeout": 20
           }
@@ -32,7 +32,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/agentguard",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/apohara-agentguard",
             "args": ["hook"],
             "timeout": 20
           }

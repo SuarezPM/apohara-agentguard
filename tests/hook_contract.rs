@@ -1,9 +1,9 @@
 //! Hook contract integration tests: the nested `hookSpecificOutput` shape per
 //! tier, the kill-switch, and the length-cap — driven through `hook::run`.
 
-use agentguard::config::Config;
-use agentguard::hook::contract::MAX_CONTEXT_BYTES;
-use agentguard::hook::run;
+use apohara_agentguard::config::Config;
+use apohara_agentguard::hook::contract::MAX_CONTEXT_BYTES;
+use apohara_agentguard::hook::run;
 use serde_json::Value;
 
 /// Build a PreToolUse + Bash stdin JSON for `cmd`.

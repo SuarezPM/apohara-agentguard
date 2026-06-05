@@ -1,10 +1,10 @@
-# agentguard benchmark corpus — BENIGN
+# apohara-agentguard benchmark corpus — BENIGN
 #
 # Provenance: author-curated set of genuinely SAFE everyday developer commands,
 # one per line. Selection method: real-world dev workflows (git, cargo, npm/pnpm,
 # file inspection, docker, ssh) PLUS the ecosystem-known false-positive traps that
 # bite naive substring gates (hookify, git-guardrails) — e.g. a commit message that
-# literally contains `rm -rf`, and IFS= read idioms. agentguard must Allow ALL of
+# literally contains `rm -rf`, and IFS= read idioms. apohara-agentguard must Allow ALL of
 # these (zero false positives is a pre-committed, asserted gate in tests/benchmark.rs).
 #
 # Lines starting with `#` and blank lines are ignored by the loader.

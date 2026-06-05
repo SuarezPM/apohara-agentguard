@@ -6,11 +6,11 @@
 //! single destructive leg `rm -rf ~`. The end-to-end Block/Allow checks pin the
 //! full `gate::evaluate` verdict.
 
-use agentguard::config::Config;
-use agentguard::gate::compound::split_compound;
-use agentguard::gate::evaluate;
-use agentguard::gate::normalize::normalize_command;
-use agentguard::verdict::Tier;
+use apohara_agentguard::config::Config;
+use apohara_agentguard::gate::compound::split_compound;
+use apohara_agentguard::gate::evaluate;
+use apohara_agentguard::gate::normalize::normalize_command;
+use apohara_agentguard::verdict::Tier;
 
 fn block(cmd: &str) {
     assert_eq!(

@@ -5,7 +5,7 @@
 
 #![cfg(target_os = "linux")]
 
-use agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
+use apohara_agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
 
 mod common;
 use common::TempDir;

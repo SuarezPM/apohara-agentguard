@@ -4,8 +4,8 @@
 //! effect on the Bash gate path. Passing the config directly keeps the tests
 //! hermetic (no stray `./agentguard.toml` from default-location lookup).
 
-use agentguard::config::{Config, CustomBlock};
-use agentguard::hook::run;
+use apohara_agentguard::config::{Config, CustomBlock};
+use apohara_agentguard::hook::run;
 use serde_json::Value;
 
 /// Build a PreToolUse + Bash stdin JSON for `cmd`.

@@ -78,15 +78,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          src="target/${{ matrix.target }}/release/agentguard${{ matrix.ext }}"
-          dst="dist/agentguard-${{ matrix.target }}${{ matrix.ext }}"
+          src="target/${{ matrix.target }}/release/apohara-agentguard${{ matrix.ext }}"
+          dst="dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
           cp "$src" "$dst"
 
       - name: Compute SHA256
         shell: bash
         run: |
           cd dist
-          f="agentguard-${{ matrix.target }}${{ matrix.ext }}"
+          f="apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
           if command -v sha256sum >/dev/null 2>&1; then
             sha256sum "$f" > "$f.sha256"
           else
@@ -96,7 +96,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: agentguard-${{ matrix.target }}
+          name: apohara-agentguard-${{ matrix.target }}
           path: dist/*
 
   manifest:
@@ -113,11 +113,11 @@ jobs:
         run: |
           mkdir -p release
           # Collect every binary + its per-file .sha256 into one manifest.
-          find artifacts -type f -name 'agentguard-*' ! -name '*.sha256' -exec cp {} release/ \;
+          find artifacts -type f -name 'apohara-agentguard-*' ! -name '*.sha256' -exec cp {} release/ \;
           cp -f artifacts/THIRD-PARTY-LICENSES/THIRD-PARTY-LICENSES release/ || true
           cd release
           : > SHA256SUMS
-          for f in agentguard-*; do
+          for f in apohara-agentguard-*; do
             if command -v sha256sum >/dev/null 2>&1; then
               sha256sum "$f" >> SHA256SUMS
             else
@@ -129,5 +129,5 @@ jobs:
       - name: Upload release bundle (for maintainer review — NOT auto-published)
         uses: actions/upload-artifact@v4
         with:
-          name: agentguard-v0.1.0-release
+          name: apohara-agentguard-v0.1.0-release
           path: release/*

@@ -8,7 +8,7 @@
 
 #![cfg(target_os = "linux")]
 
-use agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxResult, SandboxRunner};
+use apohara_agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxResult, SandboxRunner};
 use std::path::{Path, PathBuf};
 
 mod common;

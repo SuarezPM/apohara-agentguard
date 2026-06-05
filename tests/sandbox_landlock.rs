@@ -7,7 +7,7 @@
 
 #![cfg(target_os = "linux")]
 
-use agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxResult, SandboxRunner};
+use apohara_agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxResult, SandboxRunner};
 use std::os::fd::AsRawFd;
 use std::path::Path;
 

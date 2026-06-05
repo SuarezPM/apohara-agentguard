@@ -1,12 +1,12 @@
 {
-  "name": "agentguard",
+  "name": "apohara-agentguard",
   "version": "0.1.0",
-  "description": "Deterministic, offline, no-model safety hook + local seccomp+Landlock sandbox + input firewall for Claude Code. This npm package is a thin launcher that downloads and SHA256-verifies the platform-specific agentguard release binary.",
+  "description": "Deterministic, offline, no-model safety hook + local seccomp+Landlock sandbox + input firewall for Claude Code. This npm package is a thin launcher that downloads and SHA256-verifies the platform-specific apohara-agentguard release binary.",
   "license": "(MIT OR Apache-2.0)",
-  "homepage": "https://github.com/SuarezPM/agentguard",
+  "homepage": "https://github.com/SuarezPM/apohara-agentguard",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/SuarezPM/agentguard.git"
+    "url": "git+https://github.com/SuarezPM/apohara-agentguard.git"
   },
   "keywords": [
     "claude-code",
@@ -18,10 +18,10 @@
     "firewall"
   ],
   "bin": {
-    "agentguard": "bin/agentguard.js"
+    "apohara-agentguard": "bin/apohara-agentguard.js"
   },
   "files": [
-    "bin/agentguard.js"
+    "bin/apohara-agentguard.js"
   ],
   "engines": {
     "node": ">=18"
