@@ -1,4 +1,4 @@
-//! TODO(US-005): cfg(target_os="linux") — orchestrates namespace+seccomp+Landlock.
+//! Linux-only sandbox internals: orchestrates namespace + seccomp + Landlock.
 
 pub mod landlock;
 pub mod namespace;

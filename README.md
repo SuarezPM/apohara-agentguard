@@ -158,15 +158,19 @@ The command gate's soundness is parser-bounded. The following Bash obfuscation
 forms are **not caught in v0.1** and are honestly out of scope:
 
 - **ANSI-C quoting** — `$'\x72\x6d'` (hex/octal escapes that decode to `rm`).
-- **Parameter expansion with defaults** — `${x:-rm}` / `${x:=rm}`.
 - **Command-substitution-produced verbs** — `$(echo rm) -rf ~`.
-- **Here-documents** — payloads fed via `<<EOF ... EOF`.
 - **IFS reassignment** — rebuilding a command by manipulating the field separator.
 - **Backslash line-continuation** — splitting a verb across `\`-continued lines.
 
 These are tracked for a future version (see the plan's deferred items). Variable
 assignment (`x=rm; $x ...`) and single-level base64 decode-and-rescan **are**
 caught.
+
+Two further forms happen to be caught **incidentally** (not by deliberate
+construct handling, so do not rely on them): parameter expansion with defaults
+(`${x:-rm}` / `${x:=rm}`) blocks because the literal `rm` survives in the leg and
+the destructive taxonomy matches it; here-documents (`<<EOF ... EOF`) block
+because the compound splitter treats the body line as its own leg.
 
 ## Disabling / kill-switch
 

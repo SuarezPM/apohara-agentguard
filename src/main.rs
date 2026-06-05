@@ -1,7 +1,7 @@
 //! agentguard CLI entry point.
 //!
-//! Thin clap (derive) dispatch. Subcommands are stubs filled in by later
-//! stories; only `version` is wired for the US-000 scaffold.
+//! Thin clap (derive) dispatch over the subcommands: `version`, `hook`,
+//! `sandbox`, `scan`, and `check`.
 
 use std::io::Read as _;
 use std::path::PathBuf;

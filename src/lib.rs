@@ -1,7 +1,6 @@
 //! agentguard library crate.
 //!
-//! Public module surface for the CLI binary, integration tests, and a future
-//! MCP form. Modules are compiling stubs filled in by later stories.
+//! Public module surface for the CLI binary and integration tests.
 
 pub mod config;
 pub mod firewall;

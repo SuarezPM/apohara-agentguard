@@ -148,8 +148,7 @@ fn has_unresolved_decode(leg: &str) -> bool {
 /// substring.
 fn custom_block_matches(cb: &CustomBlock, leg: &str) -> bool {
     if cb.pattern.contains('*') {
-        // Reuse the same wildcard semantics as the allow-list via a temporary
-        // single-entry allow check is overkill; do a simple contains-of-parts.
+        // `*`-glob: every non-empty part must appear in order (contains-of-parts).
         let parts: Vec<&str> = cb.pattern.split('*').filter(|p| !p.is_empty()).collect();
         let mut cursor = 0usize;
         for part in parts {
