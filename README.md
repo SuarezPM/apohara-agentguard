@@ -1,21 +1,79 @@
 # agentguard
 
-**A deterministic, offline safety layer for Claude Code.** One self-contained
-Rust binary that ships as a Claude Code plugin and combines three independent
-defenses:
+**Stop AI coding agents from running obfuscated destructive commands — and
+isolate the ones that do run.**
 
-1. **Anti-bypass command gate** — a structural Bash compound parser with
-   variable-assignment resolution and base64 decode-and-rescan, plus a broad
-   destructive-operation taxonomy. It blocks obfuscated destructive commands that
-   naive fixed-list regex gates let through.
-2. **Local seccomp + Landlock sandbox** — defense-in-depth process confinement on
-   Linux: a default-deny seccomp-bpf syscall filter (network blocked, `EPERM`
-   fail-closed) **and** real Landlock LSM filesystem confinement to a workspace
-   root. (Linux-only — see *Known limitations*.)
-3. **Deterministic injection firewall** — 78 DJL rules + 24 OWASP ASI patterns
-   ported to Rust `regex`, scanning prompts, fetched web content, read files, and
+<!-- Badges (human-only: wire CI / crates.io / marketplace post-publish; the
+     license badge is real). -->
+<!-- TODO(Pablo): enable these once the repo is published. -->
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+<!-- [![CI](https://github.com/SuarezPM/agentguard/actions/workflows/ci.yml/badge.svg)](https://github.com/SuarezPM/agentguard/actions) -->
+<!-- [![crates.io](https://img.shields.io/crates/v/agentguard.svg)](https://crates.io/crates/agentguard) -->
+<!-- [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-orange.svg)](https://github.com/SuarezPM/agentguard) -->
+
+**The problem.** Coding agents will happily run a shell command an attacker (or a
+prompt injection) smuggled past their safety check. The common defenses both
+fail: **regex blocklists are defeated by trivial obfuscation** (`x=rm; $x -rf ~`,
+base64, `$(echo rm)`), and the tools that *do* pattern-match still **don't
+isolate** the process — a "blocked" command that slips through has full host
+access.
+
+agentguard is one self-contained Rust binary (a Claude Code plugin) with three
+capabilities:
+
+1. **Catch obfuscated destructive commands** — a structural Bash compound parser
+   with variable-assignment resolution, base64 decode-and-rescan, a bounded
+   normalization pre-pass, and a verb-aware destructive taxonomy. It blocks
+   bypasses naive fixed-list regex gates let through.
+2. **Isolate what runs** — a local seccomp + Landlock sandbox on Linux:
+   default-deny seccomp-bpf (network denied by omission, `EPERM` fail-closed)
+   **and** Landlock LSM filesystem confinement to a workspace root. (Linux-only —
+   see *Known limitations*.)
+3. **Scan untrusted content** — a deterministic injection firewall: 78 DJL rules
+   + 24 OWASP ASI patterns over prompts, fetched web content, read files, and
    command output for prompt-injection / exfiltration / harmful-content
    signatures.
+
+## See it
+
+The three headline bypasses, side-by-side — a naive regex blocklist (the
+hookify-class fixed substring list) **lets them through**; agentguard **blocks**
+all three:
+
+```text
+  command                              naive regex     agentguard
+  -----------------------------------  --------------  -----------
+  x=rm; $x -rf ~                       PASS (allow)    BLOCK   (variable alias resolved)
+  echo cm0gLXJmIH4K | base64 -d | sh   PASS (allow)    BLOCK   (base64 decoded + rescanned)
+  find . -delete                       PASS (allow)    BLOCK   (no `rm` token to key on)
+```
+
+<!-- TODO(Pablo): demo GIF here -->
+
+## Benchmark: agentguard vs a naive regex baseline
+
+Both engines run over the **same** corpus (73 benign + 31 dangerous commands):
+
+| Engine | Benign (FP) | FP rate | Dangerous (FN) | FN rate |
+|---|---:|---:|---:|---:|
+| agentguard | 0 / 73 | 0.0% | 0 / 31 | 0.0% |
+| naive regex baseline (hookify-class) | 8 / 73 | 11.0% | 11 / 31 | 35.5% |
+
+*Provenance:* author-curated corpus, the **same** 73 benign + 31 dangerous
+commands run through both engines. `dangerous.txt` deliberately includes
+constructs agentguard targets (so the FN comparison is read honestly, not as a
+neutral sample); the naive baseline is the hookify-class fixed substring list.
+Reproduce with `cargo test benchmark -- --nocapture`.
+
+## Docs
+
+- [SECURITY.md](SECURITY.md) — responsible disclosure + the explicit threat model
+  (what each component does and does **not** defend against).
+- [ARCHITECTURE.md](ARCHITECTURE.md) — the 3-tier verdict model, the gate
+  pipeline order, the hook contract, and the pinned sandbox install order.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — build/test/lint, how to add a rule, and
+  the dual-license clause.
+- [examples/agentguard.toml](examples/agentguard.toml) — a fully commented config.
 
 ## Positioning (the honest version)
 

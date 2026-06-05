@@ -1,0 +1,95 @@
+# Example agentguard configuration.
+#
+# Every key here is OPTIONAL: an absent file (or an empty one) uses the built-in
+# defaults. Each field carries `#[serde(default)]`, so you only set what you want
+# to override. This example shows every field that exists, with sane values; the
+# non-default examples are commented out so the file as-shipped parses to the
+# defaults (a valid Config). It is parsed by `tests/example_config_parses.rs`,
+# which guarantees it stays in sync with `src/config.rs` + `src/audit.rs`.
+#
+# Lookup order (first existing wins):
+#   1. ./agentguard.toml                      (project-local, highest priority)
+#   2. $XDG_CONFIG_HOME/agentguard/config.toml
+#      (or ~/.config/agentguard/config.toml)
+
+# --- allow_list --------------------------------------------------------------
+# Commands (or path-globs) that short-circuit to Allow BEFORE any evaluation.
+# Matching is substring by default; a `*` makes it a glob (leading/trailing `*`
+# relax the start/end anchor). The allow-list matches the RAW, user-authored
+# command text — never a normalized/rewritten form — so an explicit "this exact
+# command is fine" can never be undermined by the normalization pre-pass.
+#
+# allow_list = [
+#   "git status",
+#   "cargo *",                 # any `cargo …` command
+#   "rm -rf /tmp/build",       # whitelist a specific destructive command you trust
+# ]
+allow_list = []
+
+# --- custom_blocks -----------------------------------------------------------
+# User-added destructive patterns, on top of the built-in taxonomy. Each block
+# is a table with three fields:
+#   pattern  = substring (or `*`-glob) matched against each command leg
+#   severity = 0..=9; drives the tier via [thresholds] (>= block_at => Block,
+#              >= warn_at => Warn, else Allow)
+#   category = a free-text label shown in the verdict reason
+#
+# [[custom_blocks]]
+# pattern = "shutdown"
+# severity = 9
+# category = "system"
+#
+# [[custom_blocks]]
+# pattern = "kubectl delete *--all"
+# severity = 8
+# category = "k8s"
+
+# --- thresholds --------------------------------------------------------------
+# Severity-to-tier cutoffs. Defaults match the spine: sev >= 8 => Block,
+# 5..=7 => Warn, else Allow. Raise block_at to be more permissive, lower
+# warn_at to surface more cautions.
+#
+# [thresholds]
+# block_at = 8                 # default
+# warn_at = 5                  # default
+
+# --- disable (kill-switch) ---------------------------------------------------
+# All-or-nothing emergency kill-switch. When true, agentguard allows everything
+# and gets out of the way (gate + path-guard + firewall all off). Equivalent to
+# the AGENTGUARD_DISABLE=1 environment variable (read from the HOOK process env,
+# so a malicious command cannot self-disarm the gate). Default false.
+#
+# disable = false
+
+# --- normalize ---------------------------------------------------------------
+# Whether the in-place normalization pre-pass runs (ANSI-C `$'…'` decode,
+# leg-head echo/printf command-substitution splice, IFS reassignment, backslash
+# line-continuation join). Default true. Set to false to EMERGENCY-DISABLE just
+# the pre-pass — e.g. if a field false positive ever surfaces — WITHOUT disabling
+# the rest of the gate. The four normalization-closed evasions revert to their
+# pre-v0.1.x verdicts when off.
+#
+# normalize = true
+
+# --- [audit] -----------------------------------------------------------------
+# OPTIONAL, telemetry-free local JSONL audit log. OFF BY DEFAULT. No network, no
+# background thread. Records only Block/Warn gate/firewall decisions and
+# danger_full_access invocations (Allow is never logged). Best-effort: a write
+# failure never changes a verdict.
+[audit]
+# Master switch. When false (default), nothing is written and no file is created.
+enabled = false
+
+# Path to the JSONL file. When unset (the default), auditing is a no-op even if
+# `enabled` is true. The file is created OWNER-ONLY (mode 0600). Keep it
+# LOCAL-ONLY: O_APPEND line writes are atomic only for < 4096 bytes on a local
+# filesystem, NOT on NFS.
+# path = "/home/you/.local/state/agentguard/audit.jsonl"
+
+# Whether to include command/target text in the records. Default false — the
+# default schema is METADATA-ONLY (timestamp/event/decision/rule_id/category/
+# surface, NO raw command text). When true, command text is SECRET-REDACTED
+# (API keys, passwords, Authorization/Bearer tokens masked to ***) and truncated
+# to 512 bytes AFTER redaction before it is written. Opt in only if you
+# understand the disk-retention implication.
+include_command = false

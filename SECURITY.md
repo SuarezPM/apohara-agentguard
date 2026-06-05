@@ -1,0 +1,213 @@
+# Security Policy
+
+agentguard is a security tool. Its honesty about what it does *and does not*
+defend against is part of its threat model. This document is the authoritative
+"covers / does NOT cover" statement; the README "Known limitations" and "Known
+evasions" sections summarize the same reality.
+
+## Responsible disclosure
+
+If you find a vulnerability — a sandbox escape, a gate evasion that the
+documented threat model claims is closed, a secret leak in the audit log, an
+SSRF-guard bypass, or any way to make agentguard run an unconfined process when
+it should refuse — **please report it privately first.** Do NOT open a public
+issue for an exploitable flaw until a fix is available.
+
+<!-- TODO(Pablo): fill in the private security contact (email / GitHub Security
+     Advisory link) before publishing. Placeholder below. -->
+
+- **Private contact:** `SECURITY-CONTACT-PLACEHOLDER` (to be filled in by the
+  maintainer — e.g. a dedicated security email or a GitHub private Security
+  Advisory on the `SuarezPM/agentguard` repository).
+
+What to include: a minimal reproduction (the exact command / input / config),
+the agentguard version (`agentguard --version`), the OS + kernel
+(`uname -a`), and what you expected vs. what happened.
+
+**Response expectations.** This is a single-maintainer open-source project. There
+is **no bug-bounty program** and no contractual response SLA. Reports are
+triaged on a best-effort basis; expect an acknowledgement within a few days and
+a fix or a documented "won't fix / out of scope" decision once the issue is
+understood.
+
+## What agentguard is (and is not)
+
+agentguard is **deterministic and offline**: pure regex + structural Bash
+parsing, **no model, no ML, no network call at scan time**. It is a
+*structural-and-deterministic complement* to model-based safety, **not a
+replacement** for it, and it is **not a sandbox-escape-proof jail**. Detection is
+**parser-bounded**: exactly as good as the compound parser and the rule set, and
+it makes no "blocks 100% of attacks" claim.
+
+---
+
+## Threat model
+
+For each component: **what it defends against** and **what it explicitly does
+not.** Be skeptical of any guarantee not listed under "Covers."
+
+### 1. Command gate (`src/gate`)
+
+The gate turns a raw Bash command into an Allow / Warn / Block verdict via a
+structural compound parser, variable-assignment resolution, bounded base64
+decode-and-rescan, a verb-aware destructive taxonomy, and a bounded in-place
+normalization pre-pass.
+
+**Covers:**
+
+- Compound-command splitting (`;`, `&&`, `||`, `|`, `&`, newline) so a
+  destructive leg cannot hide behind a benign-looking head.
+- Variable aliasing — `x=rm; $x -rf ~` is resolved before matching.
+- Single-level base64 decode-and-rescan — `echo … | base64 -d | sh`.
+- Pipe-structure-aware detection — `curl … | sh`, `find … -delete`,
+  `find … -exec rm`, fork bombs (analysed pre-split, since the signature spans
+  separators).
+- The four normalization-closed evasions (v0.1.x): ANSI-C `$'…'` quoting,
+  leg-head `$(echo rm)`/backtick command-substitution verbs, IFS reassignment
+  (`IFS=X; cmdXrmX-rfX~`), and backslash line-continuation.
+- Verb-aware false-positive suppression: a destructive substring inside a
+  **quoted argument to a non-executing verb** (`git commit -m`, `git tag -m`,
+  `echo`, `printf`, a `#` comment) is treated as DATA, not a command — so
+  `git commit -m "remove the rm -rf helper"` is Allowed — while the same
+  substring inside an **executing** verb (`sh -c`, `bash -c`, `eval`,
+  `xargs … rm`, `… | sh`) still Blocks.
+
+**Does NOT cover (parser-bounded — still out of scope):**
+
+- **Word-concatenation / split-token evasions** such as
+  `` $(printf '\x72')m -rf ~ `` — a verb assembled from a substitution that
+  emits only *part* of a token is not reconstructed. (Only a leg-head `echo`/
+  `printf` emitting a *whole* literal verb is spliced.)
+- **Nested / chained encoders** — hex/rot13/gzip layered beyond the single
+  base64 decode level, or any encoder agentguard does not implement.
+- **Real here-document parsing** — a `<<EOF … EOF` body is matched incidentally
+  (the splitter treats the body line as its own leg), not by parsing here-doc
+  semantics. Do not rely on it.
+- **Deliberate parameter expansion** — `${x:-rm}`/`${x:=rm}` Block only
+  incidentally (the literal `rm` survives in the leg); arbitrary
+  parameter-expansion machinery is not modeled.
+- **Non-literal command substitutions** — `$(curl …)`-produced verbs and any
+  substitution whose body is not a literal `echo`/`printf` are left intact.
+
+The pre-pass is bounded by construction: a 64 KiB rewrite buffer, at most 64
+in-place splices, and a per-span 4× expansion-ratio cap. It can be disabled with
+`normalize = false` in the config without disabling the rest of the gate.
+
+### 2. Path-guard (`src/hook/pathguard.rs`)
+
+Blocks `Read`/`Write`/`Edit` on secret-bearing paths (`.env`, key/credential
+files, etc.) at the `PreToolUse` surface.
+
+**Covers:** denying tool access to known secret-path shapes before the tool runs.
+
+**Does NOT cover:** it guards *paths the agent names*, not arbitrary filesystem
+reads a *shell command* performs (those go through the gate / sandbox). It is a
+name-shape guard, not a data-classification engine.
+
+### 3. seccomp + Landlock sandbox (`src/sandbox`, Linux-only)
+
+Defense-in-depth process confinement for the `agentguard sandbox` subcommand: a
+default-deny seccomp-bpf syscall filter (`mismatch_action = EPERM`) **and** a
+Landlock LSM filesystem ruleset scoping the process to a workspace root. Applied
+in a pinned order in a post-fork grandchild: **NO_NEW_PRIVS → Landlock →
+seccomp (last)**.
+
+**Covers:**
+
+- **Network denial by omission.** `socket`, `connect`, `bind`, `listen`,
+  `accept`/`accept4`, `sendto`, and the 32-bit `socketcall` multiplexer are
+  absent from every tier's allowlist, so the child can never obtain a network
+  fd. (`socketpair(AF_UNIX)` is allowed for cargo's local jobserver only; the
+  kernel does not support `socketpair(AF_INET)`.) The seccomp test asserts
+  `socket(AF_INET, …)` returns EPERM.
+- **Filesystem scoping.** Landlock confines reads/writes to the workspace root
+  (plus specific, read-only system/toolchain paths needed to run a binary). The
+  non-vacuous test asserts `/etc/passwd` and `$HOME/.ssh` stay denied.
+- **Fail-closed setup.** If the kernel cannot enforce Landlock (too old,
+  disabled at boot) or seccomp install fails, the sandbox **refuses to run**
+  (non-zero exit) — it never falls back to an unconfined process.
+
+**Does NOT cover:**
+
+- **`danger_full_access` installs NO seccomp filter and NO Landlock ruleset.**
+  At this tier the command runs with the user's **full host access and full
+  privileges.** It requires the explicit `--i-know-what-im-doing` flag, prints a
+  loud stderr warning, and (when enabled) records the invocation to the audit
+  log — but it is, by design, no sandbox at all.
+- **`/proc/self` access, abstract unix sockets, and ptrace blind spots** are not
+  exhaustively closed. The allowlist is scoped for running build tools, not for
+  resisting a determined in-process escape; this is **not** a
+  sandbox-escape-proof jail.
+- **Non-Linux platforms.** seccomp + Landlock are **Linux-only** (need Linux ≥
+  5.13 with Landlock enabled, `lsm=landlock`). On macOS/Windows the sandbox
+  subcommand **fails closed** (refuses to run); the gate, path-guard, and
+  firewall still work.
+
+### 4. Injection firewall (`src/firewall`)
+
+Deterministic regex rule sets (78 DJL rules + 24 OWASP ASI patterns, plus 3
+two-stage rules) scanning prompts, fetched web content, read files, and command
+output for prompt-injection / exfiltration / harmful-content signatures, with a
+per-surface posture (which surfaces may Block vs. Warn-only).
+
+**Covers:** signature-based detection of the encoded rule set, with out-of-band
+re-fetch + SSRF controls for web surfaces.
+
+**Does NOT cover:**
+
+- **Re-fetch TOCTOU.** For `WebFetch`/`WebSearch` the hook re-fetches the URL
+  out-of-band to scan it *before* the tool runs. The content the hook scans may
+  differ from what Claude fetches on its subsequent request — a server can serve
+  clean content to the hook and malicious content to Claude. The URL is also
+  fetched twice (latency + load).
+- **WebSearch nondeterminism.** agentguard cannot reproduce Claude's search
+  backend; it does a best-effort plain GET against the query URL. Results may
+  differ from Claude's. The load-bearing guarantee is the per-surface posture
+  and the SSRF guard, not byte-identical search results.
+- **SSRF guard scope.** The out-of-band fetcher resolves the hostname and
+  **denies** the request if any *resolved* IP is private (RFC1918), loopback,
+  link-local (`169.254.0.0/16`, `fe80::/10`), ULA (`fc00::/7`), or a
+  cloud-metadata address (`169.254.169.254`). It checks the resolved IP (not the
+  hostname) to defeat DNS rebinding and re-checks every redirect hop. It does
+  **not** defend against an attacker who controls a public IP, nor against
+  content served from an allowed public host.
+
+### 5. Local audit log (`src/audit.rs`)
+
+Optional, **telemetry-free** local JSONL recording Block/Warn gate/firewall
+decisions and `danger_full_access` invocations. No network, no background
+thread.
+
+**Security properties:**
+
+- **Off by default** (`[audit] enabled = false`). When off, no file is created
+  and behavior is byte-identical to having no audit feature.
+- **Metadata-only by default.** The default schema records `timestamp`, `event`,
+  `decision`, `rule_id`, `category`, `surface` — **no raw command/target text.**
+- **Command text is opt-in** (`include_command = true`) and is **secret-redacted
+  before serialization** (the same secret-name discipline as the sandbox env
+  sanitizer, plus inline masking of `NAME=value` secret assignments,
+  `-p<password>` / `--password`, and `Authorization:` / Bearer tokens → `***`),
+  then truncated to 512 bytes *after* redaction so a secret can never survive a
+  cut.
+- **File mode 0600** (created owner-only on unix). **Recommendation: keep the
+  audit log local-only and 0600**; do not place it on a shared filesystem.
+- **`O_APPEND` atomicity bound.** Each record is a single small line written with
+  `O_APPEND`. This is atomic **only for writes < `PIPE_BUF` (4096 bytes) on a
+  LOCAL filesystem** — **NOT guaranteed on NFS.** Records are kept single-line
+  and small (command text capped at 512 bytes) to stay within that bound; under
+  concurrent hook processes on NFS, interleaving is possible.
+- **Best-effort.** An audit write failure NEVER changes a verdict or an exit
+  code — it logs one stderr line and continues.
+
+---
+
+## Kill-switch
+
+`AGENTGUARD_DISABLE=1` (or `disable = true` in the config) is an **all-or-nothing
+emergency kill-switch**: when set, the hook immediately allows everything and
+exits 0, disabling the gate, path-guard, **and** firewall together. It is read
+from the **hook process's environment**, not the inspected command's — so a
+malicious Bash command that sets `AGENTGUARD_DISABLE=1` runs in a *different*
+process and cannot self-disarm the gate. Treat the kill-switch as a break-glass
+control: with it set, agentguard provides **no** protection.
