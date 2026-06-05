@@ -152,25 +152,48 @@ gated by `cargo deny check licenses` against an explicit allowlist.
   Landlock enabled** (`lsm=landlock` on the kernel cmdline). On macOS/Windows the
   sandbox subcommand fails closed; the gate, path-guard, and firewall still work.
 
-## Known evasions / out-of-scope (v0.1)
+## Known evasions / out-of-scope (v0.1.x)
 
-The command gate's soundness is parser-bounded. The following Bash obfuscation
-forms are **not caught in v0.1** and are honestly out of scope:
+The command gate's soundness is parser-bounded.
 
-- **ANSI-C quoting** — `$'\x72\x6d'` (hex/octal escapes that decode to `rm`).
-- **Command-substitution-produced verbs** — `$(echo rm) -rf ~`.
-- **IFS reassignment** — rebuilding a command by manipulating the field separator.
-- **Backslash line-continuation** — splitting a verb across `\`-continued lines.
+**Now caught (v0.1.x).** A bounded, in-place normalization pre-pass
+(`gate::normalize`) deliberately closes four forms the v0.1 gate let through —
+they are spliced contiguously into the command before splitting, so the
+destructive leg surfaces and Blocks:
 
-These are tracked for a future version (see the plan's deferred items). Variable
-assignment (`x=rm; $x ...`) and single-level base64 decode-and-rescan **are**
-caught.
+- **ANSI-C quoting** — `$'\x72\x6d' -rf ~` (hex/octal/`\u`/named escapes are
+  decoded in place).
+- **Command-substitution-produced verbs** — `$(echo rm) -rf ~` and the backtick
+  `` `echo rm` -rf ~ `` (a leg-head `echo`/`printf` literal substitution is
+  spliced into the verb it emits; argument-position substitutions are left
+  untouched, so a commit message like `git commit -m "$(echo rm -rf)"` is safe).
+- **IFS reassignment** — `IFS=X; cmdXrmX-rfX~` (the recorded separator is
+  word-joined into subsequent legs and re-scanned, gated on surfacing a hit so
+  benign `IFS`-driven loops/`read`s never false-positive).
+- **Backslash line-continuation** — `r\<newline>m -rf ~` (the continuation is
+  joined).
 
-Two further forms happen to be caught **incidentally** (not by deliberate
-construct handling, so do not rely on them): parameter expansion with defaults
-(`${x:-rm}` / `${x:=rm}`) blocks because the literal `rm` survives in the leg and
-the destructive taxonomy matches it; here-documents (`<<EOF ... EOF`) block
-because the compound splitter treats the body line as its own leg.
+Variable assignment (`x=rm; $x ...`) and single-level base64 decode-and-rescan
+were already caught in v0.1.
+
+The pre-pass is bounded (64 KiB buffer, ≤ 64 splices, 4× per-span expansion cap)
+and can be disabled with `normalize = false` in the config if a field false
+positive ever surfaces, without disabling the rest of the gate.
+
+**Still out of scope (parser-bounded).** These remain honestly uncaught:
+
+- **Nested / chained encoders** — hex/rot13/gzip layered beyond the single
+  decode level, or word-concatenation like `` $(printf '\x72')m -rf ``.
+- **Deliberate parameter expansion** — beyond the incidental cases below.
+- **Real here-document parsing** — the body is matched incidentally, not parsed.
+- **Non-literal command substitutions** — `$(curl ...)`-produced verbs and any
+  substitution whose body is not a literal `echo`/`printf`.
+
+Two forms are caught **incidentally** (not by deliberate construct handling, so
+do not rely on them): parameter expansion with defaults (`${x:-rm}` / `${x:=rm}`)
+Blocks because the literal `rm` survives in the leg and the destructive taxonomy
+matches it; here-documents (`<<EOF ... EOF`) Block because the compound splitter
+treats the body line as its own leg.
 
 ## Disabling / kill-switch
 

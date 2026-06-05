@@ -25,7 +25,7 @@ pub struct CustomBlock {
 }
 
 /// User-facing configuration that overrides built-in defaults.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Commands / path-globs that short-circuit to Allow.
     #[serde(default)]
@@ -39,6 +39,31 @@ pub struct Config {
     /// Kill-switch: when true, agentguard emits Allow and gets out of the way.
     #[serde(default)]
     pub disable: bool,
+    /// Whether the in-place normalization pre-pass (ANSI-C / echo-substitution /
+    /// IFS / line-continuation evasion-closing) runs. Default `true`; set
+    /// `normalize = false` to emergency-disable the pre-pass if a field false
+    /// positive surfaces, without disabling the rest of the gate.
+    #[serde(default = "default_true")]
+    pub normalize: bool,
+}
+
+/// Default for [`Config::normalize`] — the pre-pass is on by default.
+fn default_true() -> bool {
+    true
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            allow_list: Vec::new(),
+            custom_blocks: Vec::new(),
+            thresholds: Thresholds::default(),
+            disable: false,
+            // The normalization pre-pass is ON by default (matches the serde
+            // `default_true`), so `Config::default()` and an empty TOML agree.
+            normalize: true,
+        }
+    }
 }
 
 impl Config {
@@ -148,6 +173,8 @@ mod tests {
                 warn_at: 4,
             },
             disable: true,
+            // Non-default (default is true) so the round-trip exercises the field.
+            normalize: false,
         }
     }
 
@@ -169,6 +196,20 @@ mod tests {
     fn empty_toml_is_defaults() {
         let cfg: Config = toml::from_str("").expect("parse empty");
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn normalize_defaults_to_true() {
+        // Both the struct default and an absent TOML field must be `true`.
+        assert!(Config::default().normalize);
+        let cfg: Config = toml::from_str("").expect("parse empty");
+        assert!(cfg.normalize);
+    }
+
+    #[test]
+    fn normalize_can_be_disabled_via_toml() {
+        let cfg: Config = toml::from_str("normalize = false").expect("parse");
+        assert!(!cfg.normalize);
     }
 
     #[test]

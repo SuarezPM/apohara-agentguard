@@ -19,6 +19,17 @@
 /// detected leg. Substitution bodies (`$(...)`, `` `...` ``, `<(...)`, `>(...)`)
 /// are extracted recursively. Empty legs (e.g. a trailing `;`) are dropped.
 pub fn split_compound(command: &str) -> Vec<String> {
+    split_compound_with_separators(command, &[])
+}
+
+/// Like [`split_compound`] but treats each char in `extra_seps` as an ADDITIONAL
+/// top-level single-char separator (used for an `IFS=<char>` reassignment).
+///
+/// The extra separators apply at the TOP level only — recursion into
+/// substitution bodies uses the default separator set, so an extracted `$(...)`
+/// keeps its own splitting. Passing an empty `extra_seps` is byte-for-byte
+/// identical to [`split_compound`] (additive, default-preserving).
+pub fn split_compound_with_separators(command: &str, extra_seps: &[char]) -> Vec<String> {
     let bytes = command.as_bytes();
     let mut result: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -86,6 +97,12 @@ pub fn split_compound(command: &str) -> Vec<String> {
             }
             // Single-char separators: `;`, `|`, `&`, newline.
             if c == b';' || c == b'|' || c == b'&' || c == b'\n' {
+                push_leg(&mut current, &mut result);
+                i += 1;
+                continue;
+            }
+            // Extra top-level separators (e.g. an `IFS=<char>` reassignment).
+            if extra_seps.contains(&(c as char)) {
                 push_leg(&mut current, &mut result);
                 i += 1;
                 continue;
@@ -308,6 +325,30 @@ mod tests {
     #[test]
     fn drops_trailing_separator_empty_leg() {
         assert_eq!(split_compound("ls;"), vec!["ls"]);
+    }
+
+    #[test]
+    fn extra_separators_are_additive() {
+        // Empty extra-sep set == default behavior (byte-for-byte).
+        assert_eq!(
+            split_compound_with_separators("git status && echo done", &[]),
+            split_compound("git status && echo done")
+        );
+        // An extra `X` separator splits at top level in addition to the defaults.
+        assert_eq!(
+            split_compound_with_separators("aXb; c", &['X']),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn extra_separators_do_not_recurse_into_substitution() {
+        // The extra separator applies at the TOP level only — the `$(...)` body
+        // is split with the default set, so an `X` inside it is NOT a separator.
+        assert_eq!(
+            split_compound_with_separators("aXb $(echo cXd)", &['X']),
+            vec!["a", "b", "echo cXd"]
+        );
     }
 }
 

@@ -10,12 +10,16 @@
 //!    `curl … | sh`) — [`taxonomy`] matches per-leg rules plus a pre-split
 //!    pipe analysis, rather than substring-matching a fixed list per leg.
 //!
-//! Pipeline: allow-list short-circuit -> split -> resolve -> per-leg taxonomy +
-//! custom blocks + base64 decode/rescan -> pre-split fetch-pipe analysis -> take
-//! the MAX severity -> map to a tier via the configured thresholds.
+//! Pipeline (pinned order): allow-list short-circuit on the RAW command ->
+//! normalize pre-pass (in-place ANSI-C / echo-subst / line-continuation splice +
+//! IFS separator collection, if `config.normalize`) -> pre-split fetch-pipe
+//! analysis -> base64 decode/rescan -> split into legs -> resolve variable
+//! assignments -> per-leg taxonomy (verb-aware) + custom blocks -> gated IFS
+//! re-split -> take the MAX severity -> map to a tier via the thresholds.
 
 pub mod compound;
 pub mod decode;
+pub mod normalize;
 pub mod resolve;
 pub mod taxonomy;
 
@@ -41,6 +45,19 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
         return Verdict::allow();
     }
 
+    // 2. Normalize pre-pass (in-place splice of ANSI-C / echo-subst /
+    //    line-continuation; collect IFS-derived extra separators). Runs AFTER
+    //    the allow-list (which matched the RAW text) and BEFORE everything else,
+    //    so the splice composes into a normal command line for the rest of the
+    //    pipeline. Honors the `normalize` kill-switch.
+    let (scan_command, extra_seps): (String, Vec<char>) = if config.normalize {
+        let n = normalize::normalize_command(command);
+        (n.command, n.extra_separators)
+    } else {
+        (command.to_string(), Vec::new())
+    };
+    let command: &str = &scan_command;
+
     let mut best: Option<Hit> = None;
 
     // Pre-split analysis: `curl … | sh` is a pipe relationship that vanishes
@@ -65,13 +82,25 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
         }
     }
 
-    // 2. Split into legs, then 3. resolve variable assignments.
+    // 3. Split into legs, then 4. resolve variable assignments.
     let legs = compound::split_compound(command);
     let resolved = resolve::resolve_assignments(&legs);
 
-    // 4. Match each (resolved/decoded) leg.
+    // 5. Match each (resolved/decoded) leg.
     for leg in &resolved {
         scan_leg(leg, 0, config, &mut best);
+    }
+
+    // 5b. IFS re-split (gated): an `IFS=<char>` reassignment makes that char a
+    //     word separator for SUBSEQUENT legs, so `cmdXrmX-rfX~` word-splits to
+    //     `cmd rm -rf ~`. Rebuild those legs with the IFS char rewritten to a
+    //     space, re-split, and scan — but only FOLD IN the result if it actually
+    //     surfaces a Block-tier hit, so a benign IFS-driven loop or read is
+    //     never mangled into a false positive.
+    if !extra_seps.is_empty() {
+        if let Some(hit) = ifs_resplit_block(command, &extra_seps, config) {
+            consider(&mut best, hit);
+        }
     }
 
     // 5. Map the worst hit to a tier.
@@ -84,12 +113,54 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     }
 }
 
+/// Re-scan `command` under an `IFS=<char>` reassignment: rewrite the recorded
+/// IFS char(s) to whitespace in the legs FOLLOWING the assignment (word-joining,
+/// e.g. `cmdXrmX-rfX~` -> `cmd rm -rf ~`), split, and scan. Returns a hit ONLY
+/// if the re-scan surfaces a Block-tier match — otherwise `None` (no-op), so a
+/// benign `IFS`-driven loop or `read` is never turned into a false positive.
+fn ifs_resplit_block(command: &str, extra_seps: &[char], config: &Config) -> Option<Hit> {
+    let legs = compound::split_compound(command);
+    let mut rebuilt: Vec<String> = Vec::with_capacity(legs.len());
+    let mut seen_ifs = false;
+    for leg in &legs {
+        if seen_ifs {
+            // Word-join: the IFS char separates fields, so map it to a space.
+            let mut rewritten = leg.clone();
+            for sep in extra_seps {
+                rewritten = rewritten.replace(*sep, " ");
+            }
+            rebuilt.push(rewritten);
+        } else {
+            rebuilt.push(leg.clone());
+        }
+        if leg.trim_start().starts_with("IFS=") {
+            seen_ifs = true;
+        }
+    }
+
+    let resolved = resolve::resolve_assignments(&rebuilt);
+    let mut ifs_best: Option<Hit> = None;
+    for leg in &resolved {
+        scan_leg(leg, 0, config, &mut ifs_best);
+    }
+    match ifs_best {
+        Some(hit) if severity_to_tier(hit.severity, &config.thresholds) == Tier::Block => Some(hit),
+        _ => None,
+    }
+}
+
 /// Scan a single leg: taxonomy rules, custom blocks, and (bounded) base64
 /// decode-and-rescan. Folds the worst hit into `best`.
 fn scan_leg(leg: &str, depth: u8, config: &Config, best: &mut Option<Hit>) {
+    // Verb-aware match text: a destructive substring inside a quoted ARGUMENT to
+    // a non-executing verb (`git commit -m`, `echo`, `printf`, `#` comment) is
+    // DATA, not a command, so it is suppressed; an executing verb (`sh -c`,
+    // `eval`, `xargs … rm`, …) keeps its quoted content and still matches.
+    let match_text = taxonomy::effective_match_text(leg);
+
     // Built-in destructive taxonomy.
     for rule in taxonomy::rules() {
-        if rule.matches(leg) {
+        if rule.matches(&match_text) {
             consider(
                 best,
                 Hit {

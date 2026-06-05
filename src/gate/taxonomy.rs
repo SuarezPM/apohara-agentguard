@@ -188,6 +188,76 @@ pub fn rules() -> &'static [DestructiveRule] {
     ]
 }
 
+/// The text a leg's destructive matchers should run against, after accounting
+/// for verb-awareness.
+///
+/// A destructive substring inside a QUOTED ARGUMENT to a NON-EXECUTING verb
+/// (`git commit -m/-F`, `git tag -m`, `echo`, `printf`, a leading `#` comment)
+/// is DATA, not a command — so this strips those quoted spans, suppressing the
+/// match. For an EXECUTING verb (`sh -c`, `bash -c`, `zsh -c`, `dash -c`,
+/// `eval`, `xargs … rm/sh/bash`, `env … sh`, `find … -exec`) the quoted content
+/// IS run, so the leg is returned unchanged and still matches. Anything not
+/// clearly non-executing is treated as executing (fail toward Block — FN
+/// preserved).
+pub fn effective_match_text(leg: &str) -> String {
+    // A comment line is entirely inert text.
+    if leg.trim_start().starts_with('#') {
+        return String::new();
+    }
+    if is_non_executing_verb(leg) {
+        strip_quoted_spans(leg)
+    } else {
+        leg.to_string()
+    }
+}
+
+/// True iff the leg's HEAD verb is one whose quoted arguments are DATA, not a
+/// command to execute.
+fn is_non_executing_verb(leg: &str) -> bool {
+    let trimmed = leg.trim_start();
+    let mut tokens = trimmed.split_whitespace();
+    let verb = match tokens.next() {
+        Some(v) => v,
+        None => return false,
+    };
+    match verb {
+        "echo" | "printf" => true,
+        "git" => {
+            // git commit -m/-F, git tag -m, etc. carry a message as DATA.
+            matches!(tokens.next(), Some("commit") | Some("tag") | Some("notes"))
+        }
+        _ => false,
+    }
+}
+
+/// Remove the contents of single- and double-quoted spans (keeping the quote
+/// delimiters so token boundaries survive), so a destructive substring that
+/// lives ONLY inside a quoted argument no longer matches.
+fn strip_quoted_spans(leg: &str) -> String {
+    let bytes = leg.as_bytes();
+    let mut out = String::with_capacity(leg.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'"' || c == b'\'' {
+            // Emit the opening quote, skip the body, emit the closing quote.
+            out.push(c as char);
+            i += 1;
+            while i < bytes.len() && bytes[i] != c {
+                i += 1;
+            }
+            if i < bytes.len() {
+                out.push(c as char); // closing quote
+                i += 1;
+            }
+            continue;
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    out
+}
+
 /// Detect the `curl … | sh` / `wget … | sh` fetch-piped-to-shell pattern by
 /// analysing the ORIGINAL command's pipe structure (NOT a post-split substring).
 ///
@@ -332,5 +402,41 @@ mod tests {
         assert_eq!(matches_any("git status"), None);
         assert_eq!(matches_any("cat README.md"), None);
         assert_eq!(matches_any("rm file.txt"), None);
+    }
+
+    #[test]
+    fn effective_text_strips_non_executing_quoted_args() {
+        // Destructive text inside a quoted message to a non-executing verb is
+        // suppressed (no longer matches).
+        assert!(!m_rm_rf(&effective_match_text(
+            r#"git commit -m "remove the rm -rf helper""#
+        )));
+        assert!(!m_rm_rf(&effective_match_text(
+            r#"echo "rm -rf is dangerous""#
+        )));
+        assert!(!m_dd(&effective_match_text(
+            r#"git commit -m "drop dd if= usage""#
+        )));
+    }
+
+    #[test]
+    fn effective_text_keeps_executing_quoted_args() {
+        // Executing verbs run their quoted content → must still match.
+        assert!(m_rm_rf(&effective_match_text(r#"sh -c "rm -rf ~""#)));
+        assert!(m_rm_rf(&effective_match_text(r#"bash -c "rm -rf ~""#)));
+        assert!(m_rm_rf(&effective_match_text(r#"eval "rm -rf ~""#)));
+        assert!(m_rm_rf(&effective_match_text("xargs rm -rf")));
+    }
+
+    #[test]
+    fn effective_text_unwrapped_destructive_still_matches() {
+        // An UNquoted destructive form is matched even after a non-executing
+        // verb (it is not inside a quoted span).
+        assert!(m_rm_rf(&effective_match_text("echo foo; rm -rf ~")));
+    }
+
+    #[test]
+    fn comment_line_is_inert() {
+        assert!(!m_rm_rf(&effective_match_text("# rm -rf ~ would be bad")));
     }
 }

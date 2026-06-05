@@ -42,3 +42,46 @@ fn non_recursive_rm_of_single_file_is_not_blocked() {
     // Our chosen behaviour is Allow.
     assert_eq!(v.tier, Tier::Allow, "single-file rm chosen to Allow: {v:?}");
 }
+
+/// A5 verb-aware taxonomy: a destructive substring inside a quoted ARGUMENT to a
+/// NON-EXECUTING verb (a git commit message, an `echo`/`printf` literal, a `#`
+/// comment) is DATA, not a command, and must Allow. This is the pre-existing
+/// commit-message false positive the verb-aware fix closes.
+#[test]
+fn destructive_text_in_non_executing_quoted_arg_allows() {
+    let allow = [
+        r#"git commit -m "remove the rm -rf helper""#,
+        r#"git commit -m "drop dd if= usage""#,
+        r#"echo "rm -rf is dangerous""#,
+        "printf 'mkfs note\\n'",
+        "# rm -rf ~ would be destructive",
+    ];
+    for cmd in allow {
+        assert_eq!(
+            evaluate(cmd, &Config::default()).tier,
+            Tier::Allow,
+            "non-executing verb quoted arg must Allow: `{cmd}`"
+        );
+    }
+}
+
+/// A5 FN guard: an EXECUTING verb runs its quoted content, so a destructive
+/// substring there MUST still Block — the verb-aware suppression must not weaken
+/// these.
+#[test]
+fn destructive_text_in_executing_verb_still_blocks() {
+    let block = [
+        r#"sh -c "rm -rf ~""#,
+        r#"bash -c "rm -rf ~""#,
+        r#"eval "rm -rf ~""#,
+        "find . -name x | xargs rm -rf",
+        "echo rm -rf ~ | sh",
+    ];
+    for cmd in block {
+        assert_eq!(
+            evaluate(cmd, &Config::default()).tier,
+            Tier::Block,
+            "executing verb must still Block: `{cmd}`"
+        );
+    }
+}
