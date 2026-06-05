@@ -200,13 +200,14 @@ the invocation to the audit log when enabled.
   Warn (exit 2 on UserPromptSubmit erases the prompt; PostToolUse runs after the
   tool and cannot block).
 
-## Independence (total reimplementation)
+## Independence (self-contained)
 
-agentguard is a **total reimplementation in Rust** with **zero Catalyst/aegis
-dependency** — no link, no path dependency, no vendored code, and no NOTICE for
-either. The destructive taxonomy, the DJL/OWASP rule sets, the verdict spine, and
-the path utilities are all reimplemented in-tree (e.g. `canonicalize_recursive`
-in `src/sandbox/pathsafe.rs` is a from-scratch path resolver). The project is
+agentguard is **a fully self-contained, dependency-free implementation** (no
+external policy engine, no shared runtime, no network at scan time) — no link, no
+path dependency, and no vendored code. The destructive taxonomy, the DJL/OWASP
+rule sets, the verdict spine, and the path utilities are all implemented in-tree
+(e.g. `canonicalize_recursive` in `src/sandbox/pathsafe.rs` is a from-scratch
+path resolver). The project is
 dual-licensed **MIT OR Apache-2.0** (`LICENSE-MIT` + `LICENSE-APACHE`, no single
 `LICENSE`); third-party dependency licenses are enumerated in
 `THIRD-PARTY-LICENSES` and gated by `cargo deny check licenses`.

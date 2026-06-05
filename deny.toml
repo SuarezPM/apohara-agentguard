@@ -52,6 +52,6 @@ yanked = "warn"
 
 [sources]
 # Only crates.io is trusted; a git/path source for a dependency is a hard error
-# (reinforces the "no Catalyst/aegis path/git coupling" invariant).
+# (reinforces the no-external-source-coupling invariant).
 unknown-registry = "deny"
 unknown-git = "deny"

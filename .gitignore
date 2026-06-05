@@ -1,13 +1,19 @@
-CLAUDE.local.md
-.claude/settings.local.json
-.gitnexus/
-.cocoindex_code/
-# CocoIndex Code (ccc)
-/.cocoindex_code/
+# Rust build output
 /target
+
+# Cargo.lock is intentionally committed (this is a binary project).
 
 # cargo-fuzz (fuzz/ is its own separate crate; build + run artifacts)
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts
 /fuzz/Cargo.lock
+
+# Local tooling (not part of the project)
+.claude/
+.omc/
+.gitnexus/
+.cocoindex_code/
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md

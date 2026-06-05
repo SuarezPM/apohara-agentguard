@@ -2,7 +2,7 @@
 //!
 //! A [`Verdict`] is the single decision shape every component returns. Its
 //! [`Tier`] is derived from a numeric severity via [`severity_to_tier`], with
-//! the cutoffs supplied by [`Thresholds`]. Defaults mirror aegis `djl.py`:
+//! the cutoffs supplied by [`Thresholds`]. Defaults:
 //! `sev >= 8` BLOCK, `5..=7` REVIEW/Warn, else Allow.
 
 use serde::{Deserialize, Serialize};
@@ -76,7 +76,7 @@ pub struct Thresholds {
 
 impl Default for Thresholds {
     fn default() -> Self {
-        // Matches aegis djl.py: sev >= 8 BLOCK, 5..=7 REVIEW/Warn, else Allow.
+        // Severity cutoffs: sev >= 8 BLOCK, 5..=7 Warn, else Allow.
         Self {
             block_at: 8,
             warn_at: 5,

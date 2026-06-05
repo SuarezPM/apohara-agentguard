@@ -1,20 +1,18 @@
-//! Deterministic Judge Layer (DJL) rule set — 78 rules ported from aegis
-//! `djl.py` to the Rust `regex` crate.
+//! Deterministic prompt-injection rule set (DJL) — 78 deterministic regex rules.
 //!
-//! This is a REWRITE of Pablo's own Apache-2.0 rules, not a copy: the Python
-//! `re` patterns are translated to the Rust `regex` dialect. Almost every
-//! pattern ports directly (inline `(?i)`, `\b`, `(?:...)`, character classes
-//! are all supported). The exceptions are three rules whose Python patterns use
-//! lookaround (`(?!...)`, `(?<!...)`) that the linear-time Rust engine forbids;
-//! those keep their metadata here but route matching through
+//! Every rule is expressed in the Rust `regex` dialect. Almost all patterns are
+//! plain linear-time regexes (inline `(?i)`, `\b`, `(?:...)`, character classes
+//! are all supported). The exceptions are three rules that require lookaround
+//! (`(?!...)`, `(?<!...)`), which the linear-time Rust engine forbids; those
+//! keep their metadata here but route matching through
 //! [`crate::firewall::two_stage`] (see [`DjlRule::two_stage`]).
 //!
 //! Severity scale 1..=10. Verdict mapping (via [`crate::verdict`]):
 //! `sev >= 8` BLOCK, `5..=7` REVIEW/Warn, else Allow.
 //!
-//! Each rule also carries an authored `fp_risk` note (the Python source carried
-//! none) describing the most plausible benign string that could trip it. The
-//! per-rule negative test fixtures encode that note as an assertion.
+//! Each rule also carries an `fp_risk` note describing the most plausible benign
+//! string that could trip it. The per-rule negative test fixtures encode that
+//! note as an assertion.
 
 use std::sync::LazyLock;
 
