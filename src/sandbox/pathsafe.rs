@@ -109,11 +109,13 @@ pub fn is_strict_descendant(child: &Path, root: &Path) -> bool {
     child.starts_with(root)
 }
 
-#[cfg(test)]
+// `canonicalize_recursive` is the Linux-sandbox workdir canonicalizer with POSIX
+// resolution semantics; the sandbox is Unavailable off-Linux, so its tests run
+// only on unix (Linux + macOS), never on Windows.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::fs;
-    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     fn tmp() -> PathBuf {
@@ -142,7 +144,6 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[cfg(unix)]
     #[test]
     fn follows_single_symlink() {
         let dir = tmp();
@@ -159,7 +160,6 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-    #[cfg(unix)]
     #[test]
     fn symlink_loop_hits_hop_cap() {
         let dir = tmp();
@@ -198,7 +198,6 @@ mod tests {
         assert!(!is_strict_descendant(Path::new("/home/u/projX"), root));
     }
 
-    #[cfg(unix)]
     #[test]
     fn descendant_via_resolved_symlink() {
         let dir = tmp();
