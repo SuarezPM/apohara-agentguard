@@ -87,6 +87,19 @@ fn m_fork_bomb(s: &str) -> bool {
     compact.contains(":(){:|:&};:")
 }
 
+fn m_chmod_recursive_777_root(s: &str) -> bool {
+    // Recursive chmod 777 targeting `/` is catastrophic (unlike a local file).
+    // Requires the recursive flag, the 777 mode, AND a `/` (root) target in any
+    // order, so both `chmod 777 -R /` and `chmod -R 777 /` are caught.
+    re!(
+        s,
+        r"(?i)\bchmod\b[^|;&\n]*\s-[a-z]*R[a-z]*\b[^|;&\n]*\s0?777\b[^|;&\n]*\s/(\s|$)"
+    ) || re!(
+        s,
+        r"(?i)\bchmod\b[^|;&\n]*\s0?777\b[^|;&\n]*\s-[a-z]*R[a-z]*\b[^|;&\n]*\s/(\s|$)"
+    )
+}
+
 fn m_write_block_device(s: &str) -> bool {
     // Redirect or dd-output to a raw disk device.
     re!(
@@ -154,6 +167,13 @@ pub fn rules() -> &'static [DestructiveRule] {
             severity: 6,
             category: "permissions",
             matcher: m_chmod_recursive,
+        },
+        DestructiveRule {
+            // Recursive 777 of root is catastrophic — Block, unlike a local 777.
+            id: "chmod-recursive-777-root",
+            severity: 9,
+            category: "permissions",
+            matcher: m_chmod_recursive_777_root,
         },
         DestructiveRule {
             id: "chown-recursive-root",
@@ -283,6 +303,20 @@ pub fn fetch_pipe_to_shell(command: &str) -> Option<(&'static str, u8, &'static 
     None
 }
 
+/// Detect a fork bomb (`:(){ :|:& };:`) on the ORIGINAL (pre-split) command.
+///
+/// The classic form contains `;`, `|`, and `&`, so `split_compound` shreds the
+/// signature across legs before any per-leg matcher can see it (the same reason
+/// `fetch_pipe_to_shell` is checked pre-split). Returns the rule triple if the
+/// whitespace-insensitive signature is present.
+pub fn fork_bomb_presplit(command: &str) -> Option<(&'static str, u8, &'static str)> {
+    if m_fork_bomb(command) {
+        Some(("fork-bomb", 9, "dos"))
+    } else {
+        None
+    }
+}
+
 fn is_shell_interpreter(head: &str) -> bool {
     matches!(
         head,
@@ -358,6 +392,26 @@ mod tests {
     fn fork_bomb_detected() {
         assert!(m_fork_bomb(":(){ :|:& };:"));
         assert!(m_fork_bomb(":(){:|:&};:"));
+    }
+
+    #[test]
+    fn fork_bomb_presplit_catches_shredded_signature() {
+        // The pre-split detector sees the whole command before it is split on
+        // `;`/`|`/`&`, which would otherwise destroy the signature.
+        assert!(fork_bomb_presplit(":(){ :|:& };:").is_some());
+        assert!(fork_bomb_presplit("echo hi").is_none());
+    }
+
+    #[test]
+    fn chmod_recursive_777_root_blocks_either_order() {
+        assert!(m_chmod_recursive_777_root("chmod 777 -R /"));
+        assert!(m_chmod_recursive_777_root("chmod -R 777 /"));
+        // A local recursive 777 is NOT the catastrophic root case.
+        assert!(!m_chmod_recursive_777_root("chmod -R 777 ./build"));
+        assert!(!m_chmod_recursive_777_root("chmod 777 file"));
+        // This Block-tier rule pushes recursive-777-root into the Block band.
+        assert!(max_sev("chmod -R 777 /") >= 8);
+        assert!(max_sev("chmod 777 -R /") >= 8);
     }
 
     #[test]

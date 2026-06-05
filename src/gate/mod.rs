@@ -73,6 +73,19 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
         );
     }
 
+    // Pre-split analysis: a fork bomb's `:(){ :|:& };:` signature spans `;`/`|`/`&`,
+    // so it is shredded across legs once split — check the original command.
+    if let Some((id, sev, _cat)) = taxonomy::fork_bomb_presplit(command) {
+        consider(
+            &mut best,
+            Hit {
+                severity: sev,
+                leg: command.to_string(),
+                label: format!("dos [{id}]"),
+            },
+        );
+    }
+
     // Pre-split base64 decode: `echo <b64> | base64 -d | sh` is likewise a pipe
     // relationship — the `echo … | base64 -d` stages are spread across legs once
     // split, so decode the ORIGINAL command's pipe and rescan the payload.
