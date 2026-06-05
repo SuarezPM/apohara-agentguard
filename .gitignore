@@ -9,11 +9,11 @@
 /fuzz/artifacts
 /fuzz/Cargo.lock
 
-# Local tooling (not part of the project)
-.claude/
-.omc/
-.gitnexus/
-.cocoindex_code/
-AGENTS.md
-CLAUDE.md
-CLAUDE.local.md
+# Editors / OS
+/.idea
+/.vscode
+*.swp
+.DS_Store
+
+# Local assistant working files (not part of the project)
+/.claude
