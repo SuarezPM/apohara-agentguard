@@ -271,20 +271,82 @@ fn run_grandchild(
     unsafe { libc::_exit(126) };
 }
 
-/// Close all open fds in `[3, ..)` except `keep`, using close_range when
-/// available with a manual fallback. Runs in the grandchild after dup2.
+/// Close all open fds in `[3, ..)` except `keep`, using the raw close_range
+/// syscall + manual fallback. Runs in the grandchild after dup2.
 fn close_inherited_fds(keep: std::os::fd::RawFd) {
     // close_range(3, keep-1) then close_range(keep+1, MAX) so we never close the
     // exec-error pipe. If keep <= 2 (shouldn't happen) just close everything.
+    //
+    // We invoke SYS_close_range via the raw `syscall(2)` rather than the
+    // `libc::close_range` glibc wrapper: the wrapper symbol is absent on old
+    // glibc (e.g. the `cross` aarch64 image), which breaks linking. The raw
+    // syscall has no such dependency. On a kernel < 5.9 it returns ENOSYS, and
+    // we fall back to a manual close loop. Async-signal-safe: no heap, only
+    // libc calls (this runs post-fork in the grandchild).
     let max = libc::c_uint::MAX;
     unsafe {
         if keep > 2 {
-            let _ = libc::close_range(3, (keep - 1) as libc::c_uint, 0);
-            let _ = libc::close_range((keep + 1) as libc::c_uint, max, 0);
+            close_range_or_fallback(3, (keep - 1) as libc::c_uint, keep);
+            close_range_or_fallback((keep + 1) as libc::c_uint, max, keep);
         } else {
-            let _ = libc::close_range(3, max, 0);
+            close_range_or_fallback(3, max, keep);
         }
     }
+}
+
+/// Close fds in the inclusive range `[first, last]` via the raw close_range
+/// syscall, falling back to a manual loop on ENOSYS (kernel < 5.9). `keep` is
+/// never closed by the manual fallback. Async-signal-safe.
+unsafe fn close_range_or_fallback(
+    first: libc::c_uint,
+    last: libc::c_uint,
+    keep: std::os::fd::RawFd,
+) {
+    let ret = libc::syscall(
+        libc::SYS_close_range,
+        first as libc::c_long,
+        last as libc::c_long,
+        0 as libc::c_long,
+    );
+    if ret == -1 && errno() == libc::ENOSYS {
+        manual_close_range(first, last, keep);
+    }
+}
+
+/// Manual fallback for close_range: close every fd in `[first, last]`, clamped
+/// to the process fd limit, skipping `keep`. Async-signal-safe (no allocation).
+unsafe fn manual_close_range(first: libc::c_uint, last: libc::c_uint, keep: std::os::fd::RawFd) {
+    // Upper bound on real fds: RLIMIT_NOFILE cur, fallback 4096. We never need
+    // to walk to c_uint::MAX since no fd above the soft limit can be open.
+    let mut rl = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let limit: libc::c_uint = if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0
+        && rl.rlim_cur != libc::RLIM_INFINITY
+        && rl.rlim_cur > 0
+    {
+        rl.rlim_cur.min(libc::c_uint::MAX as libc::rlim_t) as libc::c_uint
+    } else {
+        4096
+    };
+    let upper = last.min(limit);
+    let mut fd = first;
+    while fd <= upper {
+        if fd as std::os::fd::RawFd != keep {
+            let _ = libc::close(fd as libc::c_int);
+        }
+        // Guard against c_uint overflow when upper == c_uint::MAX.
+        if fd == upper {
+            break;
+        }
+        fd += 1;
+    }
+}
+
+/// Read the current `errno` value. Async-signal-safe.
+unsafe fn errno() -> libc::c_int {
+    *libc::__errno_location()
 }
 
 /// Sanitized env for the child: keep PATH/HOME/USER/etc, strip secret-shaped

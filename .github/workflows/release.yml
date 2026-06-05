@@ -19,10 +19,12 @@ jobs:
     name: regenerate THIRD-PARTY-LICENSES
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-about
-        run: cargo install --locked cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
       - name: Generate THIRD-PARTY-LICENSES
         run: cargo about generate about.hbs -o THIRD-PARTY-LICENSES
       - uses: actions/upload-artifact@v4
@@ -54,7 +56,7 @@ jobs:
             os: windows-latest
             ext: ".exe"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -104,7 +106,7 @@ jobs:
     needs: [build, third-party-licenses]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
