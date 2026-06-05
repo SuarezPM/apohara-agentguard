@@ -36,6 +36,12 @@ landlock = "0.4"
 [dev-dependencies]
 proptest = "1"
 
+# ReDoS guard runs as a plain binary (no libtest harness) so it executes under
+# both `cargo test` and `cargo bench`.
+[[bench]]
+name = "regex_redos"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true
