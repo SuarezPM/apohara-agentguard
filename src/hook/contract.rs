@@ -52,6 +52,10 @@ pub struct HookInput {
     /// The submitted text for `UserPromptSubmit`.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// The tool's result for `PostToolUse` (Claude Code spells it `tool_response`;
+    /// `tool_output` is accepted as an alias for forward/back compat).
+    #[serde(default, alias = "tool_output")]
+    pub tool_response: serde_json::Value,
 }
 
 impl HookInput {
@@ -67,6 +71,37 @@ impl HookInput {
             .get("file_path")
             .or_else(|| self.tool_input.get("path"))
             .and_then(|v| v.as_str())
+    }
+
+    /// Extract the URL from a `WebFetch` `tool_input.url`.
+    pub fn web_url(&self) -> Option<&str> {
+        self.tool_input.get("url").and_then(|v| v.as_str())
+    }
+
+    /// Extract the query string from a `WebSearch` `tool_input.query`.
+    pub fn web_query(&self) -> Option<&str> {
+        self.tool_input.get("query").and_then(|v| v.as_str())
+    }
+
+    /// Best-effort extraction of textual `PostToolUse` output for scanning.
+    ///
+    /// Claude Code's `tool_response` for Bash is typically an object with
+    /// `stdout`/`stderr` fields, but older shapes are a bare string. Both are
+    /// accepted; an object's `stdout` (then `stderr`, then the whole JSON) is used.
+    pub fn tool_stdout(&self) -> Option<String> {
+        match &self.tool_response {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(s.clone()),
+            v => {
+                if let Some(s) = v.get("stdout").and_then(|x| x.as_str()) {
+                    Some(s.to_string())
+                } else if let Some(s) = v.get("stderr").and_then(|x| x.as_str()) {
+                    Some(s.to_string())
+                } else {
+                    Some(v.to_string())
+                }
+            }
+        }
     }
 }
 

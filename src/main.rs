@@ -27,7 +27,7 @@ enum Command {
     Hook,
     /// Run a command inside the local seccomp + Landlock sandbox.
     Sandbox(SandboxArgs),
-    /// Scan content through the input firewall. TODO(US-006).
+    /// Scan stdin content through the input firewall (prints a verdict).
     Scan,
     /// Check a command through the anti-bypass gate. TODO(US-003).
     Check,
@@ -58,10 +58,7 @@ fn main() -> ExitCode {
         }
         Command::Hook => run_hook(),
         Command::Sandbox(args) => run_sandbox(args),
-        Command::Scan => {
-            println!("scan: not yet implemented");
-            ExitCode::SUCCESS
-        }
+        Command::Scan => run_scan(),
         Command::Check => {
             println!("check: not yet implemented");
             ExitCode::SUCCESS
@@ -92,6 +89,34 @@ fn run_hook() -> ExitCode {
     }
 
     ExitCode::from(code as u8)
+}
+
+/// Scan stdin content through the input firewall (manual / debugging use).
+///
+/// Surface-agnostic: scans the raw text with default thresholds and prints the
+/// verdict. Exit 2 on a Block so it composes in shell pipelines; 0 otherwise.
+fn run_scan() -> ExitCode {
+    let mut content = String::new();
+    if std::io::stdin().read_to_string(&mut content).is_err() {
+        eprintln!("agentguard scan: could not read stdin");
+        return ExitCode::from(2);
+    }
+    let verdict = agentguard::firewall::scan_content(&content, &Default::default());
+    use agentguard::verdict::Tier;
+    match verdict.tier {
+        Tier::Allow => {
+            println!("allow");
+            ExitCode::SUCCESS
+        }
+        Tier::Warn => {
+            println!("warn: {}", verdict.reason);
+            ExitCode::SUCCESS
+        }
+        Tier::Block => {
+            eprintln!("block: {}", verdict.reason);
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// Run a command under the sandbox. `danger_full_access` requires the explicit

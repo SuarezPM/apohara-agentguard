@@ -13,9 +13,10 @@
 //! before we look up their per-rule severity. The two-stage rules are checked
 //! separately (they are not expressible in the `RegexSet`).
 //!
-//! `scan_content` is intentionally SURFACE-AGNOSTIC for now.
-//! TODO(US-008): per-surface posture (prompt vs tool-output vs fetched-doc),
-//! out-of-band refetch ([`refetch`]), and wiring into the hook live in US-008.
+//! [`scan_content`] is SURFACE-AGNOSTIC: it scores text and never decides
+//! posture. [`scan_surface`] (US-008, C1) wraps it with per-surface posture —
+//! which surfaces may BLOCK, which are WARN-only, and which obtain their content
+//! out-of-band via [`refetch`] before scanning.
 
 pub mod djl;
 pub mod owasp;
@@ -27,6 +28,7 @@ use std::sync::LazyLock;
 use regex::RegexSet;
 
 use crate::verdict::{severity_to_tier, Thresholds, Tier, Verdict};
+use refetch::{ContentSource, FetchError, FetchTarget, Surface};
 
 /// Severity assigned to any OWASP ASI pattern match. The Python pre-filter is a
 /// boolean default-deny sieve (first match => block); we map that to a Block-tier
@@ -68,8 +70,8 @@ static PRE_MATCH: LazyLock<PreMatch> = LazyLock::new(|| {
 /// via [`severity_to_tier`] with the supplied [`Thresholds`]. The `reason`
 /// names the highest-severity matching rule for traceability.
 ///
-/// Surface-agnostic: it does not yet vary posture by ingress surface.
-/// TODO(US-008): surface routing + refetch + hook wiring.
+/// Surface-agnostic: it scores text only. Per-surface posture (which surfaces may
+/// BLOCK vs WARN, and out-of-band fetching) lives in [`scan_surface`].
 pub fn scan_content(text: &str, thresholds: &Thresholds) -> Verdict {
     let mut top: Option<(&'static str, u8)> = None;
     let mut consider = |id: &'static str, sev: u8| {
@@ -101,6 +103,111 @@ pub fn scan_content(text: &str, thresholds: &Thresholds) -> Verdict {
                 Tier::Allow => Verdict::allow(),
             }
         }
+    }
+}
+
+/// The payload a surface delivers to the firewall.
+///
+/// Inline surfaces ([`Surface::UserPrompt`], [`Surface::BashStdout`]) carry the
+/// text directly; fetch surfaces ([`Surface::ReadFile`], [`Surface::WebFetch`],
+/// [`Surface::WebSearch`]) carry a [`FetchTarget`] the [`ContentSource`] resolves
+/// to text out-of-band.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FirewallInput {
+    /// Text already in hand (prompt body, captured stdout).
+    Inline(String),
+    /// A target to fetch and then scan.
+    Fetch(FetchTarget),
+}
+
+impl FirewallInput {
+    /// Inline text payload.
+    pub fn inline(text: impl Into<String>) -> Self {
+        Self::Inline(text.into())
+    }
+
+    /// A local-file fetch target.
+    pub fn file(path: impl Into<String>) -> Self {
+        Self::Fetch(FetchTarget::File(path.into()))
+    }
+
+    /// A URL fetch target.
+    pub fn url(url: impl Into<String>) -> Self {
+        Self::Fetch(FetchTarget::Url(url.into()))
+    }
+}
+
+/// Scan content arriving on `surface`, applying the C1 per-surface posture.
+///
+/// Posture:
+/// - **Read / WebFetch / WebSearch** (PreToolUse): obtain the content out-of-band
+///   via `src` (SSRF/size/time controls live in [`refetch`]), scan it, and return
+///   the full 3-tier verdict — these surfaces are BLOCK-capable. An SSRF refusal
+///   returns a [`Tier::Block`] *without fetching*; a fetch timeout fails closed to
+///   [`Tier::Warn`] (never hangs, never silently allows); any other fetch error
+///   also fails closed to [`Tier::Warn`].
+/// - **UserPrompt**: scan the prompt text directly, **WARN-only** — a Block is
+///   clamped to Warn because exit 2 on `UserPromptSubmit` erases the prompt.
+/// - **BashStdout** (PostToolUse): scan the captured stdout, **WARN-only** —
+///   PostToolUse runs after the tool, so it cannot block.
+pub fn scan_surface(
+    surface: Surface,
+    payload: &FirewallInput,
+    src: &dyn ContentSource,
+    thresholds: &Thresholds,
+) -> Verdict {
+    match surface {
+        // BLOCK-capable: fetch out-of-band, then scan the obtained content.
+        Surface::ReadFile | Surface::WebFetch | Surface::WebSearch => {
+            match fetch_text(payload, src) {
+                Ok(text) => scan_content(&text, thresholds),
+                // SSRF: refuse without fetching, as a hard Block (we never reached
+                // the content, but the *attempt* to reach an internal address is
+                // itself the signal worth blocking).
+                Err(FetchError::Ssrf(rej)) => {
+                    Verdict::block(format!("firewall refused out-of-band fetch: {rej}"))
+                }
+                // Timeout / I/O: fail closed to WARN — surface a caution but do not
+                // hang or silently allow unseen content.
+                Err(e) => Verdict::warn(format!(
+                    "firewall could not inspect content (failing to WARN): {e}"
+                )),
+            }
+        }
+
+        // WARN-only: scan inline text; clamp any Block down to Warn.
+        Surface::UserPrompt | Surface::BashStdout => {
+            let text = inline_text(payload, src);
+            clamp_to_warn(scan_content(&text, thresholds))
+        }
+    }
+}
+
+/// Resolve a fetch-surface payload to text via the content source.
+fn fetch_text(payload: &FirewallInput, src: &dyn ContentSource) -> Result<String, FetchError> {
+    match payload {
+        FirewallInput::Fetch(target) => src.fetch(target),
+        // An inline payload on a fetch surface: scan what we already have.
+        FirewallInput::Inline(text) => Ok(text.clone()),
+    }
+}
+
+/// Resolve a WARN-only-surface payload to text (inline is the normal case; a
+/// fetch target is resolved best-effort, failing to empty so a bad fetch on a
+/// WARN-only surface cannot itself produce noise).
+fn inline_text(payload: &FirewallInput, src: &dyn ContentSource) -> String {
+    match payload {
+        FirewallInput::Inline(text) => text.clone(),
+        FirewallInput::Fetch(target) => src.fetch(target).unwrap_or_default(),
+    }
+}
+
+/// Downgrade a [`Tier::Block`] verdict to [`Tier::Warn`], preserving the reason.
+fn clamp_to_warn(v: Verdict) -> Verdict {
+    if v.tier == Tier::Block {
+        Verdict::warn(v.reason)
+    } else {
+        v
     }
 }
 
