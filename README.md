@@ -60,7 +60,11 @@ allow                                                                  # exit 0
 | 🔒 **seccomp + Landlock sandbox** | A real `seccomp-bpf` + Landlock LSM jail (`sandbox`) for agent-generated code. Default-deny: network denied by omission, filesystem confined to one workspace root. **Fail-closed** — on a kernel without Landlock it refuses to run rather than run unconfined. Tiers: `read_only`, `workspace_write`, `danger_full_access`. |
 | 🧱 **Prompt-injection firewall** | Deterministic regex rules over tool inputs and outputs (`scan`) — prompts, fetched web content, read files, command output — inspected out-of-band on `PreToolUse` for injection, exfiltration, and harmful-content signatures, with an SSRF-guarded out-of-band re-fetch. |
 | 🦀 **Offline, deterministic, no model** | Pure Rust, MSRV 1.85, single binary. No network at scan time, no API keys, no telemetry. Same input ⇒ same bytes out — auditable and reproducible. |
-| 🔌 **Claude Code plugin** | Ships a plugin manifest + hook config wiring `apohara-agentguard hook` to `PreToolUse`/`PostToolUse`/`UserPromptSubmit`. A `PreToolUse` block emits `permissionDecision: "deny"` and exits 2. |
+| 🔌 **Claude Code plugin** | Ships a plugin manifest + hook config wiring `apohara-agentguard hook` to `PreToolUse`/`PostToolUse`/`UserPromptSubmit`. A `PreToolUse` block emits `permissionDecision: "deny"` and exits 2. Codex `PreToolUse` hooks are supported too. |
+| 🕵️ **Canary exfiltration detection** | Opt-in (off by default): seeds a per-session sentinel into the agent's context at `SessionStart` and **warns** if it resurfaces verbatim in `PostToolUse` tool output — catching context exfiltration _by effect_, after every pattern layer. Detection-after-execution, never blocks; bypassed by any output transform (documented honestly). |
+| ☁️ **Opt-in domain packs** | `cloud` (AWS/GCP/Azure destructive ops), `db` (`DROP`/`TRUNCATE` DDL), and `container` (`docker … prune -af`, `kubectl delete --all`) rule packs — off by default, each shipping its own committed `0-FP / 0-FN` corpus so the default benchmark stays untouched. |
+| 🧰 **MCP tool form** | `apohara-agentguard mcp` exposes `check_command` and `scan_prompt` as read-only MCP tools over a short-lived stdio JSON-RPC process (not a daemon), so any MCP client — not only the Claude Code hook — can call the gate and firewall. |
+| 🎚️ **Granular, tiered control** | Per-component kill-switch (`AGENTGUARD_DISABLE=gate,firewall,pathguard,canary`), severity presets (`level = "strict"\|"high"\|"critical"`), and config-driven **tool-level gating** — gate _which_ MCP tool and _which_ arguments, not just `Bash.command`. The empty-config default stays byte-identical. |
 | ⚖️ **Dual-licensed** | MIT **OR** Apache-2.0, at your option. Third-party licenses enumerated and gated by `cargo deny`. |
 
 ---
@@ -104,7 +108,7 @@ export AGENTGUARD_DISABLE=1   # or: disable = true in the config file
 apohara-agentguard version
 ```
 
-**Subcommands:** `check <cmd>` (gate) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `version`.
+**Subcommands:** `check <cmd>` (gate) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `version`.
 
 **Other acquisition paths.** A thin `npx apohara-agentguard` launcher resolves the release binary by platform × arch × libc; `cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked` builds from source (the supported path for musl Linux and any platform without a pinned artifact).
 
@@ -167,7 +171,7 @@ The build asserts `FP == 0`, `FN == 0`, and `FN < naive FN` — the corpus is **
 > ```
 > The full honest scorecard — per-layer catch/miss, latency percentiles, and the **external** Tensor Trust human-attack benchmark (where the firewall misses 94.8%, the documented motivation for a v0.3 semantic tier) — lives in [BENCHMARK.md](BENCHMARK.md).
 
-**Kill-switch.** apohara-agentguard ships an all-or-nothing emergency kill-switch so a fail-closed bug can never brick your Bash tool: `export AGENTGUARD_DISABLE=1` (or `disable = true` in the config) immediately allows everything and exits 0, disabling the gate, path-guard, **and** firewall together. It is read from the **hook process's** environment, not the inspected command's — a malicious Bash command that sets `AGENTGUARD_DISABLE=1` runs in a _different_ process and **cannot self-disarm** the gate. A granular form (`AGENTGUARD_DISABLE=gate,firewall`) is a planned v0.2 follow-up.
+**Kill-switch.** apohara-agentguard ships an all-or-nothing emergency kill-switch so a fail-closed bug can never brick your Bash tool: `export AGENTGUARD_DISABLE=1` (or `disable = true` in the config) immediately allows everything and exits 0, disabling the gate, path-guard, **and** firewall together. It is read from the **hook process's** environment, not the inspected command's — a malicious Bash command that sets `AGENTGUARD_DISABLE=1` runs in a _different_ process and **cannot self-disarm** the gate. A **granular** form now ships: `AGENTGUARD_DISABLE=gate,firewall,pathguard,canary` disables only the named components (and config-side `disabled = [...]`), while severity presets (`level = "strict"|"high"|"critical"`) tune the thresholds — both opt-in, with the empty-config default byte-identical to before.
 
 **Release integrity (signed binaries).** The release binaries are **signed and carry a build-provenance attestation** generated keylessly in CI (Sigstore + GitHub OIDC). This is **SLSA v1.0 Build Level 2 — not Level 3.** Per GitHub's docs: _"Artifact attestations by itself provides SLSA v1.0 Build Level 2."_ Verify a downloaded binary with the GitHub CLI:
 > ```sh
@@ -189,12 +193,14 @@ apohara-agentguard/
 │   │   ├── compound.rs      # Bash compound/leg splitter
 │   │   ├── decode.rs        # base64 / ANSI-C decode + rescan
 │   │   ├── resolve.rs       # variable-alias resolution
-│   │   └── taxonomy.rs      # verb-aware destructive taxonomy
-│   ├── hook/                # Claude Code hook contract + path-guard
+│   │   ├── taxonomy.rs      # verb-aware destructive taxonomy
+│   │   └── packs/           # opt-in cloud / DB DDL / container rule packs
+│   ├── hook/                # Claude Code hook contract + path-guard + canary
+│   ├── mcp/                 # MCP stdio JSON-RPC server (check_command / scan_prompt)
 │   ├── sandbox/linux/       # seccomp-bpf + Landlock jail (fail-closed)
 │   ├── firewall/            # prompt-injection firewall + SSRF re-fetch
 │   ├── verdict.rs           # 3-tier Allow / Warn / Block model
-│   └── main.rs              # clap CLI: check · sandbox · scan · hook · version
+│   └── main.rs              # clap CLI: check · sandbox · scan · hook · mcp · version
 ├── tests/                   # incl. committed FP/FN gate + evasion regression net
 ├── benches/                 # ReDoS guard for the rule regexes
 ├── fuzz/                    # cargo-fuzz target over gate::evaluate
@@ -212,10 +218,17 @@ apohara-agentguard/
 - [x] Committed FP/FN precision gate (`0 / 73`, `0 / 33`)
 - [x] Claude Code plugin packaging (manifest + hooks + verified installers)
 - [x] Signed release binaries with build-provenance attestation (SLSA Build **L2**)
-- [ ] SLSA Build **L3** via a reusable-workflow refactor (v0.3 follow-up)
+- [ ] SLSA Build **L3** — reusable-workflow isolation **prepped** (`_attest.yml`, build/sign split); claim flips on once a public release run is verifiable with `gh attestation verify --signer-workflow`
 - [ ] Publish to crates.io + the Claude Code plugin marketplace
 - [x] MCP tool form — `check_command`/`scan_prompt` over a short-lived stdio JSON-RPC process (not a long-running daemon)
-- [x] Granular kill-switch (`AGENTGUARD_DISABLE=gate,firewall`)
+- [x] Granular per-component kill-switch (`AGENTGUARD_DISABLE=gate,firewall,…`) + severity presets
+- [x] Canary exfiltration detection (`PostToolUse`, opt-in, warn-only)
+- [x] Opt-in domain packs (cloud / DB DDL / container, each with a `0-FP / 0-FN` corpus)
+- [x] Tool-level gating (gate _which_ MCP tool and _which_ arguments)
+- [x] Codex `PreToolUse` hook compatibility
+- [x] External **Tensor Trust** human-attack benchmark (honest 94.8% FN published)
+- [x] Default-build purity guard (CI keeps the lean default free of any model/wasm/eBPF runtime)
+- [ ] MiniBERT semantic-classifier tier as an opt-in **isolated sidecar** (gated on an accuracy ship-gate that beats today's 379/400 FN)
 - [ ] musl Linux release binaries
 
 ---
