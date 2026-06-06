@@ -36,29 +36,49 @@ const ELLIPSIS: &str = "…";
 /// (`cwd`, `permission_mode`, …) is ignored via `#[serde(default)]` + the
 /// absence of `deny_unknown_fields`, so a schema addition upstream can never
 /// break parsing.
+///
+/// # Cross-harness compatibility (US-H)
+///
+/// The field spellings below are Claude Code's. **OpenAI Codex's hook contract
+/// (`developers.openai.com/codex/hooks`) deliberately mirrors Claude Code's**:
+/// its documented release wire format for `PreToolUse`/`PostToolUse` uses the
+/// SAME snake_case keys (`hook_event_name`, `tool_name`, `tool_input` with a
+/// `command`, `tool_response`), so a Codex Bash payload already parses into this
+/// struct unchanged. Codex adds extras (`model`, `permission_mode`, `turn_id`,
+/// `tool_use_id`) that are simply ignored here (no `deny_unknown_fields`).
+///
+/// The camelCase `alias`es below are an ADDITIVE hedge against the camelCase
+/// variant that appeared in Codex's *prototype* schema / proposal threads
+/// (`sessionId`, `toolName`, `toolInput`, `hookEventName`, `toolResponse`). They
+/// never affect Claude Code parsing. ASSUMPTION TO RE-VERIFY against the current
+/// Codex hooks docs: the documented release is snake_case; treat the camelCase
+/// aliases as defensive, not as a confirmed live Codex spelling.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HookInput {
     /// The event that fired: `"PreToolUse"`, `"PostToolUse"`, `"UserPromptSubmit"`, …
-    #[serde(default)]
+    #[serde(default, alias = "hookEventName")]
     pub hook_event_name: String,
-    /// The Claude Code session identifier. Used to key the per-session canary
-    /// token (US-Bemit / US-Bscan). Absent on some events / older schemas.
-    #[serde(default)]
+    /// The Claude Code / Codex session identifier. Used to key the per-session
+    /// canary token (US-Bemit / US-Bscan). Absent on some events / older schemas.
+    #[serde(default, alias = "sessionId")]
     pub session_id: Option<String>,
     /// Tool name for tool-use events (e.g. `"Bash"`, `"Read"`). Absent for
-    /// `UserPromptSubmit`.
-    #[serde(default)]
+    /// `UserPromptSubmit`. Codex's canonical Bash name is also `"Bash"`; its file
+    /// edits report `"apply_patch"` (out of scope for the dispatch table today).
+    #[serde(default, alias = "toolName")]
     pub tool_name: Option<String>,
     /// Raw tool input payload (e.g. `{ "command": "npm test" }` or
-    /// `{ "file_path": "…" }`). Kept as an opaque value and read per-tool.
-    #[serde(default)]
+    /// `{ "file_path": "…" }`). Kept as an opaque value and read per-tool. Codex's
+    /// Bash/`apply_patch` inputs also nest the command under `tool_input.command`.
+    #[serde(default, alias = "toolInput")]
     pub tool_input: serde_json::Value,
     /// The submitted text for `UserPromptSubmit`.
     #[serde(default)]
     pub prompt: Option<String>,
-    /// The tool's result for `PostToolUse` (Claude Code spells it `tool_response`;
-    /// `tool_output` is accepted as an alias for forward/back compat).
-    #[serde(default, alias = "tool_output")]
+    /// The tool's result for `PostToolUse` (Claude Code and Codex spell it
+    /// `tool_response`; `tool_output` / `toolResponse` are accepted as aliases for
+    /// forward/back compat across harnesses).
+    #[serde(default, alias = "tool_output", alias = "toolResponse")]
     pub tool_response: serde_json::Value,
 }
 
@@ -271,6 +291,36 @@ mod tests {
         )
         .expect("parse with unknown fields");
         assert_eq!(input.hook_event_name, "PreToolUse");
+    }
+
+    #[test]
+    fn input_parses_codex_release_snake_case_with_extras() {
+        // Codex's documented PreToolUse payload is snake_case (mirrors Claude
+        // Code) plus extras (model, permission_mode, turn_id, tool_use_id) that
+        // must be ignored, not rejected.
+        let input: HookInput = serde_json::from_str(
+            r#"{"session_id":"s","turn_id":"t","cwd":"/p","hook_event_name":"PreToolUse",
+                "model":"gpt-test","permission_mode":"default","tool_name":"Bash",
+                "tool_use_id":"call-1","tool_input":{"command":"rm -rf ~"}}"#,
+        )
+        .expect("parse codex snake_case payload");
+        assert_eq!(input.hook_event_name, "PreToolUse");
+        assert_eq!(input.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(input.bash_command(), Some("rm -rf ~"));
+    }
+
+    #[test]
+    fn input_parses_camelcase_aliases() {
+        // ADDITIVE hedge for the camelCase variant from Codex's prototype schema.
+        let input: HookInput = serde_json::from_str(
+            r#"{"hookEventName":"PreToolUse","sessionId":"s","toolName":"Bash",
+                "toolInput":{"command":"rm -rf ~"}}"#,
+        )
+        .expect("parse camelCase aliases");
+        assert_eq!(input.hook_event_name, "PreToolUse");
+        assert_eq!(input.session_id.as_deref(), Some("s"));
+        assert_eq!(input.tool_name.as_deref(), Some("Bash"));
+        assert_eq!(input.bash_command(), Some("rm -rf ~"));
     }
 
     #[test]
