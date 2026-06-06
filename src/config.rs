@@ -25,6 +25,34 @@ pub struct CustomBlock {
     pub category: String,
 }
 
+/// Per-tool argument gating policy (consumed later by US-I). Matches a
+/// `pattern` against the value of argument `arg` for a given `tool` and, on
+/// match, contributes `severity` (a numeric severity in the same scale as
+/// [`CustomBlock::severity`], driving the resulting tier via [`Thresholds`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRule {
+    /// Tool name the rule applies to (e.g. `"web_fetch"`).
+    pub tool: String,
+    /// Argument name whose value is matched against `pattern`.
+    pub arg: String,
+    /// Pattern to match against the argument value (substring/`*`-glob).
+    pub pattern: String,
+    /// Severity that drives the resulting tier (see [`Thresholds`]). Same
+    /// numeric scale as [`CustomBlock::severity`].
+    #[serde(default)]
+    pub severity: u8,
+}
+
+/// `[canary]` configuration. Opt-in canary toggle (consumed by US-Bemit /
+/// US-Bscan). All fields `#[serde(default)]` so an empty/absent TOML leaves the
+/// canary OFF (the `Default` derive yields `enabled = false`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CanaryConfig {
+    /// Whether the canary feature is active. Default `false` (off).
+    #[serde(default)]
+    pub enabled: bool,
+}
+
 /// User-facing configuration that overrides built-in defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
@@ -50,6 +78,23 @@ pub struct Config {
     /// unless `include_command` is set. See [`AuditConfig`].
     #[serde(default)]
     pub audit: AuditConfig,
+    /// Names of enabled domain packs (consumed later by US-C). Default empty.
+    #[serde(default)]
+    pub packs: Vec<String>,
+    /// Per-tool argument gating policy (consumed later by US-I). Default empty.
+    #[serde(default)]
+    pub tool_rules: Vec<ToolRule>,
+    /// Component names to disable (consumed later by US-F1). Default empty. This
+    /// is distinct from [`Config::disable`], which disables ALL gating.
+    #[serde(default)]
+    pub disabled: Vec<String>,
+    /// Severity preset name (consumed later by US-F1, maps to [`Thresholds`]).
+    /// Default `None`.
+    #[serde(default)]
+    pub level: Option<String>,
+    /// Canary toggle (`[canary]`). Off by default. See [`CanaryConfig`].
+    #[serde(default)]
+    pub canary: CanaryConfig,
 }
 
 /// Default for [`Config::normalize`] — the pre-pass is on by default.
@@ -69,6 +114,14 @@ impl Default for Config {
             normalize: true,
             // Audit log off by default, metadata-only.
             audit: AuditConfig::default(),
+            // Forward-compat fields (consumed by later stories): all empty/off
+            // by default so `Config::default()` and an empty TOML agree.
+            packs: Vec::new(),
+            tool_rules: Vec::new(),
+            disabled: Vec::new(),
+            level: None,
+            // Canary off by default.
+            canary: CanaryConfig::default(),
         }
     }
 }
@@ -188,6 +241,19 @@ mod tests {
                 path: Some(PathBuf::from("/tmp/agentguard-audit.jsonl")),
                 include_command: true,
             },
+            // Non-default forward-compat fields so the round-trip exercises
+            // each new field (otherwise toml_round_trip is a false green).
+            packs: vec!["aws".to_string(), "k8s".to_string()],
+            tool_rules: vec![ToolRule {
+                tool: "web_fetch".to_string(),
+                arg: "url".to_string(),
+                pattern: "*169.254.169.254*".to_string(),
+                severity: 9,
+            }],
+            disabled: vec!["firewall".to_string()],
+            level: Some("strict".to_string()),
+            // Non-default (default is false) so the round-trip exercises [canary].
+            canary: CanaryConfig { enabled: true },
         }
     }
 
@@ -219,6 +285,23 @@ mod tests {
         assert!(!cfg.audit.enabled);
         assert!(cfg.audit.path.is_none());
         assert!(!cfg.audit.include_command);
+    }
+
+    #[test]
+    fn partial_toml_omitting_new_fields_is_default() {
+        // A TOML that sets only pre-existing fields must leave every
+        // forward-compat field (packs/tool_rules/disabled/level/canary) at its
+        // default — proving the empty-TOML invariant survives schema growth.
+        let text = r#"
+            allow_list = ["git status"]
+            disable = false
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parse partial");
+        assert!(cfg.packs.is_empty());
+        assert!(cfg.tool_rules.is_empty());
+        assert!(cfg.disabled.is_empty());
+        assert!(cfg.level.is_none());
+        assert!(!cfg.canary.enabled);
     }
 
     #[test]
