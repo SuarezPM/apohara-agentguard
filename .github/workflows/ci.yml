@@ -42,6 +42,27 @@ jobs:
       # Fails on any dependency license outside the allowlist in deny.toml.
       - run: cargo deny check licenses
 
+  clean-install:
+    name: clean-install (independence gate)
+    runs-on: ubuntu-latest
+    # NO Swatinem/rust-cache here on purpose: a cold, cacheless install proves
+    # the crate pulls only public deps and carries no local/private path deps.
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Phase 1 (active): install from the checked-out source tree. Green here
+      # means the crate builds and installs standalone with no path/private deps.
+      - name: Install from path (standalone)
+        run: cargo install --path . --locked
+
+      # Phase 2 (gated): install from the public git URL. Proves the published
+      # repo is reachable and installable by third parties. The repo is not
+      # public yet, so this stays disabled to avoid a guaranteed CI failure.
+      # ENABLE after repo is public (Pablo push OK): proves public-git reachability.
+      # - name: Install from public git
+      #   run: cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
