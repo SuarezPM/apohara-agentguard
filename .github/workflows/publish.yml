@@ -1,0 +1,26 @@
+name: Publish to crates.io
+
+# Maintainer-triggered ONLY (workflow_dispatch). Publishing is irreversible — a
+# released version cannot be deleted (only yanked) — so this never runs
+# automatically. It reads the CARGO_REGISTRY_TOKEN repository secret and
+# publishes the current default-branch version with the committed lockfile.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # `cargo publish` packages, verify-builds, then uploads. --locked uses the
+      # committed Cargo.lock. The token is read from the env var cargo expects.
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
