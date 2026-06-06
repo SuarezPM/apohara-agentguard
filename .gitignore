@@ -17,3 +17,8 @@
 
 # Local assistant working files (not part of the project)
 /.claude
+/.omc
+/.cocoindex_code
+/AGENTS.md
+/CLAUDE.md
+/CLAUDE.local.md
