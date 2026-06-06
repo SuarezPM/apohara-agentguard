@@ -35,6 +35,11 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # OIDC token for keyless signing + permission to write the attestation.
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -84,6 +89,18 @@ jobs:
           dst="dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
           cp "$src" "$dst"
 
+      # Generate a SLSA Build provenance attestation over the STAGED host file.
+      # The subject is the host-staged binary so the cross-built aarch64 ELF
+      # (which lands on the ubuntu-latest host) is covered like the rest.
+      # actions/attest is GitHub's primitive; attest-build-provenance@v4 is a
+      # maintained wrapper over it, so new wiring uses actions/attest directly.
+      # With no sbom-path/predicate inputs, actions/attest auto-detects
+      # Provenance mode and generates the SLSA build provenance predicate.
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}
+
       - name: Compute SHA256
         shell: bash
         run: |
@@ -100,6 +117,38 @@ jobs:
         with:
           name: apohara-agentguard-${{ matrix.target }}
           path: dist/*
+
+  verify-attestations:
+    name: verify attestations (E2E)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      # E2E gate: every released binary MUST carry a verifiable attestation.
+      # This closes a silent unattested-aarch64 gap — if the per-target
+      # attestation step were skipped or misfired for any target, the verify
+      # below fails and the whole workflow fails.
+      - name: Verify all binaries are attested
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          found=0
+          while IFS= read -r -d '' bin; do
+            found=$((found + 1))
+            echo "::group::verify $bin"
+            gh attestation verify "$bin" -R SuarezPM/apohara-agentguard
+            echo "::endgroup::"
+          done < <(find artifacts -type f -name 'apohara-agentguard-*' ! -name '*.sha256' -print0)
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no binaries found to verify" >&2
+            exit 1
+          fi
+          echo "verified $found attested binaries"
 
   manifest:
     name: assemble SHA256 manifest
@@ -131,5 +180,5 @@ jobs:
       - name: Upload release bundle (for maintainer review — NOT auto-published)
         uses: actions/upload-artifact@v4
         with:
-          name: apohara-agentguard-v0.1.0-release
+          name: apohara-agentguard-v0.1.1-release
           path: release/*

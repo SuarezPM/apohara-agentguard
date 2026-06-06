@@ -41,6 +41,33 @@ it makes no "blocks 100% of attacks" claim.
 
 ---
 
+## Release integrity (signed binaries + build provenance)
+
+The release binaries are **signed and carry a build-provenance attestation**
+generated keylessly in GitHub Actions (Sigstore, GitHub OIDC). This lets you
+verify that a downloaded binary was built by this repository's release workflow
+and was not tampered with afterwards.
+
+This is **SLSA v1.0 Build Level 2 — not Level 3.** Per GitHub's documentation:
+> Artifact attestations by itself provides SLSA v1.0 Build Level 2.
+
+**Verify a downloaded binary** (requires the GitHub CLI, `gh`):
+
+```sh
+gh attestation verify <downloaded-binary> -R SuarezPM/apohara-agentguard
+```
+
+A non-zero exit means the binary is unsigned, tampered with, or not produced by
+this repository — **do not run it.** The release workflow also runs this exact
+verification over every published target as an end-to-end gate, so an
+unattested artifact fails the release.
+
+**SLSA Build Level 3** — which requires a hardened, non-falsifiable build
+environment (a reusable-workflow refactor that isolates provenance generation
+from the build) — is a documented **v0.3 follow-up**, not a current claim.
+
+---
+
 ## Threat model
 
 For each component: **what it defends against** and **what it explicitly does

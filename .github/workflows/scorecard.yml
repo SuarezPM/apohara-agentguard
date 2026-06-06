@@ -1,0 +1,44 @@
+name: Scorecard
+
+# OpenSSF Scorecard: automated supply-chain security posture analysis.
+# Results are published to the public OpenSSF dashboard and uploaded as SARIF
+# so findings surface in the repo's GitHub code-scanning / Security tab.
+on:
+  schedule:
+    # Weekly, Mondays at 06:17 UTC (off-peak to avoid the top-of-hour rush).
+    - cron: "17 6 * * 1"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Read-only by default; jobs widen only the scopes they need.
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      # Upload the SARIF results to the code-scanning dashboard.
+      security-events: write
+      # Mint the OIDC token Scorecard uses to publish results.
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@v2
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publish to the public OpenSSF dashboard, enabling the README badge.
+          publish_results: true
+
+      - name: Upload SARIF results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif

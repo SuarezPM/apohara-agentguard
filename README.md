@@ -9,6 +9,11 @@
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
 [![Version](https://img.shields.io/badge/version-0.1.0-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
 [![Sandbox](https://img.shields.io/badge/sandbox-seccomp%2BLandlock-success?style=for-the-badge)](#-how-it-works--honesty)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/SuarezPM/apohara-agentguard/badge?style=for-the-badge)](https://scorecard.dev/viewer/?uri=github.com/SuarezPM/apohara-agentguard)
+<!-- OpenSSF Best Practices (CII) badge: gated on a public maintainer registration at https://www.bestpractices.dev/. After registering this project, replace PROJECT_ID below with the assigned numeric id and uncomment the badge so it renders a real score instead of a broken/false one.
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/PROJECT_ID/badge?style=for-the-badge)](https://www.bestpractices.dev/projects/PROJECT_ID)
+-->
+[![OpenSSF Best Practices](https://img.shields.io/badge/OpenSSF%20Best%20Practices-registration%20pending-lightgrey?style=for-the-badge)](https://www.bestpractices.dev/)
 
 **[Quick Start](#-quick-start)** · **[Features](#-features)** · **[How it works](#-how-it-works--honesty)** · **[Roadmap](#-roadmap)**
 
@@ -163,6 +168,12 @@ The build asserts `FP == 0`, `FN == 0`, and `FN < naive FN` — the corpus is **
 
 **Kill-switch.** apohara-agentguard ships an all-or-nothing emergency kill-switch so a fail-closed bug can never brick your Bash tool: `export AGENTGUARD_DISABLE=1` (or `disable = true` in the config) immediately allows everything and exits 0, disabling the gate, path-guard, **and** firewall together. It is read from the **hook process's** environment, not the inspected command's — a malicious Bash command that sets `AGENTGUARD_DISABLE=1` runs in a _different_ process and **cannot self-disarm** the gate. A granular form (`AGENTGUARD_DISABLE=gate,firewall`) is a planned v0.2 follow-up.
 
+**Release integrity (signed binaries).** The release binaries are **signed and carry a build-provenance attestation** generated keylessly in CI (Sigstore + GitHub OIDC). This is **SLSA v1.0 Build Level 2 — not Level 3.** Per GitHub's docs: _"Artifact attestations by itself provides SLSA v1.0 Build Level 2."_ Verify a downloaded binary with the GitHub CLI:
+> ```sh
+> gh attestation verify <downloaded-binary> -R SuarezPM/apohara-agentguard
+> ```
+> A non-zero exit means the binary is unsigned, tampered with, or not built by this repo — don't run it. The release workflow runs this same check over every target as an E2E gate. **SLSA Build L3** (a hardened reusable-workflow refactor) is a documented **v0.3 follow-up**, not a current claim.
+
 **Known limitations.** Web re-fetch is a double-fetch (added latency); TOCTOU on web content; WebSearch is best-effort (the load-bearing guarantee is the per-surface posture + SSRF guard, not byte-identical results); the SSRF guard denies private/loopback/link-local/ULA/cloud-metadata _resolved_ IPs and re-checks every redirect hop; the sandbox is Linux-only and fails closed elsewhere. The full threat model lives in [SECURITY.md](SECURITY.md).
 
 ---
@@ -199,7 +210,8 @@ apohara-agentguard/
 - [x] `cargo-fuzz` target over `gate::evaluate`
 - [x] Committed FP/FN precision gate (`0 / 73`, `0 / 33`)
 - [x] Claude Code plugin packaging (manifest + hooks + verified installers)
-- [ ] Signed release binaries with build attestation
+- [x] Signed release binaries with build-provenance attestation (SLSA Build **L2**)
+- [ ] SLSA Build **L3** via a reusable-workflow refactor (v0.3 follow-up)
 - [ ] Publish to crates.io + the Claude Code plugin marketplace
 - [ ] MCP tool form (expose the gate/firewall as MCP tools)
 - [ ] Granular kill-switch (`AGENTGUARD_DISABLE=gate,firewall`)
