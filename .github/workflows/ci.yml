@@ -86,7 +86,8 @@ jobs:
         run: |
           cargo test --lib --bins
           cargo test --test headline_bypass --test gate_fp --test hook_contract \
-                     --test pathguard --test firewall_posture
+                     --test pathguard --test firewall_posture \
+                     --test benchmark --test benchmark_packs --test benchmark_tensortrust
           # sandbox_offlinux only exists (and matters) off Linux.
           if [ "${{ runner.os }}" != "Linux" ]; then
             cargo test --test sandbox_offlinux
