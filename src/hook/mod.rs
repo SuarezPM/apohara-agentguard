@@ -29,7 +29,7 @@ use crate::config::{Config, EnvDisable};
 use crate::firewall::refetch::{ContentSource, Surface, UreqSource};
 use crate::firewall::{self, FirewallInput};
 use crate::gate;
-use crate::verdict::{Tier, Verdict};
+use crate::verdict::{severity_to_tier, Tier, Verdict};
 use contract::HookInput;
 
 /// Component names recognized by the granular kill-switch (US-F1).
@@ -273,7 +273,30 @@ fn dispatch(
 /// - Read -> pathguard (secret-path) THEN firewall content scan (injection)
 /// - Write/Edit -> pathguard
 /// - WebFetch/WebSearch -> firewall out-of-band re-fetch + content scan
+///
+/// After the built-in per-tool check (US-I, tool-level gating), the
+/// user-configured [`Config::tool_rules`] are evaluated against arbitrary
+/// `tool_input` arguments of ANY tool (not just Bash). The built-in and the
+/// tool-rule verdicts are combined by [`max_verdict`] — the MORE SEVERE wins.
+/// With the default empty `tool_rules`, [`tool_rule_verdict`] returns Allow, so
+/// the combine is a no-op and behavior is byte-identical to before.
 fn dispatch_pretooluse(
+    input: &HookInput,
+    config: &Config,
+    src: &dyn ContentSource,
+    env_disabled: &EnvDisable,
+) -> Verdict {
+    let builtin = dispatch_pretooluse_builtin(input, config, src, env_disabled);
+    // Precedence: the more severe of the built-in check and any tool_rule match
+    // wins. Empty tool_rules => Allow => `builtin` is returned unchanged.
+    max_verdict(builtin, tool_rule_verdict(input, config))
+}
+
+/// The pre-existing per-tool PreToolUse checks (Bash gate, Read/Write/Edit
+/// pathguard, WebFetch/WebSearch firewall). Factored out of
+/// [`dispatch_pretooluse`] so the new tool-rule pass composes around it without
+/// altering this logic.
+fn dispatch_pretooluse_builtin(
     input: &HookInput,
     config: &Config,
     src: &dyn ContentSource,
@@ -346,6 +369,109 @@ fn dispatch_pretooluse(
 
         // Other tools: fail open.
         _ => Verdict::allow(),
+    }
+}
+
+/// Evaluate the user-configured [`Config::tool_rules`] against this PreToolUse
+/// input (US-I, tool-level gating).
+///
+/// For every rule whose `tool` equals the input `tool_name`, the value of
+/// `rule.arg` is read out of `tool_input` (a JSON object) by name — supporting
+/// both a simple key (`"path"`) and a dotted nested path (`"a.b.c"`) — and, if
+/// that string value matches `rule.pattern` under the SAME substring/`*`-glob
+/// semantics the gate's `custom_blocks` use (see [`arg_pattern_matches`]), the
+/// rule contributes a verdict at the tier from
+/// `severity_to_tier(rule.severity, …)`. The worst (most severe) match wins.
+///
+/// Returns [`Verdict::allow`] when no rule matches — and, in particular, when
+/// `tool_rules` is empty (the default), so the caller's combine is a no-op and
+/// the default path stays byte-identical.
+fn tool_rule_verdict(input: &HookInput, config: &Config) -> Verdict {
+    let tool = input.tool_name.as_deref().unwrap_or("");
+    let thresholds = config.effective_thresholds();
+    let mut best = Verdict::allow();
+    for rule in &config.tool_rules {
+        if rule.tool != tool {
+            continue;
+        }
+        let value = match lookup_arg(&input.tool_input, &rule.arg) {
+            Some(v) => v,
+            None => continue,
+        };
+        if !arg_pattern_matches(&rule.pattern, value) {
+            continue;
+        }
+        let tier = severity_to_tier(rule.severity, &thresholds);
+        let candidate = match tier {
+            Tier::Allow => continue,
+            Tier::Warn | Tier::Block => {
+                let reason = format!(
+                    "tool `{}` argument `{}` matches policy pattern `{}` (tool-rule)",
+                    rule.tool, rule.arg, rule.pattern
+                );
+                if tier == Tier::Block {
+                    Verdict::block(reason)
+                } else {
+                    Verdict::warn(reason)
+                }
+            }
+        };
+        best = max_verdict(best, candidate);
+    }
+    best
+}
+
+/// Read a string value out of a `tool_input` JSON object by `arg`.
+///
+/// `arg` is either a simple key (`"path"`) or a dotted nested path
+/// (`"target.file"`) walked object-by-object. Returns the value only when it
+/// resolves to a JSON string; any non-string (or a missing key) yields `None`.
+fn lookup_arg<'a>(tool_input: &'a serde_json::Value, arg: &str) -> Option<&'a str> {
+    let mut node = tool_input;
+    for key in arg.split('.') {
+        node = node.get(key)?;
+    }
+    node.as_str()
+}
+
+/// Match a tool-rule `pattern` against an argument `value` using the EXACT same
+/// semantics as the gate's `custom_blocks` (`gate::custom_block_matches`): a
+/// pattern containing `*` matches when every non-empty `*`-separated part
+/// appears in order (a non-anchored contains-of-parts); otherwise the pattern
+/// must be a substring of `value`.
+fn arg_pattern_matches(pattern: &str, value: &str) -> bool {
+    if pattern.contains('*') {
+        let parts: Vec<&str> = pattern.split('*').filter(|p| !p.is_empty()).collect();
+        let mut cursor = 0usize;
+        for part in parts {
+            match value[cursor..].find(part) {
+                Some(pos) => cursor += pos + part.len(),
+                None => return false,
+            }
+        }
+        true
+    } else {
+        value.contains(pattern)
+    }
+}
+
+/// Return the MORE SEVERE of two verdicts (`Block` > `Warn` > `Allow`); ties
+/// keep `a`. Used to combine the built-in PreToolUse check with the tool-rule
+/// pass so the stricter decision always wins (US-I precedence rule).
+fn max_verdict(a: Verdict, b: Verdict) -> Verdict {
+    if tier_rank(b.tier) > tier_rank(a.tier) {
+        b
+    } else {
+        a
+    }
+}
+
+/// Order tiers by severity for [`max_verdict`]: `Allow` < `Warn` < `Block`.
+fn tier_rank(tier: Tier) -> u8 {
+    match tier {
+        Tier::Allow => 0,
+        Tier::Warn => 1,
+        Tier::Block => 2,
     }
 }
 
@@ -770,6 +896,188 @@ mod tests {
             .expect("warn context");
         assert!(ctx.contains("after execution, not prevention"));
         assert!(v["hookSpecificOutput"].get("permissionDecision").is_none());
+    }
+
+    // ---- US-I: tool-level gating via config.tool_rules ----
+
+    use crate::config::ToolRule;
+
+    /// A PreToolUse event for an arbitrary (non-Bash) tool with the given JSON
+    /// `tool_input` object.
+    fn pretooluse_tool(tool: &str, tool_input: serde_json::Value) -> String {
+        serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": tool,
+            "tool_input": tool_input,
+        })
+        .to_string()
+    }
+
+    /// Decision (`permissionDecision`) from a stdout payload, if present.
+    fn decision(out: &Option<String>) -> Option<String> {
+        let s = out.as_ref()?;
+        let v: serde_json::Value = serde_json::from_str(s).ok()?;
+        v["hookSpecificOutput"]["permissionDecision"]
+            .as_str()
+            .map(str::to_string)
+    }
+
+    #[test]
+    fn empty_tool_rules_is_byte_identical_noop() {
+        // NON-REGRESSION: with the default (empty) tool_rules, the new pass must
+        // change NOTHING. For every existing surface, the (out, code) pair with
+        // a `Config::default()` must match what the built-in checks alone yield.
+        let inj = CannedSource(INJECTION);
+        let cfg = Config::default();
+        assert!(cfg.tool_rules.is_empty(), "precondition: default is empty");
+
+        let cases = [
+            pretooluse_bash("rm -rf ~"), // gate Block
+            pretooluse_bash("ls -la"),   // gate Allow
+            pretooluse_read(".env"),     // pathguard Block
+            WEBFETCH_X.to_string(),      // firewall Block (injection source)
+            pretooluse_tool("mcp__fs__write", serde_json::json!({"path": "/etc/passwd"})),
+        ];
+        for json in cases {
+            let (out, code) = run_with_source(&json, &cfg, &inj);
+            // Recompute via the built-in path alone to prove equivalence.
+            let input: HookInput = serde_json::from_str(&json).unwrap();
+            let builtin = dispatch_pretooluse_builtin(&input, &cfg, &inj, &EnvDisable::default());
+            let (exp_out, exp_code) = contract::emit("PreToolUse", &builtin);
+            assert_eq!(code, exp_code, "exit code differs for {json}");
+            assert_eq!(out, exp_out, "stdout differs for {json}");
+        }
+    }
+
+    #[test]
+    fn tool_rule_gates_non_bash_tool_arg() {
+        // POSITIVE: a tool_rule gates a NON-Bash tool by tool name + arg name.
+        // severity 9 with default thresholds (block_at = 8) => Block tier.
+        let cfg = Config {
+            tool_rules: vec![ToolRule {
+                tool: "mcp__fs__write".to_string(),
+                arg: "path".to_string(),
+                pattern: "*/.ssh/*".to_string(),
+                severity: 9,
+            }],
+            ..Config::default()
+        };
+        let inj = CannedSource("");
+
+        // Matching path => Block (deny, exit 2). The tier matches
+        // severity_to_tier(9, default) == Block.
+        let hit = pretooluse_tool(
+            "mcp__fs__write",
+            serde_json::json!({"path": "/home/u/.ssh/authorized_keys"}),
+        );
+        let (out, code) = run_with_source(&hit, &cfg, &inj);
+        assert_eq!(
+            severity_to_tier(9, &cfg.effective_thresholds()),
+            Tier::Block
+        );
+        assert_eq!(code, 2, "matching tool_rule must deny");
+        assert_eq!(decision(&out).as_deref(), Some("deny"));
+
+        // Non-matching path => Allow (the rule's arg value misses the pattern).
+        let miss = pretooluse_tool(
+            "mcp__fs__write",
+            serde_json::json!({"path": "/home/u/project/file.txt"}),
+        );
+        let (out, code) = run_with_source(&miss, &cfg, &inj);
+        assert!(out.is_none(), "non-matching arg => Allow");
+        assert_eq!(code, 0);
+
+        // Different tool name => rule does not apply.
+        let other = pretooluse_tool(
+            "mcp__other__write",
+            serde_json::json!({"path": "/home/u/.ssh/id_rsa"}),
+        );
+        let (out, code) = run_with_source(&other, &cfg, &inj);
+        assert!(out.is_none(), "tool name mismatch => rule skipped");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn tool_rule_warn_tier_matches_severity() {
+        // A severity that maps to Warn (5..=7 under default thresholds) warns
+        // only (additionalContext, exit 0) — never denies.
+        let cfg = Config {
+            tool_rules: vec![ToolRule {
+                tool: "mcp__fs__write".to_string(),
+                arg: "path".to_string(),
+                pattern: "secrets".to_string(),
+                severity: 5,
+            }],
+            ..Config::default()
+        };
+        assert_eq!(severity_to_tier(5, &cfg.effective_thresholds()), Tier::Warn);
+        let json = pretooluse_tool(
+            "mcp__fs__write",
+            serde_json::json!({"path": "/app/secrets.yml"}),
+        );
+        let (out, code) = run_with_source(&json, &cfg, &CannedSource(""));
+        assert_eq!(code, 0, "Warn tier must not block");
+        let v: serde_json::Value = serde_json::from_str(&out.unwrap()).unwrap();
+        assert!(v["hookSpecificOutput"]["additionalContext"].is_string());
+        assert!(v["hookSpecificOutput"].get("permissionDecision").is_none());
+    }
+
+    #[test]
+    fn tool_rule_supports_nested_arg_path() {
+        // A dotted `arg` walks nested objects.
+        let cfg = Config {
+            tool_rules: vec![ToolRule {
+                tool: "mcp__db__exec".to_string(),
+                arg: "query.text".to_string(),
+                pattern: "DROP TABLE".to_string(),
+                severity: 9,
+            }],
+            ..Config::default()
+        };
+        let json = pretooluse_tool(
+            "mcp__db__exec",
+            serde_json::json!({"query": {"text": "DROP TABLE users"}}),
+        );
+        let (out, code) = run_with_source(&json, &cfg, &CannedSource(""));
+        assert_eq!(code, 2);
+        assert_eq!(decision(&out).as_deref(), Some("deny"));
+    }
+
+    #[test]
+    fn tool_rule_more_severe_verdict_wins() {
+        // Precedence: a tool_rule on Bash's `command` arg combines with the
+        // built-in gate; the MORE SEVERE wins. Here the gate Allows a benign
+        // command but a Block-tier tool_rule still denies it.
+        let cfg = Config {
+            tool_rules: vec![ToolRule {
+                tool: "Bash".to_string(),
+                arg: "command".to_string(),
+                pattern: "*kubectl*delete*".to_string(),
+                severity: 9,
+            }],
+            ..Config::default()
+        };
+        // Gate alone Allows this (kubectl delete is not in the destructive
+        // taxonomy), but the tool_rule escalates it to Block.
+        let json = pretooluse_bash("kubectl delete namespace prod");
+        let (out, code) = run_with_source(&json, &cfg, &CannedSource(""));
+        assert_eq!(code, 2, "tool_rule Block must win over gate Allow");
+        assert_eq!(decision(&out).as_deref(), Some("deny"));
+
+        // And the inverse: a Warn-tier tool_rule must NOT downgrade a gate
+        // Block — the built-in Block stays.
+        let cfg2 = Config {
+            tool_rules: vec![ToolRule {
+                tool: "Bash".to_string(),
+                arg: "command".to_string(),
+                pattern: "rm".to_string(),
+                severity: 5, // Warn
+            }],
+            ..Config::default()
+        };
+        let (out, code) = run_with_source(&pretooluse_bash("rm -rf ~"), &cfg2, &CannedSource(""));
+        assert_eq!(code, 2, "gate Block must survive a weaker tool_rule");
+        assert_eq!(decision(&out).as_deref(), Some("deny"));
     }
 
     #[test]
