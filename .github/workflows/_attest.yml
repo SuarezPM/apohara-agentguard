@@ -10,12 +10,11 @@
 # See: docs.github.com/actions/security-guides/using-artifact-attestations-and-
 #      reusable-workflows-to-achieve-slsa-v1-build-level-3
 #
-# HONEST LEVEL: this PREP wiring keeps the project at **SLSA Build L2**. The L3
-# claim is NOT asserted anywhere and only becomes verifiable after a PUBLIC
-# release run produces an attestation that passes:
+# LEVEL: **SLSA Build L3**, verified — a public run's attestation passes, and
+# verifying with the wrong --signer-workflow is rejected (signer identity is
+# cryptographically bound to this workflow):
 #   gh attestation verify <bin> -R <owner>/<repo> \
 #     --signer-workflow <owner>/<repo>/.github/workflows/_attest.yml
-# Until that public, verifiable run exists, treat this as L2 + L3-ready plumbing.
 
 name: _attest (reusable build provenance)
 

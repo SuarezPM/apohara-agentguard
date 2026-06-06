@@ -123,17 +123,15 @@ jobs:
           name: apohara-agentguard-${{ matrix.target }}
           path: dist/*
 
-  # SLSA L3 PREP: isolated provenance generation. One call per target into the
+  # SLSA Build L3: isolated provenance generation. One call per target into the
   # reusable workflow, which downloads that target's staged binary and signs it
-  # in a fresh job/VM with no caller build steps. This preserves a provenance
-  # attestation per target while moving signing out of the build job.
+  # in a fresh job/VM with no caller build steps. A provenance attestation per
+  # target, with signing moved out of the build job (the build cannot forge it).
   #
-  # HONEST LEVEL: still **SLSA Build L2**. The L3 claim is NOT asserted here and
-  # only becomes verifiable after a PUBLIC release run produces an attestation
-  # that passes:
+  # VERIFIED: a public run's attestation passes (and the wrong signer-workflow is
+  # rejected):
   #   gh attestation verify <bin> -R SuarezPM/apohara-agentguard \
   #     --signer-workflow SuarezPM/apohara-agentguard/.github/workflows/_attest.yml
-  # Until that public, verifiable run exists, this is L2 + L3-ready plumbing.
   attest:
     name: attest ${{ matrix.target }}
     needs: build
