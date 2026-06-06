@@ -13,12 +13,12 @@ SSRF-guard bypass, or any way to make apohara-agentguard run an unconfined proce
 it should refuse — **please report it privately first.** Do NOT open a public
 issue for an exploitable flaw until a fix is available.
 
-<!-- TODO(Pablo): fill in the private security contact (email / GitHub Security
-     Advisory link) before publishing. Placeholder below. -->
-
-- **Private contact:** `SECURITY-CONTACT-PLACEHOLDER` (to be filled in by the
-  maintainer — e.g. a dedicated security email or a GitHub private Security
-  Advisory on the `SuarezPM/apohara-agentguard` repository).
+**How to report (private):** open a private GitHub Security Advisory at
+<https://github.com/SuarezPM/apohara-agentguard/security/advisories/new>
+(Security → "Report a vulnerability"). Private vulnerability reporting is enabled
+on the repository, so the report stays confidential until a fix is published. If
+you cannot use GitHub Security Advisories, contact the maintainer privately
+through their [GitHub profile](https://github.com/SuarezPM).
 
 What to include: a minimal reproduction (the exact command / input / config),
 the apohara-agentguard version (`apohara-agentguard --version`), the OS + kernel
