@@ -35,10 +35,12 @@ jobs:
   build:
     name: build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
-    # OIDC token for keyless signing + permission to write the attestation.
+    # SLSA L3 isolation: the build job no longer holds id-token/attestations
+    # permissions and does NOT sign. Provenance is generated in the separate
+    # reusable `attest` job below (see _attest.yml), so caller-controlled build
+    # steps cannot influence signing. The build only stages + uploads the
+    # binary for the isolated attest job to consume.
     permissions:
-      id-token: write
-      attestations: write
       contents: read
     strategy:
       fail-fast: false
@@ -89,17 +91,20 @@ jobs:
           dst="dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
           cp "$src" "$dst"
 
-      # Generate a SLSA Build provenance attestation over the STAGED host file.
-      # The subject is the host-staged binary so the cross-built aarch64 ELF
-      # (which lands on the ubuntu-latest host) is covered like the rest.
-      # actions/attest is GitHub's primitive; attest-build-provenance@v4 is a
-      # maintained wrapper over it, so new wiring uses actions/attest directly.
-      # With no sbom-path/predicate inputs, actions/attest auto-detects
-      # Provenance mode and generates the SLSA build provenance predicate.
-      - name: Attest build provenance
-        uses: actions/attest@v4
-        with:
-          subject-path: dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}
+      # NOTE: provenance attestation NO LONGER happens here. It was moved to the
+      # isolated reusable `attest` job (uses: ./.github/workflows/_attest.yml)
+      # to satisfy the SLSA L3 build/sign isolation requirement. The subject is
+      # still the host-staged binary, so the cross-built aarch64 ELF (which
+      # lands on the ubuntu-latest host) is covered like the rest.
+      #
+      # ROLLBACK: if the reusable-workflow refactor breaks signing in a PUBLIC
+      # run, revert to the inline step below (and restore the build job's
+      # id-token/attestations: write permissions + drop the `attest` job and its
+      # `needs:` from verify-attestations):
+      #   - name: Attest build provenance
+      #     uses: actions/attest@v4
+      #     with:
+      #       subject-path: dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}
 
       - name: Compute SHA256
         shell: bash
@@ -118,9 +123,48 @@ jobs:
           name: apohara-agentguard-${{ matrix.target }}
           path: dist/*
 
+  # SLSA L3 PREP: isolated provenance generation. One call per target into the
+  # reusable workflow, which downloads that target's staged binary and signs it
+  # in a fresh job/VM with no caller build steps. This preserves a provenance
+  # attestation per target while moving signing out of the build job.
+  #
+  # HONEST LEVEL: still **SLSA Build L2**. The L3 claim is NOT asserted here and
+  # only becomes verifiable after a PUBLIC release run produces an attestation
+  # that passes:
+  #   gh attestation verify <bin> -R SuarezPM/apohara-agentguard \
+  #     --signer-workflow SuarezPM/apohara-agentguard/.github/workflows/_attest.yml
+  # Until that public, verifiable run exists, this is L2 + L3-ready plumbing.
+  attest:
+    name: attest ${{ matrix.target }}
+    needs: build
+    # Caller job must ALSO declare these for the reusable workflow's OIDC
+    # signing + attestation write to work.
+    permissions:
+      id-token: write
+      attestations: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            ext: ""
+          - target: aarch64-unknown-linux-gnu
+            ext: ""
+          - target: x86_64-apple-darwin
+            ext: ""
+          - target: aarch64-apple-darwin
+            ext: ""
+          - target: x86_64-pc-windows-msvc
+            ext: ".exe"
+    uses: ./.github/workflows/_attest.yml
+    with:
+      artifact-name: apohara-agentguard-${{ matrix.target }}
+      subject-name: apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}
+
   verify-attestations:
     name: verify attestations (E2E)
-    needs: build
+    needs: attest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

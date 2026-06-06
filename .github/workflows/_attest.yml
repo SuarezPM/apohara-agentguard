@@ -1,0 +1,68 @@
+# Reusable build-provenance attestation workflow.
+#
+# WHY THIS EXISTS (the L2 -> L3 structural change):
+# SLSA Build L3 requires that provenance generation (the signing step) be
+# isolated from the caller-controlled build steps, so a compromised build
+# cannot forge or influence its own provenance. GitHub's mechanism for that
+# isolation is a reusable workflow invoked via `on: workflow_call`: the attest
+# job here runs in a SEPARATE job/VM from the build, and the only thing the
+# caller can hand us is the already-built artifact + its identifiers.
+# See: docs.github.com/actions/security-guides/using-artifact-attestations-and-
+#      reusable-workflows-to-achieve-slsa-v1-build-level-3
+#
+# HONEST LEVEL: this PREP wiring keeps the project at **SLSA Build L2**. The L3
+# claim is NOT asserted anywhere and only becomes verifiable after a PUBLIC
+# release run produces an attestation that passes:
+#   gh attestation verify <bin> -R <owner>/<repo> \
+#     --signer-workflow <owner>/<repo>/.github/workflows/_attest.yml
+# Until that public, verifiable run exists, treat this as L2 + L3-ready plumbing.
+
+name: _attest (reusable build provenance)
+
+on:
+  workflow_call:
+    inputs:
+      artifact-name:
+        description: >-
+          Name of the uploaded actions/upload-artifact bundle that contains the
+          staged binary to attest (one per target).
+        required: true
+        type: string
+      subject-name:
+        description: >-
+          File name of the staged binary inside the downloaded artifact, e.g.
+          apohara-agentguard-x86_64-unknown-linux-gnu[.exe].
+        required: true
+        type: string
+
+# Both the caller job and this reusable workflow must hold these permissions for
+# keyless signing (OIDC) + writing the attestation to the repo's attestations
+# store. Provenance generation is the ONLY thing this workflow does.
+permissions:
+  id-token: write
+  attestations: write
+  contents: read
+
+jobs:
+  attest:
+    name: attest ${{ inputs.subject-name }}
+    runs-on: ubuntu-latest
+    steps:
+      # Pull only this target's staged binary into an isolated workspace. The
+      # build that produced it ran in a different job/VM; we never re-run any
+      # caller build step here.
+      - name: Download staged artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: dist
+
+      # Generate the SLSA Build provenance attestation over the staged host
+      # file. With no sbom-path/predicate inputs, actions/attest auto-detects
+      # Provenance mode and emits the SLSA build provenance predicate.
+      # actions/attest is GitHub's primitive; attest-build-provenance@v4 is a
+      # maintained wrapper over it, so this wiring uses actions/attest directly.
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/${{ inputs.subject-name }}
