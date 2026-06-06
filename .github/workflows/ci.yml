@@ -60,7 +60,10 @@ jobs:
       # URL. Proves the published repo is reachable and installable by third
       # parties straight from the default branch.
       - name: Install from public git
-        run: cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked
+        # Name the package: `cargo install --git` scans the whole repo and finds
+        # two bin crates (apohara-agentguard + the fuzz crate), so it needs the
+        # package specified to disambiguate.
+        run: cargo install --git https://github.com/SuarezPM/apohara-agentguard apohara-agentguard --locked
 
   purity:
     name: default-build purity guard

@@ -110,7 +110,7 @@ apohara-agentguard version
 
 **Subcommands:** `check <cmd>` (gate) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `version`.
 
-**Other acquisition paths.** A thin `npx apohara-agentguard` launcher resolves the release binary by platform × arch × libc; `cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked` builds from source (the supported path for musl Linux and any platform without a pinned artifact).
+**Other acquisition paths.** A thin `npx apohara-agentguard` launcher resolves the release binary by platform × arch × libc; `cargo install --git https://github.com/SuarezPM/apohara-agentguard apohara-agentguard --locked` builds from source (the supported path for musl Linux and any platform without a pinned artifact; the package is named so cargo skips the in-repo fuzz crate).
 
 > [!WARNING]
 > Downloading a pre-built binary is itself a supply-chain surface — the very risk this tool exists to flag. The `npx` and install-script paths resolve the artifact, verify its **SHA256 against a pinned manifest**, and **refuse to run on a mismatch**. Prefer `cargo install` and build from source when in doubt.
