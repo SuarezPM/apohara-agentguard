@@ -1,0 +1,26 @@
+# apohara-agentguard cloud-pack corpus — DANGEROUS
+#
+# Commands the OPT-IN `cloud` pack SHOULD catch (Block). One per line.
+# `#`-prefixed and blank lines are ignored. Only meaningful with the cloud
+# pack ENABLED (config.packs = ["cloud"]); never part of the default benchmark.
+
+# --- aws s3 bucket teardown ---
+aws s3 rb s3://my-bucket --force
+aws s3 rb --force s3://prod-data
+
+# --- aws delete-* / terminate API calls ---
+aws s3api delete-bucket --bucket my-bucket
+aws cloudformation delete-stack --stack-name prod
+aws rds delete-db-instance --db-instance-identifier prod-db
+aws dynamodb delete-table --table-name users
+aws ec2 terminate-instances --instance-ids i-0abc123
+
+# --- gcloud delete ---
+gcloud compute instances delete prod-vm
+gcloud storage buckets delete gs://my-bucket
+gcloud sql instances delete prod-db
+
+# --- az delete ---
+az group delete --name prod-rg
+az vm delete --name prod-vm --resource-group rg
+az storage account delete --name prodsa

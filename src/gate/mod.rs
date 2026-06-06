@@ -20,6 +20,7 @@
 pub mod compound;
 pub mod decode;
 pub mod normalize;
+pub mod packs;
 pub mod resolve;
 pub mod taxonomy;
 
@@ -176,8 +177,13 @@ fn scan_leg(leg: &str, depth: u8, config: &Config, best: &mut Option<Hit>) {
     // `eval`, `xargs … rm`, …) keeps its quoted content and still matches.
     let match_text = taxonomy::effective_match_text(leg);
 
-    // Built-in destructive taxonomy.
-    for rule in taxonomy::rules() {
+    // Built-in destructive taxonomy, UNIONED with any enabled domain packs
+    // (`config.packs`). With the default empty `packs` the chained iterator is
+    // exactly `taxonomy::rules()`, so the gate is byte-identical to no-packs.
+    for rule in taxonomy::rules()
+        .iter()
+        .chain(packs::enabled_rules(&config.packs))
+    {
         if rule.matches(&match_text) {
             consider(
                 best,

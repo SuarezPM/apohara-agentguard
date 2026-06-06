@@ -1,0 +1,24 @@
+# apohara-agentguard container-pack corpus — DANGEROUS
+#
+# Container/orchestrator commands the OPT-IN `container` pack SHOULD catch
+# (Block). One per line. `#`-prefixed and blank lines ignored. Only meaningful
+# with the container pack ENABLED (config.packs = ["container"]); never part of
+# the default benchmark.
+
+# --- docker bulk prune ---
+docker system prune -af
+docker system prune -a -f
+docker image prune -af
+docker volume prune -f
+docker network prune -f
+
+# --- docker force-remove ---
+docker rm -f mycontainer
+docker rm -f $(docker ps -aq)
+docker rmi -f myimage
+docker container rm -f web
+
+# --- kubectl delete --all ---
+kubectl delete pods --all
+kubectl delete --all deployments
+kubectl delete --all --namespace prod

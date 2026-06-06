@@ -1,0 +1,26 @@
+# apohara-agentguard cloud-pack corpus — BENIGN
+#
+# Read-only / non-destructive look-alikes the `cloud` pack must NOT flag, even
+# with the pack ENABLED. One per line. `#`-prefixed and blank lines ignored.
+
+# --- aws read-only ---
+aws s3 ls
+aws s3 ls s3://my-bucket
+aws s3 cp file.txt s3://my-bucket/
+aws s3 sync ./build s3://my-bucket
+aws ec2 describe-instances
+aws cloudformation describe-stacks --stack-name prod
+aws rds describe-db-instances
+aws sts get-caller-identity
+
+# --- gcloud read-only ---
+gcloud compute instances list
+gcloud storage ls gs://my-bucket
+gcloud sql instances describe prod-db
+gcloud auth login
+
+# --- az read-only ---
+az group list
+az vm list --resource-group rg
+az storage account show --name prodsa
+az login

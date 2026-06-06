@@ -1,0 +1,30 @@
+# apohara-agentguard container-pack corpus — BENIGN
+#
+# Read-only / non-destructive container look-alikes the `container` pack must
+# NOT flag, even with the pack ENABLED. One per line. `#`-prefixed and blank
+# lines ignored.
+
+# --- docker read-only / build / run ---
+docker ps
+docker ps -a
+docker images
+docker logs mycontainer
+docker build -t myapp .
+docker compose up -d
+docker run --rm -it ubuntu bash
+docker exec -it web sh
+docker pull nginx:latest
+docker stop web
+docker rm web
+
+# --- kubectl read-only / scoped (no --all) ---
+kubectl get pods
+kubectl get deployments -n prod
+kubectl describe pod web
+kubectl logs web
+kubectl apply -f deployment.yaml
+kubectl delete pod web-123
+
+# --- the word "prune" as data ---
+git commit -m "prune the docker volumes in CI"
+echo "run docker system prune -af to reclaim space"

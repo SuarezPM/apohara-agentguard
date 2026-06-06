@@ -1,0 +1,26 @@
+# apohara-agentguard db-pack corpus — BENIGN
+#
+# Read-only / non-destructive SQL look-alikes the `db` pack must NOT flag, even
+# with the pack ENABLED. One per line. `#`-prefixed and blank lines ignored.
+
+# --- read-only queries ---
+SELECT * FROM users;
+SELECT id, name FROM orders WHERE status = 'open';
+SELECT count(*) FROM events;
+
+# --- non-destructive DDL/DML ---
+CREATE TABLE users (id int primary key);
+ALTER TABLE users ADD COLUMN email text;
+INSERT INTO users (id) VALUES (1);
+UPDATE users SET name = 'x' WHERE id = 1;
+CREATE DATABASE staging;
+CREATE INDEX idx_users_email ON users (email);
+
+# --- the word "drop" as data, not a DROP TABLE/DATABASE statement ---
+SELECT * FROM raindrop_table;
+git commit -m "drop the legacy users table next sprint"
+echo "remember to truncate the logs manually"
+
+# --- read-only client invocations ---
+psql -c "SELECT 1;"
+mysql -e "SHOW TABLES;"
