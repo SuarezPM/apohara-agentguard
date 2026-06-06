@@ -1,7 +1,7 @@
 //! apohara-agentguard CLI entry point.
 //!
 //! Thin clap (derive) dispatch over the subcommands: `version`, `hook`,
-//! `sandbox`, `scan`, and `check`.
+//! `sandbox`, `scan`, `check`, and `mcp`.
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -32,6 +32,8 @@ enum Command {
     Scan,
     /// Check a command through the anti-bypass gate (prints a verdict).
     Check(CheckArgs),
+    /// Serve the gate + firewall as MCP tools over stdio (JSON-RPC 2.0).
+    Mcp,
 }
 
 #[derive(Args)]
@@ -67,6 +69,7 @@ fn main() -> ExitCode {
         Command::Sandbox(args) => run_sandbox(args),
         Command::Scan => run_scan(),
         Command::Check(args) => run_check(args),
+        Command::Mcp => run_mcp(),
     }
 }
 
@@ -144,6 +147,23 @@ fn run_check(args: CheckArgs) -> ExitCode {
         Tier::Block => {
             eprintln!("block: {}", verdict.reason);
             ExitCode::from(2)
+        }
+    }
+}
+
+/// Serve the gate + firewall as MCP tools over stdio (newline-delimited
+/// JSON-RPC 2.0). Short-lived request/response: reads stdin, answers on stdout,
+/// and exits when stdin closes. The gate uses the loaded user config (same
+/// loader as `check`/`scan`). A stdin/stdout I/O error exits non-zero.
+fn run_mcp() -> ExitCode {
+    let config = Config::load_default_locations().unwrap_or_default();
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    match apohara_agentguard::mcp::serve(stdin.lock(), stdout.lock(), &config) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("apohara-agentguard mcp: {e}");
+            ExitCode::from(74)
         }
     }
 }
