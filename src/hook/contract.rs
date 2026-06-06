@@ -33,14 +33,18 @@ const ELLIPSIS: &str = "…";
 /// Permissive view of the hook stdin JSON.
 ///
 /// Only the fields apohara-agentguard dispatches on are modeled; everything else
-/// (`session_id`, `cwd`, `permission_mode`, …) is ignored via
-/// `#[serde(default)]` + the absence of `deny_unknown_fields`, so a schema
-/// addition upstream can never break parsing.
+/// (`cwd`, `permission_mode`, …) is ignored via `#[serde(default)]` + the
+/// absence of `deny_unknown_fields`, so a schema addition upstream can never
+/// break parsing.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HookInput {
     /// The event that fired: `"PreToolUse"`, `"PostToolUse"`, `"UserPromptSubmit"`, …
     #[serde(default)]
     pub hook_event_name: String,
+    /// The Claude Code session identifier. Used to key the per-session canary
+    /// token (US-Bemit / US-Bscan). Absent on some events / older schemas.
+    #[serde(default)]
+    pub session_id: Option<String>,
     /// Tool name for tool-use events (e.g. `"Bash"`, `"Read"`). Absent for
     /// `UserPromptSubmit`.
     #[serde(default)]
@@ -144,6 +148,22 @@ impl HookOutput {
                 permission_decision: None,
                 permission_decision_reason: None,
                 additional_context: Some(cap_reason(reason)),
+            },
+        }
+    }
+
+    /// A SessionStart context-injection output: `hookSpecificOutput` carrying
+    /// `hookEventName="SessionStart"` + `additionalContext`. Per the Claude Code
+    /// hooks docs, SessionStart `additionalContext` is injected into the session
+    /// context — apohara-agentguard uses it to seed the canary sentinel as data.
+    /// The context string is capped like every other free-text field.
+    pub fn session_context(context: &str) -> Self {
+        Self {
+            hook_specific_output: HookSpecificOutput {
+                hook_event_name: "SessionStart".to_string(),
+                permission_decision: None,
+                permission_decision_reason: None,
+                additional_context: Some(cap_reason(context)),
             },
         }
     }
