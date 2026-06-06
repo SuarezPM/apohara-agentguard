@@ -877,7 +877,17 @@ mod tests {
     #[test]
     fn posttooluse_canary_echo_warns_never_blocks() {
         let _guard = isolate_tmpdir("echo");
-        let cfg = canary_on();
+        // Canary ON, firewall OFF: this test isolates the canary path. The
+        // firewall scans PostToolUse stdout FIRST and returns on any non-Allow,
+        // so a randomly generated hex token that happens to trip a firewall rule
+        // (e.g. a high-entropy/secret heuristic) would preempt the canary and
+        // mask its WARN — a low-probability CI flake. Disabling the firewall
+        // component here keeps the canary assertion deterministic.
+        let cfg = Config {
+            canary: crate::config::CanaryConfig { enabled: true },
+            disabled: vec![COMPONENT_FIREWALL.to_string()],
+            ..Config::default()
+        };
         // Seed a token for the session via SessionStart.
         let start = r#"{"hook_event_name":"SessionStart","session_id":"echo-sess"}"#;
         let _ = run(start, &cfg);
