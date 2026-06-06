@@ -1,0 +1,39 @@
+name: CodeQL
+
+# Static analysis (SAST) for the Rust code base via GitHub CodeQL. Rust is a
+# supported CodeQL language (public preview); the v3 codeql-action handles the
+# build/extraction. Findings surface in the repo's code-scanning / Security tab.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Mondays at 07:23 UTC (off-peak, offset from the Scorecard run).
+    - cron: "23 7 * * 1"
+
+# Minimal default; the analyze job widens only the scopes CodeQL needs.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (rust)
+    runs-on: ubuntu-latest
+    permissions:
+      # Upload code-scanning results to the Security tab.
+      security-events: write
+      # Read the repo contents and Actions metadata CodeQL inspects.
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3
+        with:
+          languages: rust
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@dd903d2e4f5405488e5ef1422510ee31c8b32357 # v3

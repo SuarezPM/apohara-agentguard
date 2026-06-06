@@ -51,7 +51,7 @@ jobs:
       # build that produced it ran in a different job/VM; we never re-run any
       # caller build step here.
       - name: Download staged artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ inputs.artifact-name }}
           path: dist
@@ -62,6 +62,6 @@ jobs:
       # actions/attest is GitHub's primitive; attest-build-provenance@v4 is a
       # maintained wrapper over it, so this wiring uses actions/attest directly.
       - name: Attest build provenance
-        uses: actions/attest@v4
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
         with:
           subject-path: dist/${{ inputs.subject-name }}
