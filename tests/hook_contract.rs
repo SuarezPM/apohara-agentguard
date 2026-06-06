@@ -78,25 +78,10 @@ fn kill_switch_config_disables_for_dangerous_command() {
     assert_eq!(code, 0, "kill-switch must allow (exit 0)");
 }
 
-#[test]
-fn kill_switch_env_disables_and_is_read_from_hook_process_env() {
-    // The switch is read from std::env of the HOOK process (this test process),
-    // NOT from the inspected command's env. Serialize the env mutation in one
-    // test to avoid interference with parallel tests.
-    let dangerous = pretooluse_bash("rm -rf ~");
-
-    // Sanity: without the switch the command blocks.
-    let (_, code_on) = run(&dangerous, &Config::default());
-    assert_eq!(code_on, 2);
-
-    // SAFETY: single-threaded section within this test; restored before return.
-    std::env::set_var("AGENTGUARD_DISABLE", "1");
-    let (out, code) = run(&dangerous, &Config::default());
-    std::env::remove_var("AGENTGUARD_DISABLE");
-
-    assert!(out.is_none(), "env kill-switch must produce no output");
-    assert_eq!(code, 0, "env kill-switch must allow (exit 0)");
-}
+// NOTE: the kill-switch ENV tests live in their own integration-test binary
+// (`tests/kill_switch_env.rs`). They mutate the process-global
+// `AGENTGUARD_DISABLE`, so they must NOT share a process with the many
+// `run()`-calling tests below, which read that env var.
 
 #[test]
 fn block_reason_is_length_capped() {
