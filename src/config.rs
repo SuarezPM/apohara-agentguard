@@ -162,6 +162,110 @@ impl Config {
             .iter()
             .any(|pattern| glob_match(pattern, command))
     }
+
+    /// Whether a named component is disabled (US-F1 granular kill-switch).
+    ///
+    /// The effective disabled-set is the UNION of three inputs:
+    /// 1. [`Config::disable`] (the legacy all-off flag) — when `true`, EVERY
+    ///    component is disabled.
+    /// 2. [`Config::disabled`] — explicit component names from the TOML.
+    /// 3. The `AGENTGUARD_DISABLE` hook-process env var, parsed as a comma list
+    ///    of component names (or `1`/`true` for ALL) — read by the caller in
+    ///    [`crate::hook`] and passed in via `env_disabled`.
+    ///
+    /// `component` and the configured/env names are compared case-insensitively
+    /// after trimming. Unknown names simply never match (not an error).
+    pub fn is_component_disabled(&self, component: &str, env_disabled: &EnvDisable) -> bool {
+        if self.disable || env_disabled.all {
+            return true;
+        }
+        let want = component.trim().to_ascii_lowercase();
+        // `env_disabled.names` are already lowercased + trimmed by
+        // `EnvDisable::parse`; `config.disabled` is raw TOML so normalize it here.
+        self.disabled
+            .iter()
+            .any(|c| c.trim().to_ascii_lowercase() == want)
+            || env_disabled.names.contains(&want)
+    }
+
+    /// The effective severity [`Thresholds`], applying the [`Config::level`]
+    /// preset when set, otherwise the configured/default [`Config::thresholds`].
+    ///
+    /// `level` is a named preset built ON TOP of the single-source [`Thresholds`]
+    /// type (it does not replace it). When `level` is `None` the configured
+    /// `thresholds` (default `block_at = 8`, `warn_at = 5`) are returned
+    /// unchanged, keeping the default path byte-identical.
+    pub fn effective_thresholds(&self) -> Thresholds {
+        match self.level.as_deref().map(level_preset) {
+            Some(Some(preset)) => preset,
+            // No preset, or an unrecognized name: fall back to configured thresholds.
+            _ => self.thresholds,
+        }
+    }
+}
+
+/// The `AGENTGUARD_DISABLE` env var parsed into a disabled-component set.
+///
+/// Parsed from the HOOK PROCESS env only (see the anti-self-disarm note in
+/// [`crate::hook`]). `1`/`true` (case-insensitive) means ALL components; any
+/// other value is treated as a comma-separated list of component names. Unknown
+/// tokens are kept verbatim (lowercased) and simply never match a real
+/// component, so they are effectively ignored without being an error.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EnvDisable {
+    /// All components disabled (`AGENTGUARD_DISABLE=1` / `true`).
+    pub all: bool,
+    /// Explicit component names (lowercased, trimmed).
+    pub names: Vec<String>,
+}
+
+impl EnvDisable {
+    /// Parse a raw `AGENTGUARD_DISABLE` value. An absent var maps to `None` at
+    /// the call site; here `raw` is the present value.
+    pub fn parse(raw: &str) -> Self {
+        let trimmed = raw.trim().to_ascii_lowercase();
+        if trimmed == "1" || trimmed == "true" {
+            return Self {
+                all: true,
+                names: Vec::new(),
+            };
+        }
+        let names = trimmed
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        Self { all: false, names }
+    }
+}
+
+/// Map a severity-preset `level` name to a [`Thresholds`] preset.
+///
+/// Presets are ordered from least to most aggressive blocking (lower
+/// `block_at` blocks MORE):
+/// - `"strict"`  -> `block_at = 7`, `warn_at = 4` (mildest of the three)
+/// - `"high"`    -> `block_at = 6`, `warn_at = 3`
+/// - `"critical"`-> `block_at = 5`, `warn_at = 2` (most aggressive: blocks the most)
+///
+/// An unrecognized name returns `None` so the caller falls back to the
+/// configured/default thresholds. Comparison is case-insensitive.
+fn level_preset(level: &str) -> Option<Thresholds> {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "strict" => Some(Thresholds {
+            block_at: 7,
+            warn_at: 4,
+        }),
+        "high" => Some(Thresholds {
+            block_at: 6,
+            warn_at: 3,
+        }),
+        "critical" => Some(Thresholds {
+            block_at: 5,
+            warn_at: 2,
+        }),
+        _ => None,
+    }
 }
 
 /// Candidate config paths in lookup order (see [`Config::load_default_locations`]).
@@ -340,6 +444,151 @@ mod tests {
         // `cargo *` glob entry.
         assert!(cfg.is_allowed("cargo build --release"));
         assert!(!cfg.is_allowed("npm install"));
+    }
+
+    // ---- US-F1: granular kill-switch + severity presets ----
+
+    #[test]
+    fn default_disabled_set_is_empty_and_thresholds_unchanged() {
+        // INVARIANT: the default config disables nothing and keeps today's
+        // thresholds, so an empty env + empty TOML is byte-identical to before.
+        let cfg = Config::default();
+        let env = EnvDisable::default();
+        assert!(!env.all);
+        assert!(env.names.is_empty());
+        for component in ["gate", "firewall", "pathguard", "canary"] {
+            assert!(
+                !cfg.is_component_disabled(component, &env),
+                "{component} must be enabled by default"
+            );
+        }
+        assert_eq!(cfg.effective_thresholds(), Thresholds::default());
+    }
+
+    #[test]
+    fn env_disable_parses_all_truthy() {
+        for raw in ["1", "true", "TRUE", " True "] {
+            let env = EnvDisable::parse(raw);
+            assert!(env.all, "{raw:?} must mean ALL");
+            assert!(env.names.is_empty());
+        }
+    }
+
+    #[test]
+    fn env_disable_parses_comma_list_case_insensitive() {
+        let env = EnvDisable::parse(" Gate , FIREWALL ,, unknown ");
+        assert!(!env.all);
+        assert_eq!(env.names, vec!["gate", "firewall", "unknown"]);
+    }
+
+    #[test]
+    fn is_component_disabled_union_of_config_and_env() {
+        // config.disabled lists firewall; env lists gate. Both are disabled, the
+        // others stay enabled.
+        let cfg = Config {
+            disabled: vec!["firewall".to_string()],
+            ..Config::default()
+        };
+        let env = EnvDisable::parse("gate");
+        assert!(cfg.is_component_disabled("gate", &env));
+        assert!(cfg.is_component_disabled("firewall", &env));
+        assert!(!cfg.is_component_disabled("pathguard", &env));
+        assert!(!cfg.is_component_disabled("canary", &env));
+    }
+
+    #[test]
+    fn disable_bool_disables_all_components() {
+        // Back-compat: the legacy all-off flag disables every component.
+        let cfg = Config {
+            disable: true,
+            ..Config::default()
+        };
+        let env = EnvDisable::default();
+        for component in ["gate", "firewall", "pathguard", "canary"] {
+            assert!(cfg.is_component_disabled(component, &env));
+        }
+    }
+
+    #[test]
+    fn env_all_disables_all_components() {
+        let cfg = Config::default();
+        let env = EnvDisable::parse("1");
+        for component in ["gate", "firewall", "pathguard", "canary"] {
+            assert!(cfg.is_component_disabled(component, &env));
+        }
+    }
+
+    #[test]
+    fn unknown_component_token_is_ignored() {
+        // An unknown name in config.disabled / env never matches a real
+        // component and is not an error.
+        let cfg = Config {
+            disabled: vec!["bogus".to_string()],
+            ..Config::default()
+        };
+        let env = EnvDisable::parse("nonsense");
+        for component in ["gate", "firewall", "pathguard", "canary"] {
+            assert!(!cfg.is_component_disabled(component, &env));
+        }
+    }
+
+    #[test]
+    fn level_presets_map_to_thresholds() {
+        let preset = |name: &str| {
+            Config {
+                level: Some(name.to_string()),
+                ..Config::default()
+            }
+            .effective_thresholds()
+        };
+        assert_eq!(
+            preset("strict"),
+            Thresholds {
+                block_at: 7,
+                warn_at: 4
+            }
+        );
+        assert_eq!(
+            preset("high"),
+            Thresholds {
+                block_at: 6,
+                warn_at: 3
+            }
+        );
+        assert_eq!(
+            preset("critical"),
+            Thresholds {
+                block_at: 5,
+                warn_at: 2
+            }
+        );
+        // Case-insensitive.
+        assert_eq!(preset("CRITICAL"), preset("critical"));
+    }
+
+    #[test]
+    fn level_none_uses_configured_thresholds() {
+        // No preset => the configured thresholds win (default here).
+        assert_eq!(
+            Config::default().effective_thresholds(),
+            Thresholds::default()
+        );
+        // An unrecognized preset name also falls back to configured thresholds.
+        let cfg = Config {
+            level: Some("bogus".to_string()),
+            thresholds: Thresholds {
+                block_at: 9,
+                warn_at: 4,
+            },
+            ..Config::default()
+        };
+        assert_eq!(
+            cfg.effective_thresholds(),
+            Thresholds {
+                block_at: 9,
+                warn_at: 4
+            }
+        );
     }
 
     #[test]
