@@ -63,6 +63,72 @@ jobs:
       # - name: Install from public git
       #   run: cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked
 
+  purity:
+    name: default-build purity guard
+    runs-on: ubuntu-latest
+    # Keystone of the go-public hardening cycle: PROVE the default build pulls
+    # in no model/wasm/ebpf runtime. This is a REAL guard (it can go RED), not a
+    # slogan: a mandatory negative self-test injects a denylisted crate and
+    # asserts the guard fires. Never continue-on-error.
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+
+      # NARROW denylist: concrete model/wasm/ebpf runtime crates only. We do NOT
+      # match bare `wasm`/`bpf`/`tokio` — Cargo.lock carries tooling-only
+      # `wasm-encoder`/`wasm-metadata`/`wasmparser`, the project's own sandbox is
+      # seccomp-bpf via `seccompiler`, and `tokio` is a generic async runtime.
+      # A keystone guard that false-REDs gets disabled, so keep it narrow.
+      # Run on the ROOT crate only (fuzz/ declares its own [workspace], so
+      # `cargo tree` here never traverses it).
+      - name: Purity guard (no model/wasm/ebpf runtime in default build)
+        run: |
+          set -euo pipefail
+          DENY='ort|onnxruntime|candle|tract|wasmtime|cranelift|aya|libbpf'
+          echo "Denylist: $DENY"
+          if cargo tree -e normal --manifest-path ./Cargo.toml | grep -E "$DENY"; then
+            echo "::error::A model/wasm/ebpf runtime leaked into the default build."
+            exit 1
+          fi
+          echo "Default build is pure: no denylisted runtime present."
+
+      # MANDATORY negative self-test: a guard that can never fail is not a guard.
+      # Inject a denylisted crate (tract) into Cargo.toml, run the SAME guard
+      # command, and assert it goes RED. A trap restores BOTH Cargo.toml and
+      # Cargo.lock no matter how the step exits, so neither is left dirty.
+      #
+      # NOTE: the injection MUST land under the [dependencies] table. A naive
+      # `>> Cargo.toml` append lands under the file's LAST table ([profile.release]
+      # here), where cargo silently ignores it -- the dep never enters the graph
+      # and the self-test would FALSELY pass. We use awk to insert right after the
+      # [dependencies] header. Resolving tract also rewrites Cargo.lock, hence the
+      # lock is backed up and restored too.
+      - name: Negative self-test (guard must go RED on injected dep)
+        run: |
+          set -uo pipefail
+          DENY='ort|onnxruntime|candle|tract|wasmtime|cranelift|aya|libbpf'
+          cp Cargo.toml Cargo.toml.purity.bak
+          cp Cargo.lock Cargo.lock.purity.bak
+          trap 'mv -f Cargo.toml.purity.bak Cargo.toml; mv -f Cargo.lock.purity.bak Cargo.lock' EXIT
+          # Insert `tract = "*"` immediately after the [dependencies] header.
+          awk '1; /^\[dependencies\]$/ { print "tract = \"*\"" }' Cargo.toml.purity.bak > Cargo.toml
+          # Re-run the exact guard logic. We EXPECT a match (exit 0 from grep).
+          if cargo tree -e normal --manifest-path ./Cargo.toml | grep -E "$DENY"; then
+            echo "Self-test OK: guard correctly went RED on injected 'tract'."
+          else
+            echo "::error::Self-test FAILED: guard did NOT detect injected 'tract'. A guard that can never fail is not a guard."
+            exit 1
+          fi
+          # Restore now and confirm both files are clean (trap is the backstop).
+          mv -f Cargo.toml.purity.bak Cargo.toml
+          mv -f Cargo.lock.purity.bak Cargo.lock
+          trap - EXIT
+          if ! git diff --quiet Cargo.toml; then
+            echo "::error::Cargo.toml left dirty after self-test restore."
+            exit 1
+          fi
+          echo "Cargo.toml restored cleanly."
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
