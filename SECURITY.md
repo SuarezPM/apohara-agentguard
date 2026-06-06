@@ -229,6 +229,35 @@ thread.
 
 ---
 
+## Non-goals (deliberately not built)
+
+Two capabilities are sometimes assumed to belong in a tool like this. They were
+**considered and deliberately scoped out** — not forgotten, not on a TODO list.
+Listing them here keeps the threat model honest and stops the decisions from
+being silently re-litigated.
+
+- **WASM / wasmtime macOS sandbox — NOT built.** wasmtime confines *WASI*
+  workloads, not arbitrary native macOS binaries. The commands an agent runs are
+  native processes, so a "macOS sandbox" built on wasmtime would confine nothing
+  that actually executes — a dishonest claim. macOS therefore stays
+  **fail-closed**: the `sandbox` subcommand refuses to run there (see *Threat
+  model §3*), which is the honest current posture rather than a fake jail.
+  *Carve-out:* confining agents that run `.wasm` **plugins** (WASI-plugin
+  confinement) is a genuinely different question wasmtime *could* answer — it is
+  not this, and is not promised here.
+- **eBPF behavioral telemetry — NOT built.** It is **observability, not a
+  preventive gate**, and it overlaps the enforcement this tool already ships:
+  the seccomp + Landlock layer (Threat model §3) *blocks* the syscalls and
+  filesystem access eBPF telemetry would merely *report*. Adding it would buy
+  redundant signal, not new prevention. *Carve-out:* BPF-LSM **enforcement**
+  (block, not observe) is a separate future question and is distinct from
+  passive telemetry.
+
+These are scope decisions with stated rationale, not gaps. For features that
+*are* planned, see the [roadmap](README.md#-roadmap).
+
+---
+
 ## Kill-switch
 
 `AGENTGUARD_DISABLE=1` (or `disable = true` in the config) is an **all-or-nothing
