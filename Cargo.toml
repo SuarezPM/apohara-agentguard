@@ -42,6 +42,12 @@ proptest = "1"
 name = "regex_redos"
 harness = false
 
+# Hook-path latency: end-to-end in-process `hook::run` p50/p99 timing. Plain
+# binary (no libtest harness), same pattern as `regex_redos`.
+[[bench]]
+name = "hook_latency"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true
