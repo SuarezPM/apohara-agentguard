@@ -28,7 +28,10 @@ fn m_aws_s3_rb_force(s: &str) -> bool {
 fn m_aws_delete(s: &str) -> bool {
     // Any `aws <service> delete-*` API call (delete-bucket, delete-stack,
     // delete-db-instance, delete-table, terminate-instances, …).
-    re!(s, r"(?i)\baws\b[^|;&\n]*\s(delete-\w+|terminate-instances)\b")
+    re!(
+        s,
+        r"(?i)\baws\b[^|;&\n]*\s(delete-\w+|terminate-instances)\b"
+    )
 }
 
 fn m_gcloud_delete(s: &str) -> bool {

@@ -44,11 +44,7 @@ const INVALID_PARAMS: i64 = -32602;
 /// Serve the MCP stdio loop until stdin closes, using the given config for the
 /// gate. Reads newline-delimited JSON-RPC requests from `reader`, writes
 /// newline-delimited responses to `writer`. Returns on EOF.
-pub fn serve(
-    reader: impl BufRead,
-    mut writer: impl Write,
-    config: &Config,
-) -> std::io::Result<()> {
+pub fn serve(reader: impl BufRead, mut writer: impl Write, config: &Config) -> std::io::Result<()> {
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {

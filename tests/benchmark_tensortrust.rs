@@ -104,7 +104,10 @@ fn tensortrust_false_negative_benchmark() {
         for a in false_negatives.iter().take(15) {
             let preview: String = a.attack.chars().take(80).collect();
             let preview = preview.replace('\n', " ");
-            println!("  - [{}] sample_id={}: {preview:?}", a.category, a.sample_id);
+            println!(
+                "  - [{}] sample_id={}: {preview:?}",
+                a.category, a.sample_id
+            );
         }
     }
     println!();
