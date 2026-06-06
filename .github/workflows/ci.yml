@@ -56,12 +56,11 @@ jobs:
       - name: Install from path (standalone)
         run: cargo install --path . --locked
 
-      # Phase 2 (gated): install from the public git URL. Proves the published
-      # repo is reachable and installable by third parties. The repo is not
-      # public yet, so this stays disabled to avoid a guaranteed CI failure.
-      # ENABLE after repo is public (Pablo push OK): proves public-git reachability.
-      # - name: Install from public git
-      #   run: cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked
+      # Phase 2 (active since the repo is public): install from the public git
+      # URL. Proves the published repo is reachable and installable by third
+      # parties straight from the default branch.
+      - name: Install from public git
+        run: cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked
 
   purity:
     name: default-build purity guard
