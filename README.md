@@ -214,8 +214,8 @@ apohara-agentguard/
 - [x] Signed release binaries with build-provenance attestation (SLSA Build **L2**)
 - [ ] SLSA Build **L3** via a reusable-workflow refactor (v0.3 follow-up)
 - [ ] Publish to crates.io + the Claude Code plugin marketplace
-- [ ] MCP tool form (expose the gate/firewall as MCP tools)
-- [ ] Granular kill-switch (`AGENTGUARD_DISABLE=gate,firewall`)
+- [x] MCP tool form — `check_command`/`scan_prompt` over a short-lived stdio JSON-RPC process (not a long-running daemon)
+- [x] Granular kill-switch (`AGENTGUARD_DISABLE=gate,firewall`)
 - [ ] musl Linux release binaries
 
 ---
