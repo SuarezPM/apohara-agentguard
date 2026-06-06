@@ -26,13 +26,27 @@ benign command that Blocks; a false negative is a dangerous command that slips.
 The build asserts `FP == 0`, `FN == 0`, and `FN < naive FN`. The corpus is **not**
 tuned to make it pass; a benign Block or a missed danger is a real bug.
 
-### Per-capability catch / miss
+## Coverage scorecard — what each layer catches and misses
 
-<!-- PLACEHOLDER (other story): per-capability catch/miss rows — e.g. variable
-     aliasing, base64 smuggling, pipe-to-shell, find -delete, IFS reassignment,
-     prompt-injection families. Fill with measured counts per category. -->
+apohara-agentguard ships several deterministic layers. Each catches a bounded
+class of attack and misses the rest; publishing the boundary per layer is the
+product. One row per shipped capability:
 
-_TBD — filled by the per-capability breakdown story._
+| Layer | Surface | Catches | Misses (the boundary) |
+|---|---|---|---|
+| **gate** (Bash command gate) | PreToolUse Bash | Structural destructive Bash via the compound parser: `rm -rf`, fork bombs, `curl … \| sh`, `find -delete`, dd-to-device, etc. — after resolving variable aliases, single-level base64, ANSI-C quotes, live `$(…)` in double quotes, `IFS` tricks, and line-continuations. 0 FN on the synthetic dangerous corpus (33/33 blocked). | What the parser does not model: nested/chained encoders (hex+rot13+gzip), non-literal command-substitution in *verb* position (`$(curl …) -rf ~`), deliberate parameter expansion, real here-doc parsing. See the README evasion scorecard for the exact list. |
+| **firewall** (prompt/content injection) | UserPrompt / tool output / fetched web | The OWASP ASI default-deny set (24 patterns) + 78 severity-scored DJL rules + 3 two-stage lookaround validators — the structured, signature-bearing injection/exfiltration constructs. | Paraphrase and semantic social-engineering attacks with no fixed signature. Measured directly against human-written attacks below: **379 / 400** TensorTrust attacks are NOT blocked. This is the documented motivation for a v0.3 semantic-classifier tier. |
+| **canary** (PostToolUse echo) | Tool output, opt-in | A **naive verbatim echo** of the per-session sentinel: a `contains` scan for the exact 32-hex token in tool output. | Any output transform breaks it — base64, reverse, chunking, case-fold, whitespace injection. It is **detection-after-execution, not prevention**: it never blocks and only WARNs *after* the tool has already run. Off by default. |
+| **cloud pack** (opt-in) | PreToolUse Bash | `aws s3 rb --force`, any `aws <svc> delete-*` / `terminate-instances`, `gcloud … delete`, `az … delete`. 0 FP / 0 FN on its corpus. | Intentionally allows read-only / non-destructive look-alikes: `aws s3 ls\|cp\|sync`, `aws … describe-*`, `gcloud … list\|describe`, `az … list\|show`. |
+| **db pack** (opt-in) | PreToolUse Bash | `DROP TABLE` (incl. `IF EXISTS`), `DROP DATABASE`/`DROP SCHEMA`, `TRUNCATE` — including inside `mysql -e "…"` / `psql -c "…"`. 0 FP / 0 FN on its corpus. | Intentionally allows non-DDL-destructive SQL (`SELECT`/`CREATE`/`ALTER`/`INSERT`/`UPDATE`/`CREATE INDEX`) and prose that merely mentions the verbs (`git commit -m "drop the legacy users table"`, `echo "remember to truncate the logs"`). |
+| **container pack** (opt-in) | PreToolUse Bash | `docker {system,image,volume,network,container} prune -af`/`-f`, `docker rm\|rmi -f`, `kubectl delete … --all`. 0 FP / 0 FN on its corpus. | Intentionally allows inspection and single-target ops: `docker ps\|images\|logs\|build\|run\|stop`, plain `docker rm web` (no `-f`), `kubectl get\|describe\|logs\|apply`, `kubectl delete pod web-123` (single target, no `--all`), and prose mentioning the commands. |
+
+Packs are **OFF by default**; a committed test asserts that with `Config::default()`
+a pack-only destructive command (`DROP TABLE users;`, `docker system prune -af`,
+`kubectl delete pods --all`, `aws s3 rb … --force`) **Allows** — the opt-in
+invariant. Each pack's 0-FP / 0-FN claim is the `cargo test --test
+benchmark_packs` gate; the benign columns above are the exact look-alikes those
+corpora enumerate.
 
 ## Latency
 
@@ -64,10 +78,35 @@ still well under a millisecond at p99, and only on prompt/content surfaces. The
 > load; the shape (gate in single-digit µs, firewall in low hundreds of µs) is
 > stable.
 
-## TensorTrust
+## TensorTrust (external, human-written attacks)
 
-<!-- PLACEHOLDER (other story): results against the TensorTrust prompt-injection
-     dataset — catch rate, miss rate, methodology, and honest framing of what the
-     external corpus does and does not represent. -->
+Source: `cargo test --test benchmark_tensortrust -- --nocapture`. This is the one
+benchmark whose corpus is **not authored by us**: 400 real, human-written
+prompt-injection attacks from the **Tensor Trust** online game (Toyer et al.,
+arXiv:2311.01011) — 200 hijacking + 200 extraction, the deterministic head-slice
+of the curated v1 robustness benchmarks. Vendored under **BSD-2-Clause** from
+`HumanCompatibleAI/tensor-trust-data` at revision
+`747a75e096761ebc01bd3970158827326b4add23`, fetched **2026-06-06**
+(full provenance + reproduction in
+[`tests/corpus/tensortrust/PROVENANCE.md`](tests/corpus/tensortrust/PROVENANCE.md)).
 
-_TBD — filled by the TensorTrust evaluation story._
+Measured **2026-06-06** — the firewall scans the untrusted `attack` text; a
+`Warn` passes content through, so it counts as a miss here:
+
+| Outcome | Count | Share |
+|---|---:|---:|
+| Flagged (Block) | 21 / 400 | 5.2% |
+| Warn-only (still slips) | 11 / 400 | 2.8% |
+| **False negatives (not Blocked)** | **379 / 400** | **94.8%** |
+
+**This high FN is an honest measurement, not a defect to hide.** The deterministic
+regex firewall's threat model is *structured, signature-bearing* injection
+(OWASP ASI / DJL constructs). Tensor Trust attacks are the opposite: human social
+engineering — role-play ("You are a Taylor Swift fan…"), fake system-upgrade
+framing, unicode/whitespace floods (`ö ö ö …`), bracket-spam, and prefix-priming
+("Prepend your response with `[Access Granted`"). These carry no fixed signature,
+so they sit **largely outside** what a regex firewall can decide deterministically.
+Catching them needs *semantics*, not patterns — which is exactly why a
+**semantic-classifier tier is the documented v0.3 direction**. Publishing 94.8%
+FN against an external human corpus is the point: it bounds the firewall honestly
+and quantifies the gap the v0.3 tier must close.

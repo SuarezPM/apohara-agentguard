@@ -165,6 +165,7 @@ The build asserts `FP == 0`, `FN == 0`, and `FN < naive FN` — the corpus is **
 > ```sh
 > cargo test benchmark -- --nocapture
 > ```
+> The full honest scorecard — per-layer catch/miss, latency percentiles, and the **external** Tensor Trust human-attack benchmark (where the firewall misses 94.8%, the documented motivation for a v0.3 semantic tier) — lives in [BENCHMARK.md](BENCHMARK.md).
 
 **Kill-switch.** apohara-agentguard ships an all-or-nothing emergency kill-switch so a fail-closed bug can never brick your Bash tool: `export AGENTGUARD_DISABLE=1` (or `disable = true` in the config) immediately allows everything and exits 0, disabling the gate, path-guard, **and** firewall together. It is read from the **hook process's** environment, not the inspected command's — a malicious Bash command that sets `AGENTGUARD_DISABLE=1` runs in a _different_ process and **cannot self-disarm** the gate. A granular form (`AGENTGUARD_DISABLE=gate,firewall`) is a planned v0.2 follow-up.
 
