@@ -15,6 +15,8 @@
 -->
 [![OpenSSF Best Practices](https://img.shields.io/badge/OpenSSF%20Best%20Practices-registration%20pending-lightgrey?style=for-the-badge)](https://www.bestpractices.dev/)
 
+<sub>OpenSSF Passing + Silver criteria mapping: [docs/best-practices-silver.md](docs/best-practices-silver.md)</sub>
+
 **[Quick Start](#-quick-start)** · **[Features](#-features)** · **[How it works](#-how-it-works--honesty)** · **[Roadmap](#-roadmap)**
 
 A deterministic, offline Rust safety layer for AI coding agents: an **anti-bypass command gate** that parses Bash structure instead of grepping for substrings, a **seccomp + Landlock sandbox** for the code an agent actually runs, and a **prompt-injection input firewall** — no model, no network at scan time.

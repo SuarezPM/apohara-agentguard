@@ -24,11 +24,13 @@ What to include: a minimal reproduction (the exact command / input / config),
 the apohara-agentguard version (`apohara-agentguard --version`), the OS + kernel
 (`uname -a`), and what you expected vs. what happened.
 
-**Response expectations.** This is a single-maintainer open-source project. There
-is **no bug-bounty program** and no contractual response SLA. Reports are
-triaged on a best-effort basis; expect an acknowledgement within a few days and
-a fix or a documented "won't fix / out of scope" decision once the issue is
-understood.
+**Response expectations.** This is a single-maintainer open-source project, so
+there is **no bug-bounty program**. The maintainer nonetheless commits to a
+concrete response process: **acknowledge a report within 5 business days**,
+**coordinate the disclosure timeline** with the reporter, and — once the issue is
+understood — ship **either a fix or a documented "won't fix / out of scope"
+decision**. Reporters are credited in the resulting advisory unless they ask not
+to be.
 
 ## What apohara-agentguard is (and is not)
 
