@@ -10,10 +10,7 @@
 [![Version](https://img.shields.io/badge/version-0.2.0-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
 [![Sandbox](https://img.shields.io/badge/sandbox-seccomp%2BLandlock-success?style=for-the-badge)](#-how-it-works--honesty)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/SuarezPM/apohara-agentguard/badge?style=for-the-badge)](https://scorecard.dev/viewer/?uri=github.com/SuarezPM/apohara-agentguard)
-<!-- OpenSSF Best Practices (CII) badge: gated on a public maintainer registration at https://www.bestpractices.dev/. After registering this project, replace PROJECT_ID below with the assigned numeric id and uncomment the badge so it renders a real score instead of a broken/false one.
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/PROJECT_ID/badge?style=for-the-badge)](https://www.bestpractices.dev/projects/PROJECT_ID)
--->
-[![OpenSSF Best Practices](https://img.shields.io/badge/OpenSSF%20Best%20Practices-registration%20pending-lightgrey?style=for-the-badge)](https://www.bestpractices.dev/)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13128/badge?style=for-the-badge)](https://www.bestpractices.dev/projects/13128)
 
 <sub>OpenSSF Passing + Silver criteria mapping: [docs/best-practices-silver.md](docs/best-practices-silver.md)</sub>
 

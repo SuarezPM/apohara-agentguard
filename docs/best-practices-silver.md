@@ -1,8 +1,6 @@
 # OpenSSF Best Practices — Passing + Silver criteria evidence
 
-Project: **apohara-agentguard** · badge entry **registration in progress**
-(replace `PROJECT_ID` once the project is registered at
-<https://www.bestpractices.dev/>).
+Project: **apohara-agentguard** · badge entry [#13128](https://www.bestpractices.dev/projects/13128) — **Silver achieved**.
 
 This maps every **Passing** and **Silver** criterion
 ([bestpractices.dev/en/criteria/0](https://www.bestpractices.dev/en/criteria/0),
@@ -78,7 +76,7 @@ remaining step. Highlights (the full Silver table below subsumes the rest):
 | `documentation_security` | Met | `SECURITY.md` (threat model) + `docs/ASSURANCE.md` (assurance case). |
 | `documentation_quick_start` | Met | `README.md` § Quick Start. |
 | `documentation_current` | Met | Docs are versioned with the code and updated in the same change (the `tests/readme_sync.rs` test fails the build if the README evasion lists drift from reality); `CHANGELOG.md` per release; `cargo doc` is kept warning-free. |
-| `documentation_achievements` | Met (pending id) | `README.md` badge block links the OpenSSF Best Practices badge; the numeric `PROJECT_ID` is filled in once registration completes (currently a "registration pending" placeholder badge). |
+| `documentation_achievements` | Met | `README.md` badge block links the OpenSSF Best Practices badge ([#13128](https://www.bestpractices.dev/projects/13128), Silver). |
 | `accessibility_best_practices` (SHOULD) | Met | Plain-Markdown docs (semantic headings, no custom widgets) and a plain-text CLI / stdio interface; no GUI to make inaccessible. |
 | `internationalization` (SHOULD) | N/A | The CLI/hook/MCP server emits no localized end-user text and does no human-language-specific sorting. |
 | `sites_password_security` | N/A | The project operates no website and stores no user passwords (no auth server). |
@@ -146,10 +144,10 @@ remaining step. Highlights (the full Silver table below subsumes the rest):
 
 ## Summary
 
-Every Silver criterion is **Met** or justifiably **N/A**, except the items that
-require a human — (1) completing the **Passing** then **Silver** questionnaires on
-bestpractices.dev (and filling in the badge `PROJECT_ID`), and (2) the **off-site
-custody** half of the access-continuity plan — and two honestly-documented
+The **Silver** badge is achieved ([#13128](https://www.bestpractices.dev/projects/13128)).
+Every Silver criterion is **Met** or justifiably **N/A**; the only remaining
+human-half item is the **off-site custody** of the access-continuity break-glass
+keys — plus two honestly-documented
 **SHOULD/SUGGESTED** gaps: `bus_factor` (single maintainer, continuity
 documented) and `version_tags_signed` (artifacts carry SLSA L3 provenance
 instead). Relative to its siblings this project additionally reaches **Met** on
