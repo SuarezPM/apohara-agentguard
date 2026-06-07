@@ -35,7 +35,7 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
   deny:
-    name: cargo-deny (licenses)
+    name: cargo-deny (licenses + advisories)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -44,6 +44,9 @@ jobs:
         run: cargo install --locked cargo-deny
       # Fails on any dependency license outside the allowlist in deny.toml.
       - run: cargo deny check licenses
+      # Monitor RUSTSEC advisories against the dependency tree (dependency_monitoring).
+      # Uses the [advisories] section already in deny.toml.
+      - run: cargo deny check advisories
 
   clean-install:
     name: clean-install (independence gate)
