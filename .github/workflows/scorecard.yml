@@ -25,9 +25,6 @@ jobs:
       # Mint the OIDC token Scorecard uses to publish results.
       id-token: write
       contents: read
-      # Let the Branch-Protection check read the branch ruleset via the
-      # GITHUB_TOKEN (avoids needing a personal access token). Read-only.
-      administration: read
     steps:
       - name: Checkout code
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
