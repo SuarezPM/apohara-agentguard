@@ -156,6 +156,13 @@ figure.
 
 ## Pull requests
 
+The `main` branch is **protected**: it cannot be pushed to directly, and
+force-push and branch deletion are disabled. Every change — including the
+maintainer's — lands through a pull request that **must pass the full CI suite**
+(rustfmt, clippy `-D warnings`, `cargo-deny` licenses + advisories, the
+clean-install independence gate, the default-build purity guard, and the test
+matrix on Linux/macOS/Windows) before it can be merged.
+
 - Keep changes focused; one logical change per PR.
 - Update [`CHANGELOG.md`](CHANGELOG.md) under `[Unreleased]` when your change is
   user-visible.
