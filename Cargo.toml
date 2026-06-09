@@ -28,7 +28,7 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.11"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nix = { version = "0.30", features = ["sched", "process", "fs", "mount", "user"] }
+nix = { version = "0.31", features = ["sched", "process", "fs", "mount", "user"] }
 seccompiler = { version = "0.5", features = ["json"] }
 libc = "0.2"
 landlock = "0.4"
