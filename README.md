@@ -7,7 +7,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/SuarezPM/apohara-agentguard/release.yml?style=for-the-badge&label=CI)](https://github.com/SuarezPM/apohara-agentguard/actions)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=for-the-badge)](#-license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-0.2.0-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
+[![Version](https://img.shields.io/badge/version-0.3.0-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
 [![Sandbox](https://img.shields.io/badge/sandbox-seccomp%2BLandlock-success?style=for-the-badge)](#-how-it-works--honesty)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/SuarezPM/apohara-agentguard/badge?style=for-the-badge)](https://scorecard.dev/viewer/?uri=github.com/SuarezPM/apohara-agentguard)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13128/badge?style=for-the-badge)](https://www.bestpractices.dev/projects/13128)
@@ -64,6 +64,10 @@ allow                                                                  # exit 0
 | ☁️ **Opt-in domain packs** | `cloud` (AWS/GCP/Azure destructive ops), `db` (`DROP`/`TRUNCATE` DDL), and `container` (`docker … prune -af`, `kubectl delete --all`) rule packs — off by default, each shipping its own committed `0-FP / 0-FN` corpus so the default benchmark stays untouched. |
 | 🧰 **MCP tool form** | `apohara-agentguard mcp` exposes `check_command` and `scan_prompt` as read-only MCP tools over a short-lived stdio JSON-RPC process (not a daemon), so any MCP client — not only the Claude Code hook — can call the gate and firewall. |
 | 🎚️ **Granular, tiered control** | Per-component kill-switch (`AGENTGUARD_DISABLE=gate,firewall,pathguard,canary`), severity presets (`level = "strict"\|"high"\|"critical"`), and config-driven **tool-level gating** — gate _which_ MCP tool and _which_ arguments, not just `Bash.command`. The empty-config default stays byte-identical. |
+| 🤚 **`Tier::Ask` decision tier** (v0.3) | A 4th verdict — `Block > Ask > Warn > Allow` — surfaces a UI prompt via Claude Code's `permissionDecision: "ask"` contract (exit 0 on `PreToolUse`; graceful downgrade to `Warn` on `PostToolUse`/`UserPromptSubmit`). The `apohara-agentguard ask '<cmd>'` CLI subcommand is the operator introspection surface — see the verdict before relying on the hook. |
+| 📜 **Pure-Rust policy engine** (v0.3) | TOML-loaded, per-tool `[[tools]]` rule patterns, `defaults.default_action = "deny"` posture, per-session + per-tool budget caps with the `tokens = max(1, chars / 4)` heuristic (charged on `Bash` + `UserPromptSubmit` only). Loaded via `--policy <path>` (CLI > `AGENTGUARD_POLICY` env > `[policy] file` in config). Fail-closed on any load / parse / schema-version error. **Zero new runtime deps** — reuses the existing `toml` crate, purity guard stays GREEN. |
+| 🛡️ **Sandbox escape closures** (v0.3) | The Landlock ruleset now explicitly denies writes on `/proc`, closing 2 of 3 documented escape surfaces: the `/proc/self/root` filesystem-via-proc alias and the ELF-linker trick of writing to `/proc/self/exe` (`tests/sandbox_escape.rs`). The empirical build baseline (`cargo build` / `node -e` / `go run` exiting 0) is preserved as the non-regression gate. |
+| 🐧 **musl Linux release binaries** (v0.3) | The release matrix grew from 5 to **7** targets with the addition of `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` — static binaries for Alpine, Void, and any musl-based container base. Both attested via the existing SLSA L3 reusable workflow. |
 | ⚖️ **Dual-licensed** | MIT **OR** Apache-2.0, at your option. Third-party licenses enumerated and gated by `cargo deny`. |
 
 ---
@@ -83,7 +87,11 @@ apohara-agentguard sandbox --tier workspace_write -- cargo build
 # 4. Scan untrusted text through the input firewall
 echo "some untrusted text" | apohara-agentguard scan
 
-# 5. Install as a Claude Code plugin (resolves + SHA256-verifies the binary)
+# 5. Preview the full decision pipeline (gate + policy engine) — v0.3
+apohara-agentguard ask 'kubectl get pods'
+# -> "ask: <reason>" (budget exceeded) / "block: <reason>" / "allow"
+
+# 6. Install as a Claude Code plugin (resolves + SHA256-verifies the binary)
 curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh
 ```
 
@@ -107,7 +115,7 @@ export AGENTGUARD_DISABLE=1   # or: disable = true in the config file
 apohara-agentguard version
 ```
 
-**Subcommands:** `check <cmd>` (gate) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `version`.
+**Subcommands:** `check <cmd>` (gate) · `ask <cmd>` (v0.3: gate + policy engine) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `version`.
 
 **Other acquisition paths.** A thin `npx apohara-agentguard` launcher resolves the release binary by platform × arch × libc; `cargo install --git https://github.com/SuarezPM/apohara-agentguard apohara-agentguard --locked` builds from source (the supported path for musl Linux and any platform without a pinned artifact; the package is named so cargo skips the in-repo fuzz crate).
 
@@ -159,9 +167,11 @@ Two forms Block **incidentally** — as a side effect of leg matching, not by de
 | Engine (same corpus) | False positives | False negatives |
 |---|---|---|
 | Naive substring baseline (hookify-class) | 8 / 73 (11%) | 11 / 33 (33%) |
-| apohara-agentguard | **0 / 73** | **0 / 33** |
+| apohara-agentguard (gate, v0.2 baseline) | **0 / 73** | **0 / 33** |
+| apohara-agentguard (policy engine, v0.3) | **0 / 66** | **0 / 33** |
+| apohara-agentguard (Ask tier, v0.3) | **0 / 30** | **0 / 18** |
 
-The build asserts `FP == 0`, `FN == 0`, and `FN < naive FN` — the corpus is **not** tuned to make it pass; a benign Block or a missed danger is a real bug.
+The build asserts `FP == 0`, `FN == 0`, and `FN < naive FN` for every corpus — the corpora are **not** tuned to make them pass; a benign Block or a missed danger is a real bug. Each capability (gate / policy engine / Ask tier / sandbox closures) has its own pre-committed corpus and pre-committed 0-FP / 0-FN gate in [BENCHMARK.md](BENCHMARK.md).
 
 > [!NOTE]
 > The corpus is **author-curated and 100% synthetic** (73 benign + 33 dangerous), and the dangerous set _deliberately_ includes the obfuscation constructs apohara-agentguard is built to catch — so the FN gap is a demonstration of the design, not a neutral sample. No real agent session is committed or used. Reproduce it yourself:
@@ -199,11 +209,16 @@ apohara-agentguard/
 │   ├── mcp/                 # MCP stdio JSON-RPC server (check_command / scan_prompt)
 │   ├── sandbox/linux/       # seccomp-bpf + Landlock jail (fail-closed)
 │   ├── firewall/            # prompt-injection firewall + SSRF re-fetch
-│   ├── verdict.rs           # 3-tier Allow / Warn / Block model
-│   └── main.rs              # clap CLI: check · sandbox · scan · hook · mcp · version
-├── tests/                   # incl. committed FP/FN gate + evasion regression net
+│   ├── policy/              # v0.3: pure-Rust TOML policy engine
+│   │   ├── schema.rs        #   schema_version, defaults, [[tools]], [budgets]
+│   │   ├── matcher.rs       #   the canonical `*`-substring pattern matcher
+│   │   └── engine.rs        #   PolicySet::load + ::evaluate + budget counters
+│   ├── verdict.rs           # 4-tier Allow / Warn / Ask / Block model (v0.3)
+│   └── main.rs              # clap CLI: check · ask · sandbox · scan · hook · mcp · version
+├── tests/                   # incl. committed FP/FN gates (gate / policy / ask / sandbox) + evasion regression net
 ├── benches/                 # ReDoS guard for the rule regexes
 ├── fuzz/                    # cargo-fuzz target over gate::evaluate
+├── .claude-plugin/          # v0.3: marketplace.json (submission itself GATED on Pablo)
 └── packaging/               # Claude Code plugin manifest, hooks, npx + install.sh
 ```
 
@@ -256,6 +271,14 @@ apohara-agentguard/
 - [x] Opt-in domain packs (cloud / DB DDL / container, each with a `0-FP / 0-FN` corpus)
 - [x] Tool-level gating (gate _which_ MCP tool and _which_ arguments)
 - [x] Codex `PreToolUse` hook compatibility
+- [x] **`Tier::Ask` + `permissionDecision: "ask"`** (v0.3) — the 4th verdict; surfaces a UI prompt to the human via Claude Code's documented contract
+- [x] **`apohara-agentguard ask '<cmd>'` CLI subcommand** (v0.3) — operator introspection surface for the full decision pipeline (gate + policy engine)
+- [x] **Pure-Rust TOML policy engine** (v0.3) — per-tool `[[tools]]` rules, `defaults.default_action = "deny"`, per-session + per-tool budget caps, fail-closed on any load / parse / schema-version error
+- [x] **Policy engine corpora** (v0.3) — `tests/corpus/policy_{benign,dangerous}.txt` (66/33) with pre-committed 0-FP / 0-FN gate (`tests/policy_engine.rs`)
+- [x] **Ask corpus + benchmark** (v0.3) — `tests/corpus/ask_{benign,dangerous}.txt` (30/18) with pre-committed 0-FP / 0-FN gate (`tests/ask_corpus.rs`)
+- [x] **Sandbox escape closures** (v0.3) — Landlock explicitly denies writes on `/proc`; closes the `/proc/self/root` filesystem-via-proc alias and the `/proc/self/exe` ELF-linker trick (`tests/sandbox_escape.rs`)
+- [x] **musl Linux release binaries** (v0.3) — `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` (release matrix 5 → 7); both SLSA L3-attested
+- [x] **Claude Code marketplace metadata** (v0.3) — `.claude-plugin/marketplace.json` added; submission to the directory itself deferred
 
 ---
 
