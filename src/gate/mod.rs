@@ -343,6 +343,11 @@ fn consider(best: &mut Option<Hit>, candidate: Hit) {
 
 /// Build the final verdict from the worst hit and its tier.
 fn build_verdict(tier: Tier, hit: &Hit) -> Verdict {
+    // `tier` here is always the output of `severity_to_tier`, which returns
+    // only Allow/Warn/Block by design (v0.3 F3' sub-step: `Ask` is a POLICY
+    // decision, not a severity-tier mapping). The `Tier::Ask` arms below
+    // are unreachable in this code path; they exist solely to satisfy Rust's
+    // non-exhaustive-match rule for the 4-variant `Tier` enum.
     let reason = format!(
         "blocked dangerous leg `{}` ({})",
         truncate(&hit.leg, 200),
@@ -367,12 +372,14 @@ fn build_verdict(tier: Tier, hit: &Hit) -> Verdict {
             hit.label
         ),
         Tier::Allow => String::new(),
+        Tier::Ask => String::new(), // unreachable: severity_to_tier never returns Ask.
     };
 
     let v = match tier {
         Tier::Block => Verdict::block(reason),
         Tier::Warn => Verdict::warn(reason),
         Tier::Allow => Verdict::allow(),
+        Tier::Ask => unreachable!("build_verdict called with Tier::Ask (not a severity tier)"),
     };
     if feedback.is_empty() {
         v

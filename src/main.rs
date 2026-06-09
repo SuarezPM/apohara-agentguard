@@ -110,6 +110,11 @@ fn run_scan() -> ExitCode {
     }
     let verdict = apohara_agentguard::firewall::scan_content(&content, &Default::default());
     use apohara_agentguard::verdict::Tier;
+    // `scan` invokes the firewall's `scan_content` (severity_to_tier
+    // output), which never returns Tier::Ask in v0.3 (Ask is a POLICY
+    // decision, not a severity-tier mapping — F3' sub-step). The Ask arm
+    // is unreachable in this code path; Story 4's `ask` subcommand
+    // provides a separate surface for policy-engine-produced Ask.
     match verdict.tier {
         Tier::Allow => {
             println!("allow");
@@ -123,6 +128,7 @@ fn run_scan() -> ExitCode {
             eprintln!("block: {}", verdict.reason);
             ExitCode::from(2)
         }
+        Tier::Ask => unreachable!("scan does not invoke the policy engine"),
     }
 }
 
@@ -135,6 +141,11 @@ fn run_check(args: CheckArgs) -> ExitCode {
     let config = Config::load_default_locations().unwrap_or_default();
     let verdict = apohara_agentguard::gate::evaluate(&args.command, &config);
     use apohara_agentguard::verdict::Tier;
+    // `check` invokes the gate's `evaluate` (severity_to_tier output),
+    // which never returns Tier::Ask in v0.3 (Ask is a POLICY decision,
+    // not a severity-tier mapping — F3' sub-step). The Ask arm is
+    // unreachable in this code path; Story 4's `ask` subcommand
+    // provides a separate surface for policy-engine-produced Ask.
     match verdict.tier {
         Tier::Allow => {
             println!("allow");
@@ -148,6 +159,7 @@ fn run_check(args: CheckArgs) -> ExitCode {
             eprintln!("block: {}", verdict.reason);
             ExitCode::from(2)
         }
+        Tier::Ask => unreachable!("check does not invoke the policy engine"),
     }
 }
 

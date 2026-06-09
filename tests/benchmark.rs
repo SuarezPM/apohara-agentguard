@@ -98,10 +98,18 @@ fn measure(commands: &[String]) -> Counts {
         naive_flag: 0,
     };
     for cmd in commands {
+        // `evaluate` is the gate's evaluate (severity_to_tier output),
+        // which never returns Tier::Ask in v0.3 (Ask is a POLICY
+        // decision, not a severity-tier mapping — F3' sub-step). The
+        // pre-existing 0-FP / 0-FN gate at the bottom of this file
+        // asserts ag_block+ag_warn == commands.len() — that invariant
+        // is preserved by treating Tier::Ask as an explicit
+        // `unreachable!` here.
         match evaluate(cmd, &cfg).tier {
             Tier::Block => c.ag_block += 1,
             Tier::Warn => c.ag_warn += 1,
             Tier::Allow => {}
+            Tier::Ask => unreachable!("gate::evaluate never returns Tier::Ask"),
         }
         if naive_fixed_list(cmd) {
             c.naive_flag += 1;

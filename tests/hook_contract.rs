@@ -103,3 +103,28 @@ fn block_reason_is_length_capped() {
         MAX_CONTEXT_BYTES
     );
 }
+
+// ---- v0.3 Verdict::Ask + permissionDecision: "ask" hook output ----
+//
+// The default path (no policy engine loaded) NEVER produces Tier::Ask, so
+// we cannot drive a Tier::Ask through the public `run()` seam here — the
+// integration test for the ask output shape is in `src/hook/contract.rs`
+// (where `HookOutput::ask` + `emit` are unit-tested directly). The
+// per-integration-test counterpart for the full hook path lands in
+// Story 2 (the policy engine produces Verdict::Ask) and Story 4
+// (the `ask` CLI subcommand) — both will be tested through this
+// binary via the policy-engine round-trip.
+//
+// What this test CAN assert today: the dispatch is byte-identical
+// (no permissionDecision, no additionalContext) for a benign command
+// when no policy is loaded. This anchors the "no behavior change by
+// default" invariant for the v0.3 schema growth.
+#[test]
+fn pretooluse_no_policy_loaded_is_allow_no_output() {
+    let (out, code) = run(&pretooluse_bash("ls -la"), &Config::default());
+    assert!(
+        out.is_none(),
+        "no policy loaded + benign command = no output"
+    );
+    assert_eq!(code, 0);
+}

@@ -97,10 +97,14 @@ pub fn scan_content(text: &str, thresholds: &Thresholds) -> Verdict {
         None => Verdict::allow(),
         Some((id, sev)) => {
             let reason = format!("firewall rule {id} matched (severity {sev})");
+            // `severity_to_tier` returns only Allow/Warn/Block by design —
+            // `Ask` is a POLICY decision, not a severity-tier mapping. v0.3
+            // F3' sub-step: severity_to_tier is UNCHANGED for Ask.
             match severity_to_tier(sev, thresholds) {
                 Tier::Block => Verdict::block(reason),
                 Tier::Warn => Verdict::warn(reason),
                 Tier::Allow => Verdict::allow(),
+                Tier::Ask => unreachable!("severity_to_tier never returns Ask"),
             }
         }
     }

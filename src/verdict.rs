@@ -8,6 +8,12 @@
 use serde::{Deserialize, Serialize};
 
 /// Decision tier for a single evaluation.
+///
+/// Precedence (most-severe wins, used by [`crate::hook::max_verdict`]):
+/// `Block > Ask > Warn > Allow`. A default-deny request for human
+/// confirmation (`Ask`) outranks `Warn` (so it is never silently
+/// downgraded to a caution) and is outranked by `Block` (a hard refusal
+/// still wins). `Allow` is the floor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
@@ -15,6 +21,11 @@ pub enum Tier {
     Allow,
     /// Permit but surface a caution to the user/agent.
     Warn,
+    /// Escalate to the human: a one-way ask surfaced as a UI prompt by
+    /// the harness (`permissionDecision: "ask"`, exit 0). The human's
+    /// response is the harness's concern, not agentguard's hook path —
+    /// the verdict is "ask", nothing more.
+    Ask,
     /// Refuse the action.
     Block,
 }
@@ -53,6 +64,17 @@ impl Verdict {
     pub fn block(reason: impl Into<String>) -> Self {
         Self {
             tier: Tier::Block,
+            reason: reason.into(),
+            feedback: None,
+        }
+    }
+
+    /// An ask verdict carrying the given reason. The hook output
+    /// `permissionDecision: "ask"` (exit 0) is produced downstream by
+    /// [`crate::hook::contract::HookOutput::ask`] + [`crate::hook::contract::emit`].
+    pub fn ask(reason: impl Into<String>) -> Self {
+        Self {
+            tier: Tier::Ask,
             reason: reason.into(),
             feedback: None,
         }
@@ -126,8 +148,34 @@ mod tests {
         assert_eq!(Verdict::allow().tier, Tier::Allow);
         assert_eq!(Verdict::warn("careful").tier, Tier::Warn);
         assert_eq!(Verdict::block("nope").tier, Tier::Block);
+        assert_eq!(Verdict::ask("human?").tier, Tier::Ask);
 
         let v = Verdict::block("nope").with_feedback("try X instead");
         assert_eq!(v.feedback.as_deref(), Some("try X instead"));
+    }
+
+    #[test]
+    fn ask_tier_rank_above_warn_below_block() {
+        // v0.3 precedence: Block > Ask > Warn > Allow. This test is the
+        // canonical reference for the new rank order; a refactor of
+        // `crate::hook::tier_rank` that disagrees with this matrix is a
+        // bug, not a stylistic change. (F8 from the ralplan Critic
+        // findings — the matrix is the single source of truth.)
+        use crate::hook::tier_rank;
+        assert!(tier_rank(Tier::Block) > tier_rank(Tier::Ask));
+        assert!(tier_rank(Tier::Ask) > tier_rank(Tier::Warn));
+        assert!(tier_rank(Tier::Warn) > tier_rank(Tier::Allow));
+        // The 4 ranks are distinct (no two tiers share a rank).
+        let ranks = [
+            tier_rank(Tier::Allow),
+            tier_rank(Tier::Warn),
+            tier_rank(Tier::Ask),
+            tier_rank(Tier::Block),
+        ];
+        for i in 0..ranks.len() {
+            for j in (i + 1)..ranks.len() {
+                assert_ne!(ranks[i], ranks[j], "ranks must be unique");
+            }
+        }
     }
 }

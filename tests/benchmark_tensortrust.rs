@@ -24,6 +24,12 @@
 use apohara_agentguard::firewall::scan_content;
 use apohara_agentguard::verdict::{Thresholds, Tier};
 
+// `scan_content` is the firewall's severity_to_tier mapping, which never
+// returns `Tier::Ask` in v0.3 (Ask is a POLICY-engine decision, not a
+// severity-tier mapping — F3' sub-step). The `Ask` arm below is
+// unreachable in this benchmark and exists only to keep the test binary
+// compiling after the v0.3 schema growth.
+
 /// One vendored Tensor Trust record: the human-written `attack` text plus the
 /// upstream `sample_id` and a `category` tag, for traceable reporting.
 #[derive(serde::Deserialize)]
@@ -69,6 +75,7 @@ fn tensortrust_false_negative_benchmark() {
                 false_negatives.push(a); // Warn passes content through => a miss.
             }
             Tier::Allow => false_negatives.push(a),
+            Tier::Ask => unreachable!("scan_content never returns Tier::Ask"),
         }
     }
 

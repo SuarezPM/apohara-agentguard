@@ -106,16 +106,15 @@ pub fn run_with_source(
     contract::emit(&input.hook_event_name, &verdict)
 }
 
-/// Record a Block/Warn decision to the audit log (no-op when audit is disabled,
-/// or the verdict is Allow). Best-effort and verdict-isolated.
+/// Record a Block/Warn/Ask decision to the audit log (no-op when audit is
+/// disabled, or the verdict is Allow). Best-effort and verdict-isolated.
 fn audit_decision(input: &HookInput, verdict: &Verdict, config: &Config) {
     if !config.audit.enabled {
         return;
     }
-    let decision = match verdict.tier {
-        Tier::Block => "block",
-        Tier::Warn => "warn",
-        Tier::Allow => return,
+    let decision = match audit_decision_str(verdict.tier) {
+        Some(d) => d,
+        None => return,
     };
 
     // Determine the audited event + surface + command text from the input.
@@ -289,7 +288,13 @@ fn dispatch_pretooluse(
     let builtin = dispatch_pretooluse_builtin(input, config, src, env_disabled);
     // Precedence: the more severe of the built-in check and any tool_rule match
     // wins. Empty tool_rules => Allow => `builtin` is returned unchanged.
-    max_verdict(builtin, tool_rule_verdict(input, config))
+    let with_rules = max_verdict(builtin, tool_rule_verdict(input, config));
+    // Policy engine pass (v0.3). `policy_engine_evaluate` is a no-op
+    // combine in Story 1; Story 2 replaces the body with the real
+    // engine. With `Config::default()` (no policy loaded) the
+    // `policy_engine_evaluate` returns `Verdict::allow()` and this
+    // `max_verdict` is a no-op.
+    max_verdict(with_rules, policy_engine_evaluate(input, config))
 }
 
 /// The pre-existing per-tool PreToolUse checks (Bash gate, Read/Write/Edit
@@ -415,6 +420,11 @@ fn tool_rule_verdict(input: &HookInput, config: &Config) -> Verdict {
                     Verdict::warn(reason)
                 }
             }
+            // v0.3 F3' sub-step: `severity_to_tier` never returns `Ask`
+            // (Ask is a POLICY decision, not a severity-tier mapping).
+            // The arm is here solely to satisfy Rust's non-exhaustive-match
+            // rule for the 4-variant `Tier` enum.
+            Tier::Ask => unreachable!("severity_to_tier never returns Ask"),
         };
         best = max_verdict(best, candidate);
     }
@@ -466,13 +476,48 @@ fn max_verdict(a: Verdict, b: Verdict) -> Verdict {
     }
 }
 
-/// Order tiers by severity for [`max_verdict`]: `Allow` < `Warn` < `Block`.
-fn tier_rank(tier: Tier) -> u8 {
+/// Order tiers by severity for [`max_verdict`]: `Allow` < `Warn` < `Ask` <
+/// `Block`. The v0.3 ordering places `Ask` between `Warn` and `Block`: a
+/// default-deny request for human confirmation outranks `Warn` (so it is
+/// never silently downgraded to a caution) and is outranked by `Block` (a
+/// hard refusal still wins).
+pub(crate) fn tier_rank(tier: Tier) -> u8 {
     match tier {
         Tier::Allow => 0,
         Tier::Warn => 1,
-        Tier::Block => 2,
+        Tier::Ask => 2,
+        Tier::Block => 3,
     }
+}
+
+/// Map a verdict tier to its audit-log decision string. Returns `None` for
+/// `Allow` (which is not logged). Extracted as a public-in-crate pure
+/// helper so the rank can be tested without setting up an audit file —
+/// the v0.3 F3' sub-step requires the `Tier::Ask => "ask"` arm to be in
+/// place, and the `audit_decision_records_ask` test asserts it.
+pub(crate) fn audit_decision_str(tier: Tier) -> Option<&'static str> {
+    match tier {
+        Tier::Block => Some("block"),
+        Tier::Warn => Some("warn"),
+        Tier::Ask => Some("ask"),
+        Tier::Allow => None,
+    }
+}
+
+/// The v0.3 policy engine slot. Story 1 wires this in as a thin no-op
+/// combine so the dispatch chain shape is finalized; Story 2 replaces
+/// the body with a real call to
+/// `policy::engine::PolicySet::load(config.policy.file.as_deref())` then
+/// `policy_set.evaluate(&input, &config)`, composed via `max_verdict`.
+///
+/// With `Config::default()` (no policy loaded), this returns
+/// `Verdict::allow()` — a no-op combine that preserves the byte-identical
+/// default path. The `empty_policy_slot_is_no_op` test asserts the
+/// no-op-combine invariant; the higher-level
+/// `empty_tool_rules_is_byte_identical_noop` test asserts the full
+/// dispatch is still byte-identical.
+fn policy_engine_evaluate(_input: &HookInput, _config: &Config) -> Verdict {
+    Verdict::allow()
 }
 
 /// PostToolUse dispatch: only Bash stdout is scanned (WARN-only, cannot block).
@@ -940,6 +985,10 @@ mod tests {
         let inj = CannedSource(INJECTION);
         let cfg = Config::default();
         assert!(cfg.tool_rules.is_empty(), "precondition: default is empty");
+        assert!(
+            cfg.policy.file.is_none(),
+            "precondition: default policy is empty"
+        );
 
         let cases = [
             pretooluse_bash("rm -rf ~"), // gate Block
@@ -957,6 +1006,50 @@ mod tests {
             assert_eq!(code, exp_code, "exit code differs for {json}");
             assert_eq!(out, exp_out, "stdout differs for {json}");
         }
+    }
+
+    #[test]
+    fn empty_policy_slot_is_no_op() {
+        // Story 1 (v0.3) wires the policy engine as a thin no-op combine so
+        // the dispatch chain shape is finalized. With Config::default() the
+        // slot returns Verdict::allow() — a no-op combine that preserves
+        // the byte-identical default path. The full dispatch is still
+        // byte-identical to the built-in checks alone.
+        let cfg = Config::default();
+        assert!(cfg.policy.file.is_none(), "precondition: no policy file");
+
+        // The slot itself returns Allow.
+        let json = pretooluse_bash("rm -rf ~");
+        let input: HookInput = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            policy_engine_evaluate(&input, &cfg),
+            Verdict::allow(),
+            "policy slot must be a no-op combine with no policy loaded"
+        );
+
+        // The full dispatch still matches the built-in path alone.
+        let inj = CannedSource(INJECTION);
+        let (out, code) = run_with_source(&json, &cfg, &inj);
+        let builtin = dispatch_pretooluse_builtin(&input, &cfg, &inj, &EnvDisable::default());
+        let (exp_out, exp_code) = contract::emit("PreToolUse", &builtin);
+        assert_eq!(code, exp_code, "exit code differs after Story-1 wiring");
+        assert_eq!(out, exp_out, "stdout differs after Story-1 wiring");
+    }
+
+    #[test]
+    fn audit_decision_records_ask() {
+        // The v0.3 F3' sub-step: audit_decision MUST record the Ask tier
+        // with decision = "ask" (not silently fall through to a different
+        // string or skip the log entry). Without this arm, the ralph loop's
+        // first cargo build after the Tier::Ask addition goes RED at
+        // audit_decision (Rust's non-exhaustive match). The pure helper
+        // `audit_decision_str` is the testable seam.
+        assert_eq!(audit_decision_str(Tier::Block), Some("block"));
+        assert_eq!(audit_decision_str(Tier::Warn), Some("warn"));
+        // The new arm:
+        assert_eq!(audit_decision_str(Tier::Ask), Some("ask"));
+        // Allow is not logged:
+        assert_eq!(audit_decision_str(Tier::Allow), None);
     }
 
     #[test]

@@ -200,6 +200,22 @@ impl HookOutput {
         }
     }
 
+    /// A PreToolUse ASK output: `permissionDecision="ask"` + capped reason.
+    /// The harness (Claude Code) surfaces `ask` as a UI prompt to the
+    /// human; the human's response is the harness's concern, not
+    /// agentguard's hook path. Exit 0 (the `ask` verdict is not an
+    /// error). See [`emit`] for the event-level mapping.
+    pub fn ask(event: &str, reason: &str) -> Self {
+        Self {
+            hook_specific_output: HookSpecificOutput {
+                hook_event_name: event.to_string(),
+                permission_decision: Some("ask".to_string()),
+                permission_decision_reason: Some(cap_reason(reason)),
+                additional_context: None,
+            },
+        }
+    }
+
     /// Serialize to the stdout JSON string.
     pub fn to_json(&self) -> String {
         // Serialization of these plain structs cannot fail; fall back defensively.
@@ -219,6 +235,15 @@ impl HookOutput {
 ///   graceful downgrade to `(Some(nested additionalContext warn), 0)`, because
 ///   exit 2 there cannot block (PostToolUse) or would erase the prompt
 ///   (UserPromptSubmit).
+/// - `Ask` on a **blocking** event (`PreToolUse`) ->
+///   `(Some(permissionDecision=ask + reason), 0)` — the harness surfaces
+///   `ask` as a UI prompt; the human's response is the harness's
+///   concern, not agentguard's hook path. Exit 0 (the verdict is
+///   not an error).
+/// - `Ask` on a **non-blocking** event (`PostToolUse`/`UserPromptSubmit`) ->
+///   graceful downgrade to `(Some(nested additionalContext warn), 0)`,
+///   mirroring the Block downgrade — the harness cannot ask on these
+///   events, so the ask is surfaced as a warn.
 pub fn emit(event: &str, verdict: &Verdict) -> (Option<String>, i32) {
     match verdict.tier {
         Tier::Allow => (None, 0),
@@ -228,6 +253,15 @@ pub fn emit(event: &str, verdict: &Verdict) -> (Option<String>, i32) {
                 (Some(HookOutput::deny(event, &verdict.reason).to_json()), 2)
             } else {
                 // Graceful downgrade: surface as a warn rather than a no-op block.
+                (Some(HookOutput::warn(event, &verdict.reason).to_json()), 0)
+            }
+        }
+        Tier::Ask => {
+            if is_blocking_event(event) {
+                (Some(HookOutput::ask(event, &verdict.reason).to_json()), 0)
+            } else {
+                // Graceful downgrade: surface as a warn (harness cannot
+                // ask on PostToolUse/UserPromptSubmit; mirrors Block).
                 (Some(HookOutput::warn(event, &verdict.reason).to_json()), 0)
             }
         }
@@ -387,6 +421,64 @@ mod tests {
         assert_eq!(code, 0);
         let v: serde_json::Value = serde_json::from_str(&out.unwrap()).unwrap();
         assert_eq!(v["hookSpecificOutput"]["additionalContext"], "suspicious");
+    }
+
+    // ---- v0.3 Verdict::Ask + permissionDecision: "ask" output shape ----
+
+    #[test]
+    fn ask_output_is_nested_permission_decision_ask_exit_0() {
+        let json = HookOutput::ask("PreToolUse", "human please confirm").to_json();
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecisionReason"],
+            "human please confirm"
+        );
+        // No additionalContext (ask is permission-decision-only, not warn).
+        assert!(v["hookSpecificOutput"].get("additionalContext").is_none());
+        // No bare top-level decision/context.
+        assert!(v.get("permissionDecision").is_none());
+        assert!(v.get("additionalContext").is_none());
+    }
+
+    #[test]
+    fn emit_ask_pretooluse_is_permission_decision_ask_exit_0() {
+        // The full emit path: a Tier::Ask verdict on a PreToolUse event
+        // produces permissionDecision="ask" + reason, exit 0 (the ask
+        // verdict is a UI prompt in the harness, not an error).
+        let (out, code) = emit("PreToolUse", &Verdict::ask("please confirm"));
+        assert_eq!(code, 0, "ask must exit 0 (harness surfaces as UI prompt)");
+        let v: serde_json::Value = serde_json::from_str(&out.unwrap()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "ask");
+        assert_eq!(
+            v["hookSpecificOutput"]["permissionDecisionReason"],
+            "please confirm"
+        );
+    }
+
+    #[test]
+    fn emit_ask_posttooluse_downgrades_to_warn_exit_0() {
+        // PostToolUse cannot ask -> graceful downgrade to a warn
+        // (mirrors the Block downgrade at `emit_block_posttooluse_
+        // downgrades_to_warn_exit_0`). Exit 0.
+        let (out, code) = emit("PostToolUse", &Verdict::ask("would ask"));
+        assert_eq!(code, 0, "ask on PostToolUse must downgrade to warn-only");
+        let v: serde_json::Value = serde_json::from_str(&out.unwrap()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "would ask");
+        // No permissionDecision on the graceful-downgrade warn shape.
+        assert!(v["hookSpecificOutput"].get("permissionDecision").is_none());
+    }
+
+    #[test]
+    fn emit_ask_userpromptsubmit_downgrades_to_warn_exit_0() {
+        // UserPromptSubmit cannot ask (and exit 2 erases the prompt) ->
+        // graceful downgrade to a warn, exit 0.
+        let (out, code) = emit("UserPromptSubmit", &Verdict::ask("ambiguous"));
+        assert_eq!(code, 0);
+        let v: serde_json::Value = serde_json::from_str(&out.unwrap()).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["additionalContext"], "ambiguous");
+        assert!(v["hookSpecificOutput"].get("permissionDecision").is_none());
     }
 
     #[test]
