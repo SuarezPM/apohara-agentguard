@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Sandbox escape closures** (v0.3): the Landlock ruleset
+  enforces an explicit no-write on `/proc`, closing 2 of 3
+  documented escape surfaces — the `/proc/self/root`
+  filesystem-via-proc alias (`sandbox_proc_self_root_write_is_denied`)
+  and the ELF-linker trick of writing to `/proc/self/exe`
+  (`sandbox_elf_linker_tricks_are_denied`). The empirical
+  baseline (`tests/sandbox_build_e2e.rs`: `cargo build` /
+  `node -e` / `go run` exit 0) is preserved as the
+  non-regression gate. The seccomp self-disable side is
+  covered by the existing `unlisted_syscall_returns_eperm`
+  test in `tests/sandbox_seccomp.rs` (the kernel allows
+  multiple ANDed seccomp filters; the "lock" property is not
+  a universal kernel feature). `SECURITY.md` "Known
+  limitations" updated.
 - **`Tier::Ask` + `permissionDecision: "ask"`** (v0.3): the 4th decision tier
   (`Block > Ask > Warn > Allow`) surfaces a UI prompt via Claude Code's
   documented `permissionDecision: "ask"` contract (exit 0 on

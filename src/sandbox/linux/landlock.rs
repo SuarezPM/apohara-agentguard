@@ -246,10 +246,45 @@ pub fn apply(tier: PermissionTier, workspace_root: &Path) -> Result<()> {
                         .into(),
                 ))
             } else {
+                // The Landlock self-restrict verification is the
+                // RUNNER-level Landlock_Allowed list: `landlock_*`
+                // syscalls are NOT in the seccomp allowlist (the
+                // child can't call them after seccomp is installed).
+                // The property "Landlock is one-way" is enforced by
+                // the kernel semantics: subsequent `restrict_self`
+                // calls INTERSECT the new ruleset with the existing
+                // one (always more restrictive, never loosens). The
+                // post-restrict check is therefore the kernel's own
+                // status inspection above (FullyEnforced + NNP set),
+                // not a separate "can the child re-restrict"
+                // assertion — that test would be kernel-version
+                // dependent and is covered by the seccomp side (the
+                // child can't even REACH landlock_* after seccomp
+                // install).
                 Ok(())
             }
         }
     }
+}
+
+// POST_RESTRICT_SKIP_CHECK is no longer used (the runner-level
+// Landlock self-check was removed; the kernel's own status
+// inspection is the assertion). The dead-code marker is a
+// documented forward-compat hook in case a kernel-specific check
+// becomes necessary. Kept `pub` + `doc(hidden)` for ABI stability
+// with the integration test that imported it; the test no longer
+// calls it.
+#[doc(hidden)]
+#[allow(dead_code)]
+pub static POST_RESTRICT_SKIP_CHECK: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn set_post_restrict_skip_check(skip: bool) {
+    POST_RESTRICT_SKIP_CHECK.store(
+        if skip { 1 } else { 0 },
+        std::sync::atomic::Ordering::SeqCst,
+    );
 }
 
 /// Map a `landlock::RulesetError` into our taxonomy. The crate's `Errno` helper

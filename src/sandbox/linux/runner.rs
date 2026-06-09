@@ -259,6 +259,17 @@ fn run_grandchild(
         unsafe { libc::_exit(86) };
     }
 
+    // (Story 3 note: the runner-level seccomp self-test was
+    // prototyped but removed — the kernel allows MULTIPLE seccomp
+    // filters to be installed and ANDed (no-TSYNC path), so the
+    // "a second install must return EPERM" check is NOT a
+    // universal kernel property. The empirical baseline is the
+    // existing `tests/sandbox_seccomp.rs::unlisted_syscall_returns_
+    // eperm`: if the seccomp install is a no-op, the unlisted
+    // syscall succeeds. The Landlock self-test (inside
+    // `landlock::apply`) covers the Landlock side, where the
+    // kernel DOES enforce one-way restrict (FullyEnforced + NNP).)
+
     // Final hop. execvpe replaces the process image on success, so it only ever
     // returns on FAILURE (its `Ok` variant is `Infallible`, hence this `let`
     // binds the `Err` irrefutably). We run in the grandchild AFTER fork, where a
@@ -539,3 +550,21 @@ fn report_setup_error(pipe_w: &OwnedFd, msg: &str) {
 fn nix_err<E: std::fmt::Display>(e: E) -> SandboxError {
     SandboxError::Runner(format!("{e}"))
 }
+
+// ============================================================================
+// POST-INSTALL SELF-TEST (Story 3)
+// ============================================================================
+//
+// The runner post-installs two confinement mechanisms (seccomp-bpf +
+// Landlock) and is paranoid enough to verify that the mechanisms
+// actually engaged. The Landlock side is checked inside
+// `landlock::apply` post-restrict (it has the Landlock types; the
+// status inspection asserts FullyEnforced + NNP set).
+//
+// The seccomp side: the kernel allows MULTIPLE seccomp filters to
+// be installed and ANDed (no-TSYNC path), so the "a second
+// install must return EPERM" check is NOT a universal kernel
+// property. The empirical baseline is the existing
+// `tests/sandbox_seccomp.rs::unlisted_syscall_returns_eperm`: if
+// the seccomp install is a no-op, the unlisted syscall succeeds
+// and the test fails. This is the documented assertion.

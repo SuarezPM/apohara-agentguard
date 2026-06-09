@@ -167,9 +167,15 @@ seccomp (last)**.
   loud stderr warning, and (when enabled) records the invocation to the audit
   log — but it is, by design, no sandbox at all.
 - **`/proc/self` access, abstract unix sockets, and ptrace blind spots** are not
-  exhaustively closed. The allowlist is scoped for running build tools, not for
-  resisting a determined in-process escape; this is **not** a
-  sandbox-escape-proof jail.
+  exhaustively closed. The `/proc/self/root` filesystem-via-proc alias
+  (`sandbox_proc_self_root_write_is_denied` in
+  [`tests/sandbox_escape.rs`](tests/sandbox_escape.rs)) and the
+  ELF-linker trick of writing to `/proc/self/exe`
+  (`sandbox_elf_linker_tricks_are_denied`) ARE closed (the Landlock
+  ruleset grants no write on `/proc`); the broader "abstract unix
+  sockets / ptrace" surface is not. The allowlist is scoped for
+  running build tools, not for resisting a determined in-process
+  escape; this is **not** a sandbox-escape-proof jail.
 - **Non-Linux platforms.** seccomp + Landlock are **Linux-only** (need Linux ≥
   5.13 with Landlock enabled, `lsm=landlock`). On macOS/Windows the sandbox
   subcommand **fails closed** (refuses to run); the gate, path-guard, and
