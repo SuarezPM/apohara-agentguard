@@ -504,20 +504,38 @@ pub(crate) fn audit_decision_str(tier: Tier) -> Option<&'static str> {
     }
 }
 
-/// The v0.3 policy engine slot. Story 1 wires this in as a thin no-op
-/// combine so the dispatch chain shape is finalized; Story 2 replaces
-/// the body with a real call to
-/// `policy::engine::PolicySet::load(config.policy.file.as_deref())` then
-/// `policy_set.evaluate(&input, &config)`, composed via `max_verdict`.
+/// The v0.3 policy engine pass. Loads the policy from
+/// `config.policy.file` (when set) and evaluates the input; the verdict
+/// is composed with the built-in checks via `max_verdict` in
+/// `dispatch_pretooluse`.
 ///
-/// With `Config::default()` (no policy loaded), this returns
-/// `Verdict::allow()` — a no-op combine that preserves the byte-identical
-/// default path. The `empty_policy_slot_is_no_op` test asserts the
-/// no-op-combine invariant; the higher-level
-/// `empty_tool_rules_is_byte_identical_noop` test asserts the full
-/// dispatch is still byte-identical.
-fn policy_engine_evaluate(_input: &HookInput, _config: &Config) -> Verdict {
-    Verdict::allow()
+/// ## Failure posture (fail-closed)
+///
+/// Any `PolicyError` (missing file, malformed TOML, unknown
+/// `schema_version`) is mapped to `Verdict::block` so a misconfigured
+/// policy is a HARD refusal, never a silent Allow. The default empty
+/// `PolicySet` (no policy loaded) returns `Verdict::allow()` and the
+/// full dispatch is byte-identical to the pre-Story-2 baseline.
+///
+/// ## Byte-identity invariant
+///
+/// `engine_byte_identical_when_no_policy_loaded` (in `tests/policy_engine.rs`)
+/// asserts that with `Config::default()` (no `policy.file`), the hook
+/// `(out, code)` matches the built-in checks alone — the engine is a
+/// true no-op combine.
+fn policy_engine_evaluate(input: &HookInput, config: &Config) -> Verdict {
+    let path = config.policy.file.as_deref();
+    let set = match crate::policy::engine::PolicySet::load(path) {
+        Ok(s) => s,
+        Err(e) => {
+            // Fail-closed: a load error is a hard refusal. The
+            // dispatcher will surface this as a Block verdict.
+            return Verdict::block(format!("policy load error (fail-closed): {e}"));
+        }
+    };
+    // The engine returns a regular `Verdict`; no exotic variants to
+    // match against.
+    set.evaluate(input, config)
 }
 
 /// PostToolUse dispatch: only Bash stdout is scanned (WARN-only, cannot block).

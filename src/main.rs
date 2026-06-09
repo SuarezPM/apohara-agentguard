@@ -16,6 +16,13 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "apohara-agentguard", version, about)]
 struct Cli {
+    /// Path to a TOML policy file (CLI > AGENTGUARD_POLICY env > [policy]
+    /// file in config). Applies to every subcommand that consults the
+    /// engine (`hook`, `check`, `scan`, `mcp`). With no value, the
+    /// engine is a no-op combine (the empty-TOML invariant).
+    #[arg(long, global = true, env = "AGENTGUARD_POLICY")]
+    policy: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -65,11 +72,22 @@ fn main() -> ExitCode {
             println!("apohara-agentguard {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Hook => run_hook(),
+        Command::Hook => run_hook(cli.policy.as_deref()),
         Command::Sandbox(args) => run_sandbox(args),
-        Command::Scan => run_scan(),
-        Command::Check(args) => run_check(args),
-        Command::Mcp => run_mcp(),
+        Command::Scan => run_scan(cli.policy.as_deref()),
+        Command::Check(args) => run_check(args, cli.policy.as_deref()),
+        Command::Mcp => run_mcp(cli.policy.as_deref()),
+    }
+}
+
+/// Apply the CLI / env policy-path override to a config, with the
+/// documented precedence (CLI > env > config). The env override
+/// (`AGENTGUARD_POLICY`) is folded into `cli.policy` by clap's
+/// `env = "..."` attribute on the global flag, so by the time this is
+/// called, `cli_path` is either the CLI value OR the env value OR None.
+fn apply_policy_override(config: &mut Config, cli_path: Option<&std::path::Path>) {
+    if let Some(p) = cli_path {
+        config.policy.file = Some(p.to_path_buf());
     }
 }
 
@@ -77,14 +95,15 @@ fn main() -> ExitCode {
 /// with the returned code. On a blocking exit (code 2) the decision JSON is
 /// printed to stdout AND the reason is mirrored to stderr (belt-and-suspenders:
 /// exit 2 + stderr is the effective block signal even if JSON is ignored).
-fn run_hook() -> ExitCode {
+fn run_hook(cli_policy: Option<&std::path::Path>) -> ExitCode {
     let mut stdin_json = String::new();
     if std::io::stdin().read_to_string(&mut stdin_json).is_err() {
         // Fail OPEN: an unreadable stdin must not block the user's tool.
         return ExitCode::SUCCESS;
     }
 
-    let config = Config::load_default_locations().unwrap_or_default();
+    let mut config = Config::load_default_locations().unwrap_or_default();
+    apply_policy_override(&mut config, cli_policy);
     let (stdout_json, code) = hook::run(&stdin_json, &config);
 
     if let Some(json) = stdout_json {
@@ -102,12 +121,14 @@ fn run_hook() -> ExitCode {
 ///
 /// Surface-agnostic: scans the raw text with default thresholds and prints the
 /// verdict. Exit 2 on a Block so it composes in shell pipelines; 0 otherwise.
-fn run_scan() -> ExitCode {
+fn run_scan(cli_policy: Option<&std::path::Path>) -> ExitCode {
     let mut content = String::new();
     if std::io::stdin().read_to_string(&mut content).is_err() {
         eprintln!("apohara-agentguard scan: could not read stdin");
         return ExitCode::from(2);
     }
+    let mut config = Config::load_default_locations().unwrap_or_default();
+    apply_policy_override(&mut config, cli_policy);
     let verdict = apohara_agentguard::firewall::scan_content(&content, &Default::default());
     use apohara_agentguard::verdict::Tier;
     // `scan` invokes the firewall's `scan_content` (severity_to_tier
@@ -137,8 +158,9 @@ fn run_scan() -> ExitCode {
 /// Prints the verdict and exits 2 on a Block (so it composes in shell
 /// pipelines), 0 otherwise (Allow/Warn). The config supplies allow_list,
 /// custom_blocks, thresholds, and the disable kill-switch.
-fn run_check(args: CheckArgs) -> ExitCode {
-    let config = Config::load_default_locations().unwrap_or_default();
+fn run_check(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode {
+    let mut config = Config::load_default_locations().unwrap_or_default();
+    apply_policy_override(&mut config, cli_policy);
     let verdict = apohara_agentguard::gate::evaluate(&args.command, &config);
     use apohara_agentguard::verdict::Tier;
     // `check` invokes the gate's `evaluate` (severity_to_tier output),
@@ -167,8 +189,9 @@ fn run_check(args: CheckArgs) -> ExitCode {
 /// JSON-RPC 2.0). Short-lived request/response: reads stdin, answers on stdout,
 /// and exits when stdin closes. The gate uses the loaded user config (same
 /// loader as `check`/`scan`). A stdin/stdout I/O error exits non-zero.
-fn run_mcp() -> ExitCode {
-    let config = Config::load_default_locations().unwrap_or_default();
+fn run_mcp(cli_policy: Option<&std::path::Path>) -> ExitCode {
+    let mut config = Config::load_default_locations().unwrap_or_default();
+    apply_policy_override(&mut config, cli_policy);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     match apohara_agentguard::mcp::serve(stdin.lock(), stdout.lock(), &config) {

@@ -162,7 +162,8 @@ jobs:
           cargo test --test headline_bypass --test gate_fp --test hook_contract \
                      --test kill_switch_env \
                      --test pathguard --test firewall_posture \
-                     --test benchmark --test benchmark_packs --test benchmark_tensortrust
+                     --test benchmark --test benchmark_packs --test benchmark_tensortrust \
+                     --test policy_engine
           # sandbox_offlinux only exists (and matters) off Linux.
           if [ "${{ runner.os }}" != "Linux" ]; then
             cargo test --test sandbox_offlinux

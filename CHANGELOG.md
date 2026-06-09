@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Tier::Ask` + `permissionDecision: "ask"`** (v0.3): the 4th decision tier
+  (`Block > Ask > Warn > Allow`) surfaces a UI prompt via Claude Code's
+  documented `permissionDecision: "ask"` contract (exit 0 on
+  `PreToolUse`; graceful downgrade to a Warn on
+  `PostToolUse` / `UserPromptSubmit`). The new tier is wired through
+  `audit_decision` (`decision = "ask"`) and the precedence test
+  `ask_tier_rank_above_warn_below_block` is the canonical reference
+  for the rank order.
+- **Pure-Rust TOML policy engine** (v0.3, star item): per-tool
+  `[[tools]]` rule patterns, `defaults.default_action = "deny"`
+  posture, and per-session + per-tool budget caps with the
+  `tokens = max(1, chars / 4)` heuristic on Bash commands and
+  `UserPromptSubmit` prompts. Loaded via `--policy <path>` (global
+  flag, CLI > `AGENTGUARD_POLICY` env > `[policy] file` in
+  config). Composes with the gate / firewall / pathguard / tool
+  rules via `max_verdict`. **Fail-closed**: any load / parse /
+  `schema_version` error is mapped to `Verdict::block`. The
+  pre-committed `tests/policy_engine.rs` 0-FP / 0-FN gates (66
+  benign / 33 dangerous) are asserted on every push; the
+  `tests/benchmark.rs` v0.2 baseline stays green (the engine is
+  a no-op combine when no policy is loaded).
 - **Project governance & OpenSSF Best Practices artifacts**:
   [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) (Contributor Covenant 3.0),
   [`GOVERNANCE.md`](GOVERNANCE.md), this changelog, a top-level

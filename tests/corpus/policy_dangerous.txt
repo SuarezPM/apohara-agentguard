@@ -1,0 +1,61 @@
+# apohara-agentguard policy engine benchmark — DANGEROUS
+#
+# 30+ commands that MUST be Blocked under the default-deny policy loaded
+# by `tests/policy_engine.rs`. The policy has explicit Block rules for
+# destructive primitives; a dangerous command matching a Block rule is
+# refused at the rule layer (before the default-deny fallback).
+#
+# The pre-committed gate in `tests/policy_engine.rs` is 0-FN: a
+# dangerous command that is NOT Blocked is a real false negative.
+#
+# Lines starting with `#` and blank lines are ignored by the loader.
+
+# --- rm -rf variants ---
+rm -rf ~
+rm -rf /
+rm -rf --no-preserve-root /
+rm -fr ~
+rm -rf ~/
+rm -Rf /home
+rm -rf $HOME
+rm -rf *
+
+# --- mkfs / disk destroy ---
+mkfs.ext4 /dev/sda
+mkfs.xfs /dev/sdb
+mkfs.btrfs /dev/nvme0n1
+
+# --- dd if= (device write) ---
+dd if=/dev/zero of=/dev/sda
+dd if=/dev/urandom of=/dev/sdb bs=1M
+dd if=/etc/passwd of=/tmp/x
+
+# --- shutdown / reboot / power ---
+shutdown -h now
+shutdown -r +5
+reboot
+poweroff
+halt
+
+# --- sudo (escalation) ---
+sudo apt install nginx
+sudo rm -rf /
+sudo systemctl restart sshd
+sudo cat /etc/shadow
+
+# --- block-disk / wipe ---
+wipefs -a /dev/sda
+blkdiscard /dev/nvme0n1
+
+# --- rm -rf with obfuscation / case variants ---
+rm -Rf /etc
+rm -rF /var/log
+rm --recursive --force /
+
+# --- nested sudo / fork bomb chained ---
+sudo dd if=/dev/zero of=/dev/sda
+
+# --- additional disk formats ---
+mkfs.ntfs /dev/sdc1
+mkfs.fat /dev/sdd1
+mkfs.vfat /dev/sde1
