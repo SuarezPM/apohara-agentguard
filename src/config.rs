@@ -53,6 +53,20 @@ pub struct CanaryConfig {
     pub enabled: bool,
 }
 
+/// `[policy]` configuration (v0.3+). Optional path to a TOML policy file
+/// consumed by the policy file evaluator. Absent / empty / `file = None` ⇒ no
+/// policy is loaded; the engine is a no-op combine (`Verdict::allow()`), so the
+/// empty-TOML / `Config::default()` byte-equivalence is preserved.
+///
+/// Layered loading (CLI > env > config) is the runtime concern of the engine
+/// in `src/policy/`; this struct only owns the on-disk `Config` surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyConfig {
+    /// Path to a TOML policy file. When `None`, no policy is loaded.
+    #[serde(default)]
+    pub file: Option<PathBuf>,
+}
+
 /// User-facing configuration that overrides built-in defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
@@ -95,6 +109,10 @@ pub struct Config {
     /// Canary toggle (`[canary]`). Off by default. See [`CanaryConfig`].
     #[serde(default)]
     pub canary: CanaryConfig,
+    /// Policy file evaluator settings (`[policy]`). Off by default (no policy
+    /// file loaded). See [`PolicyConfig`].
+    #[serde(default)]
+    pub policy: PolicyConfig,
 }
 
 /// Default for [`Config::normalize`] — the pre-pass is on by default.
@@ -122,6 +140,9 @@ impl Default for Config {
             level: None,
             // Canary off by default.
             canary: CanaryConfig::default(),
+            // Policy file evaluator off by default (no file loaded). The engine
+            // is a no-op combine; empty-TOML / `Config::default()` agree.
+            policy: PolicyConfig::default(),
         }
     }
 }
@@ -358,6 +379,10 @@ mod tests {
             level: Some("strict".to_string()),
             // Non-default (default is false) so the round-trip exercises [canary].
             canary: CanaryConfig { enabled: true },
+            // Non-default (default is None) so the round-trip exercises [policy].
+            policy: PolicyConfig {
+                file: Some(PathBuf::from("/etc/agentguard/policy.toml")),
+            },
         }
     }
 
@@ -394,8 +419,9 @@ mod tests {
     #[test]
     fn partial_toml_omitting_new_fields_is_default() {
         // A TOML that sets only pre-existing fields must leave every
-        // forward-compat field (packs/tool_rules/disabled/level/canary) at its
-        // default — proving the empty-TOML invariant survives schema growth.
+        // forward-compat field (packs/tool_rules/disabled/level/canary/policy)
+        // at its default — proving the empty-TOML invariant survives schema
+        // growth.
         let text = r#"
             allow_list = ["git status"]
             disable = false
@@ -406,6 +432,8 @@ mod tests {
         assert!(cfg.disabled.is_empty());
         assert!(cfg.level.is_none());
         assert!(!cfg.canary.enabled);
+        assert_eq!(cfg.policy, PolicyConfig::default());
+        assert!(cfg.policy.file.is_none());
     }
 
     #[test]
@@ -420,6 +448,73 @@ mod tests {
         assert!(cfg.audit.enabled);
         assert_eq!(cfg.audit.path, Some(PathBuf::from("/tmp/x.jsonl")));
         assert!(cfg.audit.include_command);
+    }
+
+    // ---- v0.3 [policy] section ----
+
+    #[test]
+    fn partial_toml_omitting_policy_is_default() {
+        // The per-story empty-TOML invariant for the new v0.3 [policy] field:
+        // a TOML that omits [policy] entirely must parse to
+        // `Config::default()` with `policy == PolicyConfig::default()`. This
+        // is the v0.3 equivalent of `partial_toml_omitting_new_fields_is_default`,
+        // called out by name in the plan so a future regression in the
+        // serde-default behavior fails this test BEFORE it can fail the
+        // higher-level hook/policy tests.
+        let text = r#"
+            allow_list = ["git status"]
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parse partial");
+        assert_eq!(cfg.policy, PolicyConfig::default());
+        assert!(cfg.policy.file.is_none());
+    }
+
+    #[test]
+    fn policy_section_round_trips() {
+        // Set every [policy] key, serialize, deserialize, assert equality.
+        // This is the `policy` analogue of `audit_section_round_trips`. If a
+        // future field is added to PolicyConfig without `#[serde(default)]`
+        // (or a round-trip is broken), this test fails BEFORE the policy
+        // engine (Story 2) can ship a broken schema.
+        let text = r#"
+            [policy]
+            file = "/etc/agentguard/policy.toml"
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parse [policy]");
+        assert_eq!(
+            cfg.policy,
+            PolicyConfig {
+                file: Some(PathBuf::from("/etc/agentguard/policy.toml")),
+            }
+        );
+        // Round-trip: serialize and re-parse; must match the in-memory value.
+        let serialized = toml::to_string(&cfg).expect("serialize [policy]");
+        let reparsed: Config = toml::from_str(&serialized).expect("re-parse [policy]");
+        assert_eq!(reparsed.policy, cfg.policy);
+    }
+
+    #[test]
+    fn non_default_config_exercises_every_new_field() {
+        // The non_default_config() fixture must set EVERY Config field to a
+        // non-default value, so toml_round_trip actually exercises every
+        // schema growth. This test is the canary the v0.2 plan's F2 finding
+        // called out: a fixture that accidentally leaves a field at its
+        // default is a false-green for that field's round-trip.
+        let cfg = non_default_config();
+        // Pre-existing defaults baseline.
+        assert_ne!(cfg.allow_list, Config::default().allow_list);
+        assert_ne!(cfg.custom_blocks, Config::default().custom_blocks);
+        assert_ne!(cfg.thresholds, Config::default().thresholds);
+        assert_ne!(cfg.audit, Config::default().audit);
+        // v0.1.x forward-compat fields.
+        assert_ne!(cfg.packs, Config::default().packs);
+        assert_ne!(cfg.tool_rules, Config::default().tool_rules);
+        assert_ne!(cfg.disabled, Config::default().disabled);
+        assert_ne!(cfg.level, Config::default().level);
+        assert_ne!(cfg.canary, Config::default().canary);
+        // v0.3 [policy] field.
+        assert_ne!(cfg.policy, Config::default().policy);
+        assert!(cfg.policy.file.is_some());
     }
 
     #[test]
