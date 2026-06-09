@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Ask corpus + benchmark** (v0.3, Story 6): pre-committed
+  `tests/corpus/ask_{benign,dangerous}.txt` (30 benign / 18
+  dangerous) + `tests/ask_corpus.rs` integration test with a
+  pre-committed 0-FP / 0-FN gate on the Ask tier (mirrors
+  `tests/benchmark.rs:121` shape). The policy uses
+  `budgets.per_tool.Bash.max_invocations = 0` to escalate every
+  Bash call to Ask; the benign corpus contains only non-Bash
+  tools (Read / Write / Edit / WebFetch / UserPromptSubmit) so
+  the engine's budget is never charged and the engine returns
+  Allow. `--test ask_corpus` registered in `ci.yml`'s explicit
+  `--test` list (the v0.2 F4 lesson).
 - **`apohara-agentguard ask '<cmd>'` CLI subcommand** (v0.3): runs the
   full decision pipeline (gate + policy engine) on a single
   command and prints the verdict (`allow` / `warn` / `block` /

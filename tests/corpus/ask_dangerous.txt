@@ -1,0 +1,35 @@
+# apohara-agentguard Ask corpus — DANGEROUS
+#
+# 15+ Bash commands that MUST be classified as Ask under the
+# Story 6 ask-corpus policy. The policy uses
+# `budgets.per_tool.Bash.max_invocations = 0` so ANY Bash call
+# (the FIRST call) is over budget (0 invocations allowed; 1 > 0)
+# and the engine returns `Verdict::ask`. The gate is silent on
+# these commands (none of them are in the destructive taxonomy
+# — `git status` / `ls -la` / `cat ...` are clearly benign in
+# isolation), so the composition is engine Ask + gate Allow = Ask
+# (Ask outranks Allow in the canonical `max_verdict` matrix).
+#
+# The pre-committed gate is 0-FN: a dangerous command that
+# does NOT produce an Ask is a real misclassification.
+#
+# Lines starting with `#` and blank lines are ignored by the loader.
+
+ls -la
+ls -la /tmp
+ls src/
+cat Cargo.toml
+cat README.md
+head -20 main.rs
+tail -50 error.log
+wc -l *.rs
+pwd
+whoami
+date
+which cargo
+which python3
+echo hello world
+echo "$PATH"
+git status
+git log --oneline -5
+git diff HEAD~1
