@@ -1,0 +1,69 @@
+{
+  "name": "apohara-agentguard",
+  "version": "0.2.0",
+  "description": "Deterministic, offline, no-model safety hook + local seccomp+Landlock sandbox + input firewall for Claude Code. Headline differentiator: structural Bash parsing that closes the 3 bypasses naive fixed-list gates miss (variable aliasing, base64 smuggling, pipe/structure-aware destructive detection).",
+  "author": {
+    "name": "Pablo (SuarezPM)",
+    "url": "https://github.com/SuarezPM"
+  },
+  "homepage": "https://github.com/SuarezPM/apohara-agentguard",
+  "repository": "https://github.com/SuarezPM/apohara-agentguard",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "security",
+    "safety-hook",
+    "claude-code",
+    "deterministic",
+    "offline",
+    "no-model",
+    "sandbox",
+    "seccomp",
+    "landlock",
+    "input-firewall",
+    "policy-engine",
+    "open-source",
+    "openSSF-silver"
+  ],
+  "categories": [
+    "security",
+    "safety",
+    "productivity"
+  ],
+  "commands": {
+    "hook": {
+      "description": "Run as a Claude Code PreToolUse / PostToolUse / UserPromptSubmit / SessionStart hook. Reads stdin JSON, emits a permission-decision JSON, exits 0 (Allow/Warn/Ask) or 2 (Block deny).",
+      "command": "apohara-agentguard hook"
+    },
+    "check": {
+      "description": "Evaluate a single Bash command against the anti-bypass gate. Prints `allow`/`warn`/`block` to stdout, exits 0 or 2.",
+      "command": "apohara-agentguard check '<command>'"
+    },
+    "scan": {
+      "description": "Scan stdin content through the input firewall. Prints verdict, exits 0 or 2.",
+      "command": "apohara-agentguard scan"
+    },
+    "ask": {
+      "description": "Run the full decision pipeline (gate + policy engine) on a single command. Operator introspection surface — see the verdict before relying on it. Prints `allow`/`warn`/`block`/`ask`.",
+      "command": "apohara-agentguard ask '<command>'"
+    },
+    "sandbox": {
+      "description": "Run a command inside the local seccomp + Landlock sandbox. Three permission tiers (read_only / workspace_write / danger_full_access).",
+      "command": "apohara-agentguard sandbox --tier workspace_write -- /path/to/cmd"
+    },
+    "mcp": {
+      "description": "Serve the gate + firewall as MCP tools (`check_command` / `scan_prompt`) over stdio JSON-RPC.",
+      "command": "apohara-agentguard mcp"
+    }
+  },
+  "installation": {
+    "binary": "Pre-built binaries for 7 targets (x86_64/aarch64 Linux gnu+musl, x86_64/aarch64 macOS, x86_64 Windows) are published in the GitHub Releases. SLSA Build L3 signed.",
+    "from_source": "cargo install apohara-agentguard",
+    "minimum_requirements": "Linux: kernel >= 5.13 with Landlock enabled (lsm=landlock). macOS/Windows: gate + path-guard + firewall work; sandbox subcommand fails closed."
+  },
+  "links": {
+    "readme": "https://github.com/SuarezPM/apohara-agentguard#readme",
+    "security": "https://github.com/SuarezPM/apohara-agentguard/blob/main/SECURITY.md",
+    "changelog": "https://github.com/SuarezPM/apohara-agentguard/blob/main/CHANGELOG.md",
+    "benchmark": "https://github.com/SuarezPM/apohara-agentguard/blob/main/BENCHMARK.md"
+  }
+}

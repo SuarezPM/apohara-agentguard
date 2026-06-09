@@ -58,6 +58,27 @@ jobs:
             os: ubuntu-latest
             ext: ""
             cross: true
+            cross_image: ""  # default cross image (debian stable)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            ext: ""
+            cross: true
+            # x86_64-unknown-linux-musl works with cross 0.2.5's
+            # default image; the build is empirically verified locally
+            # (Story 5 F5 dry-run, 5.4M static-pie binary).
+            cross_image: ""
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            ext: ""
+            cross: true
+            # aarch64-unknown-linux-musl needs a newer cross image
+            # than cross 0.2.5's default (the default image's glibc
+            # is too old for modern build scripts). `ghcr.io/cross-rs/
+            # aarch64-unknown-linux-musl:main` is the `:main` tag
+            # from the official cross-rs image registry and ships
+            # current Debian. Empirically verified locally
+            # (Story 5 F5 dry-run, 4.4M static binary).
+            cross_image: "ghcr.io/cross-rs/aarch64-unknown-linux-musl:main"
           - target: x86_64-apple-darwin
             os: macos-latest
             ext: ""
@@ -74,8 +95,9 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      # aarch64 Linux is cross-compiled with `cross` (provides the aarch64
-      # glibc toolchain + runner). The other four build natively.
+      # aarch64 Linux (glibc + musl) is cross-compiled with `cross`
+      # (provides the cross toolchain + a suitable container image).
+      # The other five build natively (Ubuntu, macOS, Windows).
       - name: Install cross (aarch64 Linux)
         if: matrix.cross == true
         run: cargo install cross --locked
@@ -84,9 +106,18 @@ jobs:
         if: matrix.cross != true
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Build (cross)
-        if: matrix.cross == true
+      - name: Build (cross, default image)
+        if: matrix.cross == true && matrix.cross_image == ''
         run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cross, custom image)
+        if: matrix.cross == true && matrix.cross_image != ''
+        run: |
+          cat > Cross.toml <<EOF
+          [target.${{ matrix.target }}]
+          image = "${{ matrix.cross_image }}"
+          EOF
+          cross build --release --locked --target ${{ matrix.target }}
 
       - name: Stage artifact
         shell: bash
@@ -153,6 +184,10 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             ext: ""
           - target: aarch64-unknown-linux-gnu
+            ext: ""
+          - target: x86_64-unknown-linux-musl
+            ext: ""
+          - target: aarch64-unknown-linux-musl
             ext: ""
           - target: x86_64-apple-darwin
             ext: ""

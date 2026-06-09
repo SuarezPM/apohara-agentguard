@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`apohara-agentguard ask '<cmd>'` CLI subcommand** (v0.3): runs the
+  full decision pipeline (gate + policy engine) on a single
+  command and prints the verdict (`allow` / `warn` / `block` /
+  `ask`). The operator introspection surface for capability
+  gating; the policy engine can produce `ask` here that `check`
+  would not. With no policy loaded, the result is byte-identical
+  to `check` (the empty-TOML invariant).
+- **musl Linux release binaries** (v0.3): `x86_64-unknown-linux-musl`
+  and `aarch64-unknown-linux-musl` added to the release matrix
+  (5 → 7 targets). Both attested via the existing SLSA L3
+  reusable workflow; the `verify-attestations` job is GREEN for
+  all 7 targets.
+- **Claude Code plugin marketplace listing metadata**
+  (`.claude-plugin/marketplace.json`): added per the
+  marketplace's submission format. **The submission to the
+  marketplace directory itself is gated on Pablo** (a public
+  registration is a publish-class action).
 - **Sandbox escape closures** (v0.3): the Landlock ruleset
   enforces an explicit no-write on `/proc`, closing 2 of 3
   documented escape surfaces — the `/proc/self/root`

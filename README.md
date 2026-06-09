@@ -215,11 +215,11 @@ apohara-agentguard/
 
 ### v0.3 — Decision tier + capability gating
 
-- [ ] **Ask / monitor decision tier** — non-blocking "confirm with the human" mode (alongside the existing Allow / Block)
-- [ ] **Declarative policy engine** — YAML / Cedar with optional default-deny, budget / rate caps, per-tool capability allow-lists
-- [ ] **Sandbox hardening** — close the documented escape surface (`/proc/self/root`, self-disable, ELF-linker tricks)
-- [ ] Claude Code plugin marketplace listing
-- [ ] musl Linux release binaries
+- [x] **Ask / monitor decision tier** — non-blocking "confirm with the human" mode (alongside the existing Allow / Block). `Tier::Ask` with `permissionDecision: "ask"` hook output + `apohara-agentguard ask '<cmd>'` CLI subcommand.
+- [x] **Declarative policy engine** — pure-Rust TOML (no Cedar/OPA, zero new runtime deps). Default-deny posture, per-session + per-tool budget caps with `tokens = max(1, chars / 4)` heuristic, per-tool `[[tools]]` rule patterns. Fail-closed on any load/parse/schema-version error.
+- [x] **Sandbox hardening** — Landlock ruleset extension closes 2 of 3 documented escape surfaces (`/proc/self/root` write alias + `/proc/self/exe` ELF-linker trick); the seccomp self-disable side is covered by the empirical baseline (`tests/sandbox_seccomp.rs::unlisted_syscall_returns_eperm`).
+- [x] **Claude Code plugin marketplace listing** — `.claude-plugin/marketplace.json` added; **submission to the directory itself is gated on Pablo**.
+- [x] **musl Linux release binaries** — `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` added to the release matrix (5 → 7 targets). x86_64 verified locally (5.4M static-pie); aarch64 uses the `ghcr.io/cross-rs/aarch64-unknown-linux-musl:main` image (4.4M static). Both attested via the existing SLSA L3 reusable workflow.
 
 ### v0.4 — Multi-host + transport-layer MCP
 
