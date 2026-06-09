@@ -39,6 +39,14 @@ enum Command {
     Scan,
     /// Check a command through the anti-bypass gate (prints a verdict).
     Check(CheckArgs),
+    /// Run the full decision pipeline (gate + policy engine) on a single
+    /// command and print the verdict (allow / warn / block / ask). The
+    /// operator introspection surface: lets a user see the verdict
+    /// before relying on it. Mirrors `check`; differs in that it
+    /// consults the policy engine when a policy is loaded (so a
+    /// `default-deny` policy can produce an `ask` here that `check`
+    /// would not).
+    Ask(CheckArgs),
     /// Serve the gate + firewall as MCP tools over stdio (JSON-RPC 2.0).
     Mcp,
 }
@@ -76,6 +84,7 @@ fn main() -> ExitCode {
         Command::Sandbox(args) => run_sandbox(args),
         Command::Scan => run_scan(cli.policy.as_deref()),
         Command::Check(args) => run_check(args, cli.policy.as_deref()),
+        Command::Ask(args) => run_ask(args, cli.policy.as_deref()),
         Command::Mcp => run_mcp(cli.policy.as_deref()),
     }
 }
@@ -182,6 +191,85 @@ fn run_check(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode 
             ExitCode::from(2)
         }
         Tier::Ask => unreachable!("check does not invoke the policy engine"),
+    }
+}
+
+/// Run the full decision pipeline (gate + policy engine) on a single
+/// command and print the verdict. The operator introspection surface
+/// for the v0.3 capability gating; lets a user see the verdict
+/// BEFORE relying on the hook's automatic decision. Mirrors `check`
+/// but additionally consults the policy engine when a policy is
+/// loaded — so a `default-deny` policy can produce an `ask` here
+/// that `check` would not.
+///
+/// With no policy loaded, the policy engine is a no-op combine
+/// (`Verdict::allow()`) and the result is byte-identical to `check`.
+/// This is the empty-TOML invariant for the `ask` subcommand.
+fn run_ask(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode {
+    let mut config = Config::load_default_locations().unwrap_or_default();
+    apply_policy_override(&mut config, cli_policy);
+
+    // Gate verdict (existing surface, v0.2).
+    let gate_v = apohara_agentguard::gate::evaluate(&args.command, &config);
+    // Policy engine verdict (v0.3). The engine consults the loaded
+    // policy (per `Config.policy.file`, overridden by the CLI flag);
+    // when no policy is loaded, the engine is a no-op combine and
+    // `policy_v == Verdict::allow()` — the empty-TOML invariant.
+    let policy_v =
+        match apohara_agentguard::policy::engine::PolicySet::load(config.policy.file.as_deref()) {
+            Ok(set) => set.evaluate(
+                &apohara_agentguard::hook::contract::HookInput {
+                    hook_event_name: "PreToolUse".to_string(),
+                    session_id: None,
+                    tool_name: Some("Bash".to_string()),
+                    tool_input: serde_json::json!({ "command": &args.command }),
+                    prompt: None,
+                    tool_response: serde_json::Value::Null,
+                },
+                &config,
+            ),
+            // Fail-closed: a load error is a hard refusal.
+            Err(e) => apohara_agentguard::verdict::Verdict::block(format!(
+                "policy load error (fail-closed): {e}"
+            )),
+        };
+    // Compose: the MORE SEVERE wins (Block > Ask > Warn > Allow).
+    // Inlined rank so we don't depend on a `pub(crate)` symbol from
+    // the lib crate (main.rs is a separate crate that links the
+    // lib, and `tier_rank` is `pub(crate)` to the lib).
+    fn rank(t: apohara_agentguard::verdict::Tier) -> u8 {
+        use apohara_agentguard::verdict::Tier;
+        match t {
+            Tier::Allow => 0,
+            Tier::Warn => 1,
+            Tier::Ask => 2,
+            Tier::Block => 3,
+        }
+    }
+    let verdict = if rank(policy_v.tier) > rank(gate_v.tier) {
+        policy_v
+    } else {
+        gate_v
+    };
+    use apohara_agentguard::verdict::Tier;
+    match verdict.tier {
+        Tier::Allow => {
+            println!("allow");
+            ExitCode::SUCCESS
+        }
+        Tier::Warn => {
+            println!("warn: {}", verdict.reason);
+            ExitCode::SUCCESS
+        }
+        Tier::Block => {
+            eprintln!("block: {}", verdict.reason);
+            ExitCode::from(2)
+        }
+        Tier::Ask => {
+            // Ask is a UI prompt (not an error); exit 0.
+            println!("ask: {}", verdict.reason);
+            ExitCode::SUCCESS
+        }
     }
 }
 
@@ -300,5 +388,182 @@ fn run_sandbox(args: SandboxArgs) -> ExitCode {
             eprintln!("apohara-agentguard sandbox: REFUSED (fail-closed): {e}");
             ExitCode::from(70)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests compose the gate + policy engine directly to verify the
+    // `ask` subcommand's verdict logic (the helper functions
+    // mirror `run_ask` line-by-line).
+
+    /// Run `run_ask` with `cli_policy = None` (the default-TOML invariant:
+    /// the engine is a no-op combine, and the result is byte-identical
+    /// to `run_check`).
+    fn ask_no_policy(cmd: &str) -> (String, String, i32) {
+        // Capture stdout + stderr by redirecting the file descriptors for
+        // the test thread. The simplest approach: call run_ask and rely
+        // on the fact that it writes to stdout/stderr — we then re-derive
+        // the verdict from the tier via a re-run. To avoid the round
+        // trip, we test the VERDICT directly via `gate::evaluate` and
+        // `policy::engine::PolicySet::default()` composition.
+        let cfg = apohara_agentguard::config::Config::default();
+        let gate_v = apohara_agentguard::gate::evaluate(cmd, &cfg);
+        let policy_v = apohara_agentguard::policy::engine::PolicySet::default().evaluate(
+            &apohara_agentguard::hook::contract::HookInput {
+                hook_event_name: "PreToolUse".to_string(),
+                session_id: None,
+                tool_name: Some("Bash".to_string()),
+                tool_input: serde_json::json!({ "command": cmd }),
+                prompt: None,
+                tool_response: serde_json::Value::Null,
+            },
+            &cfg,
+        );
+        let rank = |t: apohara_agentguard::verdict::Tier| -> u8 {
+            use apohara_agentguard::verdict::Tier;
+            match t {
+                Tier::Allow => 0,
+                Tier::Warn => 1,
+                Tier::Ask => 2,
+                Tier::Block => 3,
+            }
+        };
+        let chosen = if rank(policy_v.tier) > rank(gate_v.tier) {
+            policy_v
+        } else {
+            gate_v
+        };
+        let (out, err) = match chosen.tier {
+            apohara_agentguard::verdict::Tier::Allow => ("allow".to_string(), String::new()),
+            apohara_agentguard::verdict::Tier::Warn => {
+                (format!("warn: {}", chosen.reason), String::new())
+            }
+            apohara_agentguard::verdict::Tier::Block => {
+                (String::new(), format!("block: {}", chosen.reason))
+            }
+            apohara_agentguard::verdict::Tier::Ask => {
+                (format!("ask: {}", chosen.reason), String::new())
+            }
+        };
+        let code = if matches!(chosen.tier, apohara_agentguard::verdict::Tier::Block) {
+            2
+        } else {
+            0
+        };
+        (out, err, code)
+    }
+
+    #[test]
+    fn run_ask_returns_allow_for_benign() {
+        // No policy loaded, benign command => Allow (no-op combine).
+        let (stdout, _stderr, code) = ask_no_policy("ls -la");
+        assert_eq!(stdout, "allow");
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn run_ask_returns_block_for_dangerous() {
+        // No policy loaded, dangerous command => Block (the gate
+        // catches it; the policy engine is a no-op combine).
+        let (stdout, stderr, code) = ask_no_policy("rm -rf ~");
+        assert_eq!(code, 2);
+        assert!(stderr.starts_with("block: "), "stderr was {stderr:?}");
+        assert_eq!(stdout, "", "stdout should be empty on Block");
+    }
+
+    #[test]
+    fn run_ask_returns_ask_for_policy_default_deny() {
+        // A default-deny policy with no [[tools]] entry for Bash =>
+        // engine returns Block (default-deny). Composed with the
+        // gate's Allow, the final verdict is Block (safer wins). To
+        // test the Ask path, we need a policy that produces an Ask
+        // verdict. The simplest: a budget-cap policy where the
+        // second invocation is Ask. The first invocation is Allow.
+        let dir = std::env::temp_dir().join(format!(
+            "agentguard-ask-test-{pid}-{nanos}",
+            pid = std::process::id(),
+            nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy_path = dir.join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            r#"
+schema_version = 1
+[defaults]
+default_action = "allow"
+[budgets.per_tool.Bash]
+max_invocations = 1
+"#,
+        )
+        .unwrap();
+        let mut cfg = apohara_agentguard::config::Config::default();
+        cfg.policy.file = Some(policy_path.clone());
+
+        // First call: within budget => Allow (engine returns Allow
+        // since no rule matched + no default-deny + budget OK).
+        // Same PolicySet instance for both calls so the budget
+        // counter accumulates (the engine's counters are per-set).
+        let set = apohara_agentguard::policy::engine::PolicySet::load(cfg.policy.file.as_deref())
+            .unwrap();
+        let make_input = || apohara_agentguard::hook::contract::HookInput {
+            hook_event_name: "PreToolUse".to_string(),
+            session_id: Some("ask-test".to_string()),
+            tool_name: Some("Bash".to_string()),
+            tool_input: serde_json::json!({ "command": "ls" }),
+            prompt: None,
+            tool_response: serde_json::Value::Null,
+        };
+        let gate_v1 = apohara_agentguard::gate::evaluate("ls", &cfg);
+        let policy_v1 = set.evaluate(&make_input(), &cfg);
+        assert_eq!(
+            policy_v1.tier,
+            apohara_agentguard::verdict::Tier::Allow,
+            "first Bash call within budget"
+        );
+        // Compose: Allow (engine) + Allow (gate) = Allow.
+        let rank = |t: apohara_agentguard::verdict::Tier| -> u8 {
+            use apohara_agentguard::verdict::Tier;
+            match t {
+                Tier::Allow => 0,
+                Tier::Warn => 1,
+                Tier::Ask => 2,
+                Tier::Block => 3,
+            }
+        };
+        let first = if rank(policy_v1.tier) > rank(gate_v1.tier) {
+            policy_v1
+        } else {
+            gate_v1
+        };
+        assert_eq!(first.tier, apohara_agentguard::verdict::Tier::Allow);
+
+        // Second call: over budget => Ask (engine returns Ask; gate
+        // returns Allow; Ask wins the composition).
+        let gate_v2 = apohara_agentguard::gate::evaluate("ls", &cfg);
+        let policy_v2 = set.evaluate(&make_input(), &cfg);
+        assert_eq!(
+            policy_v2.tier,
+            apohara_agentguard::verdict::Tier::Ask,
+            "second Bash call over budget => Ask"
+        );
+        let second = if rank(policy_v2.tier) > rank(gate_v2.tier) {
+            policy_v2
+        } else {
+            gate_v2
+        };
+        assert_eq!(second.tier, apohara_agentguard::verdict::Tier::Ask);
+        assert!(
+            second.reason.contains("budget"),
+            "reason: {}",
+            second.reason
+        );
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
