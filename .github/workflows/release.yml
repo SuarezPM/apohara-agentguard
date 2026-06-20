@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Install cargo-about
-        uses: taiki-e/install-action@56545b37b57562edd73171cb6c62cc509db4c34e # v2
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2
         with:
           tool: cargo-about
       - name: Generate THIRD-PARTY-LICENSES
