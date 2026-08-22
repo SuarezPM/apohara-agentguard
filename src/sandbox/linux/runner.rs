@@ -109,6 +109,12 @@ pub fn run_linux(req: &SandboxRequest) -> Result<SandboxResult> {
     // reads EOF; a failure writes the errno before exec.
     let (exec_err_r, exec_err_w) = make_pipe(true)?;
 
+    // SAFETY: fork() copies only the calling thread, and this runner has not
+    // spawned any threads before this point (the drain threads below are
+    // created strictly after the fork), so the child inherits a quiescent,
+    // single-threaded address space with no locks held by an absent thread.
+    // Both ForkResult arms diverge permanently — the child never returns into
+    // the parent's control flow — which is nix's stated contract for fork().
     match unsafe { fork() }.map_err(nix_err)? {
         ForkResult::Parent { child: middle } => {
             drop(stdout_w);
@@ -145,12 +151,27 @@ pub fn run_linux(req: &SandboxRequest) -> Result<SandboxResult> {
 
             if let Err(e) = enter_isolated_namespaces() {
                 report_setup_error(&exec_err_w, &format!("namespace: {e}"));
+                // SAFETY: fail-closed teardown of the middle child after a
+                // failed namespace entry. `_exit` is async-signal-safe and
+                // skips Drop glue, atexit handlers, and stdio flushing — all
+                // of which must not run on this forked image. The error is
+                // already durably reported via the exec-error pipe, and the
+                // child must terminate here rather than continue into
+                // parent-only control flow.
                 unsafe { libc::_exit(70) };
             }
 
+            // SAFETY: same single-threaded invariant as the outer fork: this
+            // middle child is itself a fork product (fork copies one thread),
+            // so its address space is quiescent and consistent for the kernel
+            // to snapshot again. The arms below diverge permanently.
             match unsafe { fork() } {
                 Err(e) => {
                     report_setup_error(&exec_err_w, &format!("inner fork: {e}"));
+                    // SAFETY: `_exit` is async-signal-safe and runs no
+                    // destructors; the inner fork failed, the error is already
+                    // written to the exec-error pipe, and the middle child
+                    // must not unwind or fall through into either fork arm.
                     unsafe { libc::_exit(71) };
                 }
                 Ok(ForkResult::Parent { child: grand }) => {
@@ -158,10 +179,25 @@ pub fn run_linux(req: &SandboxRequest) -> Result<SandboxResult> {
                     drop(stderr_w);
                     drop(exec_err_w);
                     match waitpid(grand, None) {
+                        // SAFETY: relaying the grandchild's exit code to the
+                        // real parent with the conventional status pass-through.
+                        // `_exit` is async-signal-safe; skipping destructors is
+                        // correct here because every pipe fd was dropped above
+                        // (so the parent's EOF/error reads are already satisfied)
+                        // and the kernel closes any remaining fds at exit.
                         Ok(WaitStatus::Exited(_, c)) => unsafe { libc::_exit(c) },
+                        // SAFETY: grandchild died by signal; relay it using the
+                        // shell convention 128+sig so the parent's summarize()
+                        // sees the same code a shell would report. Same
+                        // async-signal-safe, no-destructor rationale as above.
                         Ok(WaitStatus::Signaled(_, sig, _)) => unsafe {
                             libc::_exit(128 + sig as i32)
                         },
+                        // SAFETY: waitpid returned an unexpected status shape;
+                        // 72 is this runner's distinct "relay failed" code.
+                        // Fail-closed immediate termination, same invariants as
+                        // the sibling arms: async-signal-safe, no unwinding on
+                        // the forked image.
                         _ => unsafe { libc::_exit(72) },
                     }
                 }
@@ -198,15 +234,28 @@ fn run_grandchild(
     }
     if dup2_stdout(stdout_w.as_fd()).is_err() {
         report_setup_error(&exec_err_w, "dup2 stdout");
+        // SAFETY: grandchild (PID 1 of the new PID namespace) cannot proceed
+        // with unwired stdout — fail closed. `_exit` is async-signal-safe and
+        // runs no destructors on this forked image; the error is already
+        // reported through the exec-error pipe.
         unsafe { libc::_exit(80) };
     }
     if dup2_stderr(stderr_w.as_fd()).is_err() {
         report_setup_error(&exec_err_w, "dup2 stderr");
+        // SAFETY: same fail-closed teardown as the stdout dup2 above: unwired
+        // stderr makes the child unusable, the error is already on the
+        // exec-error pipe, and `_exit` terminates without destructor or
+        // atexit runs on the post-fork image.
         unsafe { libc::_exit(81) };
     }
 
     if let Err(e) = chdir(workdir) {
         report_setup_error(&exec_err_w, &format!("chdir({}): {e}", workdir.display()));
+        // SAFETY: the workdir was validated and canonicalized in the parent,
+        // so a chdir failure here means the environment is not what the
+        // Landlock ruleset was built for — refuse to exec. `_exit` is
+        // async-signal-safe and skips destructors; the errno text is already
+        // reported via the exec-error pipe.
         unsafe { libc::_exit(82) };
     }
 
@@ -241,21 +290,42 @@ fn run_grandchild(
     // -----------------------------------------------------------------------
 
     // 1. NO_NEW_PRIVS.
+    // SAFETY: prctl is a variadic FFI call; for PR_SET_NO_NEW_PRIVS the kernel
+    // reads exactly one unsigned long argument, so `1` followed by three zero
+    // slots matches the ABI and a 0 return means success. This runs BEFORE the
+    // seccomp filter is installed (pinned order above), so the syscall is not
+    // yet filtered, and it is what makes the subsequent landlock_restrict_self(2)
+    // legal (Landlock requires NNP or CAP_SYS_ADMIN). Setting NNP is unprivileged,
+    // one-way for this process only, and drops nothing the parent granted: the
+    // grandchild has not exec'd anything, so no setuid-based privilege gain was
+    // in flight to be altered.
     if unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
         let e = std::io::Error::last_os_error();
         report_setup_error(&exec_err_w, &format!("prctl(PR_SET_NO_NEW_PRIVS): {e}"));
+        // SAFETY: without NNP the Landlock restrict_self below would fail (or
+        // seccomp would refuse to install), so continuing is unsound for the
+        // sandbox guarantee — fail closed with code 84. `_exit` is
+        // async-signal-safe and runs no destructors on this forked image.
         unsafe { libc::_exit(84) };
     }
 
     // 2. Landlock (skipped for DangerFullAccess).
     if let Err(e) = landlock::apply(req.tier, workdir) {
         report_setup_error(&exec_err_w, &format!("landlock: {e}"));
+        // SAFETY: a Landlock failure means filesystem confinement is NOT in
+        // place; exec'ing now would run the command unconstrained. Fail closed
+        // with code 85 — `_exit` is async-signal-safe, skips destructors, and
+        // the failure text is already on the exec-error pipe.
         unsafe { libc::_exit(85) };
     }
 
     // 3. seccomp LAST.
     if let Err(e) = SeccompProfile::new(req.tier).install() {
         report_setup_error(&exec_err_w, &format!("seccomp: {e}"));
+        // SAFETY: syscall filtering did not engage; exec'ing would bypass the
+        // attack-surface reduction the profile provides. Fail closed with code
+        // 86 — `_exit` is async-signal-safe and runs no destructors on this
+        // forked image; the error text is already reported.
         unsafe { libc::_exit(86) };
     }
 
@@ -279,6 +349,11 @@ fn run_grandchild(
     let Err(e) = execvpe(&argv[0], argv, env);
     let errno = e as i32;
     let _ = write(exec_err_w.as_fd(), &errno.to_le_bytes());
+    // SAFETY: execvpe only returns on failure, so this is the terminal point
+    // of the grandchild: the errno is already written to the exec-error pipe
+    // (126 = conventional exec failure). `_exit` is async-signal-safe and
+    // skips destructors/atexit on this forked image — unwinding here could
+    // run cleanup meant for the parent context.
     unsafe { libc::_exit(126) };
 }
 
@@ -295,6 +370,12 @@ fn close_inherited_fds(keep: std::os::fd::RawFd) {
     // we fall back to a manual close loop. Async-signal-safe: no heap, only
     // libc calls (this runs post-fork in the grandchild).
     let max = libc::c_uint::MAX;
+    // SAFETY: both calls uphold close_range_or_fallback's contract: we run
+    // single-threaded in the post-fork grandchild before exec, so closing raw
+    // fds cannot race another thread's fd use; the two ranges are split
+    // around `keep` so the exec-error pipe is never closed; and everything
+    // inside is async-signal-safe (raw syscall, libc::close, thread-local
+    // errno read) with no heap allocation.
     unsafe {
         if keep > 2 {
             close_range_or_fallback(3, (keep - 1) as libc::c_uint, keep);
@@ -308,6 +389,19 @@ fn close_inherited_fds(keep: std::os::fd::RawFd) {
 /// Close fds in the inclusive range `[first, last]` via the raw close_range
 /// syscall, falling back to a manual loop on ENOSYS (kernel < 5.9). `keep` is
 /// never closed by the manual fallback. Async-signal-safe.
+///
+/// # Caller contract (why this fn is `unsafe`)
+///
+/// Must be called in the single-threaded, post-fork/pre-exec window where the
+/// fd table is exclusively ours: closing arbitrary raw fds here cannot race
+/// another thread's use of them, and any collateral close is harmless because
+/// nothing but stdio and `keep` is meant to survive until exec. The caller
+/// must ensure `[first, last]` excludes every fd that must stay open (the
+/// runner splits its ranges around `keep`).
+// SAFETY: sound to call under the contract above — internally it only issues
+// the raw SYS_close_range syscall, reads errno via the thread-local
+// __errno_location slot, and on ENOSYS delegates to the allocation-free
+// manual_close_range; all async-signal-safe, no heap, no locks.
 unsafe fn close_range_or_fallback(
     first: libc::c_uint,
     last: libc::c_uint,
@@ -326,6 +420,19 @@ unsafe fn close_range_or_fallback(
 
 /// Manual fallback for close_range: close every fd in `[first, last]`, clamped
 /// to the process fd limit, skipping `keep`. Async-signal-safe (no allocation).
+///
+/// # Caller contract (why this fn is `unsafe`)
+///
+/// Same window as `close_range_or_fallback`: single-threaded post-fork,
+/// pre-exec, where the fd table is exclusively ours and closing a stray fd
+/// cannot invalidate state another thread observes. `keep` must be an fd the
+/// caller wants preserved; it is skipped explicitly.
+// SAFETY: sound under that contract — the scan is bounded by RLIMIT_NOFILE
+// (no fd above the soft limit can be open, so the loop is finite even though
+// `last` may be c_uint::MAX), only libc::close (async-signal-safe) is called,
+// and its result is deliberately ignored: at this teardown stage EBADF on an
+// already-closed descriptor is irrelevant. The `fd == upper` break guards the
+// c_uint increment against wrapping when upper == c_uint::MAX.
 unsafe fn manual_close_range(first: libc::c_uint, last: libc::c_uint, keep: std::os::fd::RawFd) {
     // Upper bound on real fds: RLIMIT_NOFILE cur, fallback 4096. We never need
     // to walk to c_uint::MAX since no fd above the soft limit can be open.
@@ -356,6 +463,16 @@ unsafe fn manual_close_range(first: libc::c_uint, last: libc::c_uint, keep: std:
 }
 
 /// Read the current `errno` value. Async-signal-safe.
+///
+/// Must be called on the same thread immediately after the failing libc call
+/// whose errno is wanted: the slot is thread-local, so no other thread can
+/// clobber it, but any *interleaved* libc call on this thread would overwrite
+/// it.
+// SAFETY: __errno_location always returns a valid, non-null pointer to the
+// calling thread's own errno slot (glibc and musl both guarantee this), so
+// dereferencing it is defined behavior. It is lock-free and
+// async-signal-safe, which is why it (rather than std::io::Error::last_os_error,
+// which can allocate) is used on the post-fork child path.
 unsafe fn errno() -> libc::c_int {
     *libc::__errno_location()
 }
