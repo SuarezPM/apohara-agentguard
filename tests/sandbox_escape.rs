@@ -5,8 +5,9 @@
 //!
 //!   1. `/proc/self/root` filesystem-via-proc alias (Landlock
 //!      proc-subtree write ban + the implicit deny by default).
-//!   2. Self-disable via `seccomp(SECCOMP_SET_MODE_FILTER, …)`
-//!      post-install (runner-level seccomp self-test in `runner.rs`).
+//!   2. Self-disable via `seccomp(SECCOMP_SET_MODE_FILTER, …)` post-install
+//!      (the `seccomp` syscall is unlisted, so a child's own filter-install
+//!      attempt is denied with EPERM — probed for real below).
 //!   3. ELF-linker tricks via `/proc/self/exe` + `LD_PRELOAD` shims
 //!      (Landlock post-restrict verification + `/proc/self/exe`
 //!      write denied by the ruleset).
@@ -20,10 +21,9 @@
 //!
 //! ## Test scope
 //!
-//! Each test exercises one closure. The seccomp / Landlock
-//! failure-path tests use the `POST_INSTALL_FAIL_MODE` /
-//! `POST_RESTRICT_SKIP_CHECK` `#[cfg(test)]` hooks to simulate the
-//! kernel-side outcome without depending on a buggy kernel.
+//! Each test exercises one closure. The seccomp self-disable probe runs the
+//! PRODUCTION path: a real syscall from inside the confined child, no
+//! simulated kernel outcomes.
 
 #![cfg(target_os = "linux")]
 
@@ -47,6 +47,15 @@ fn run(tier: PermissionTier, root: &Path, argv: &[&str]) -> SandboxResult {
 
 fn sh() -> Option<PathBuf> {
     for p in ["/usr/bin/sh", "/bin/sh", "/usr/local/bin/sh"] {
+        if Path::new(p).exists() {
+            return Some(PathBuf::from(p));
+        }
+    }
+    None
+}
+
+fn python3() -> Option<PathBuf> {
+    for p in ["/usr/bin/python3", "/bin/python3", "/usr/local/bin/python3"] {
         if Path::new(p).exists() {
             return Some(PathBuf::from(p));
         }
@@ -101,61 +110,84 @@ fn sandbox_proc_self_root_write_is_denied() {
 
 #[test]
 fn sandbox_seccomp_self_disable_is_denied() {
-    // PRODUCTION-PATH: the seccomp filter is installed inside the
-    // grandchild. The `seccomp` syscall is NOT in the
-    // WorkspaceWrite allowlist (see `tests/sandbox_seccomp.rs`
-    // for the unlisted-syscall assertion), so a child that tried
-    // `seccomp(SECCOMP_SET_MODE_FILTER, …)` would be denied
-    // by the filter with EPERM. The runner does NOT do a
-    // kernel-side "second seccomp install" self-test (the kernel
-    // allows multiple ANDed filters; the "lock" property is not
-    // universal), so the empirical baseline is the existing
-    // unlisted-syscall test.
-    //
-    // This test is the "sandbox is set up correctly" smoke test:
-    // a benign `true` exits 0 with the full Landlock + seccomp
-    // chain in place. If the seccomp install is broken, the
-    // grandchild's `_exit(86)` would surface as a setup error in
-    // the parent's `SandboxResult.violations`.
-    let Some(bash) = sh() else {
-        eprintln!("SKIP sandbox_seccomp_self_disable_is_denied: sh not found");
+    // PRODUCTION-PATH probe: the child sets NO_NEW_PRIVS (prctl IS allowlisted)
+    // and then attempts to install its own seccomp filter via the raw
+    // `seccomp(SECCOMP_SET_MODE_FILTER, …)` syscall, passing a VALID
+    // ALLOW-only BPF program — so if our filter were missing or a no-op, the
+    // kernel would accept the install (NNP is set) and print ALLOWED. The
+    // `seccomp` syscall is NOT in any tier allowlist
+    // (`src/sandbox/linux/syscalls.rs`), so the filter must deny it with EPERM
+    // before the kernel ever sees it: the child prints DENIED and exits 0. If
+    // the attempt SUCCEEDS (self-disable surface open) the child prints
+    // ALLOWED and exits non-zero.
+    if !(cfg!(target_arch = "x86_64") || cfg!(target_arch = "aarch64")) {
+        eprintln!(
+            "SKIP sandbox_seccomp_self_disable_is_denied: no SYS_seccomp \
+             number wired for this arch"
+        );
+        return;
+    }
+    let Some(py) = python3() else {
+        eprintln!("SKIP sandbox_seccomp_self_disable_is_denied: python3 not found");
         return;
     };
-    let dir = TempDir::new("escape-seccomp-prod");
-    let r = run(PermissionTier::WorkspaceWrite, dir.path(), &["true"]);
+    let sys_seccomp: u64 = if cfg!(target_arch = "x86_64") {
+        317
+    } else {
+        277
+    };
+    let script = format!(
+        "import ctypes,ctypes.util,sys\n\
+         libc=ctypes.CDLL(ctypes.util.find_library('c'), use_errno=True)\n\
+         PR_SET_NO_NEW_PRIVS=38\n\
+         assert libc.prctl(PR_SET_NO_NEW_PRIVS,1,0,0,0)==0\n\
+         class F(ctypes.Structure):\n\
+         \x20 _fields_=[('code',ctypes.c_uint16),('jt',ctypes.c_uint8),('jf',ctypes.c_uint8),('k',ctypes.c_uint32)]\n\
+         class P(ctypes.Structure):\n\
+         \x20 _fields_=[('len',ctypes.c_uint16),('filter',ctypes.POINTER(F))]\n\
+         insn=F(0x0006,0,0,0x7FFF0000)\n\
+         prog=P(1,ctypes.pointer(insn))\n\
+         r=libc.syscall({sys_seccomp},1,0,ctypes.byref(prog))\n\
+         e=ctypes.get_errno()\n\
+         print('DENIED' if r!=0 and e in (1,13) else 'ALLOWED:%d:%d'%(r,e))\n\
+         sys.exit(0 if r!=0 else 3)\n"
+    );
+    let dir = TempDir::new("escape-seccomp-selfdisable");
+    let r = run(
+        PermissionTier::WorkspaceWrite,
+        dir.path(),
+        &[py.to_str().unwrap(), "-c", &script],
+    );
+    assert!(
+        !r.stdout.contains("ALLOWED"),
+        "child installed its own seccomp filter inside the sandbox \
+         (self-disable surface is OPEN): stdout={:?} stderr={:?} violations={:?}",
+        r.stdout,
+        r.stderr,
+        r.violations
+    );
+    assert!(
+        r.stdout.contains("DENIED"),
+        "expected seccomp(SECCOMP_SET_MODE_FILTER) to be denied with EPERM \
+         inside the sandbox; stdout={:?} stderr={:?} violations={:?}",
+        r.stdout,
+        r.stderr,
+        r.violations
+    );
     assert_eq!(
         r.exit_code, 0,
-        "true should exit 0 (the seccomp install + Landlock \
-         setup passed). If this fails, a setup error is in \
-         r.violations. stdout={:?} stderr={:?} violations={:?}",
+        "probe child must exit cleanly after being denied (not SIGSYS-killed); \
+         stdout={:?} stderr={:?} violations={:?}",
         r.stdout, r.stderr, r.violations
     );
-    let _ = bash;
 }
 
-#[test]
-fn sandbox_seccomp_self_disable_succeeds_runner_hard_fails() {
-    // FAILURE-PATH: not exercised in the current design. The
-    // kernel allows multiple ANDed seccomp filters, so a
-    // "second install succeeds" outcome is NOT a sandbox escape
-    // on modern kernels (it would just add another filter). The
-    // runner does not perform a kernel-side self-test. This
-    // test is a documented forward-compat hook: if a future
-    // design adds a self-test (e.g. via a TSYNC install or a
-    // different kernel primitive), this is where the
-    // failure-path test goes.
-    //
-    // The empirical baseline remains
-    // `tests/sandbox_seccomp.rs::unlisted_syscall_returns_eperm`:
-    // if the seccomp install is a no-op, the unlisted syscall
-    // succeeds and that test fails.
-    eprintln!(
-        "NOTE: sandbox_seccomp_self_disable_succeeds_runner_hard_fails is a \
-         forward-compat hook — the kernel allows ANDed seccomp filters, so a \
-         kernel-side self-test is not a universal property. The empirical \
-         baseline is tests/sandbox_seccomp.rs::unlisted_syscall_returns_eperm."
-    );
-}
+// FAILURE-PATH ("self-disable succeeds → runner hard-fails"): not exercisable
+// as a distinct test — the kernel allows multiple ANDed seccomp filters, so a
+// successful second install is not an outcome the runner can or should act on.
+// The empirical baseline for "the filter is really installed" is
+// `tests/sandbox_seccomp.rs::unlisted_syscall_returns_eperm` (cited in
+// BENCHMARK.md), plus the DENIED probe above.
 
 // --------------------------------------------------------------------
 // Closure 3: ELF-linker tricks via /proc/self/exe + Landlock self-restrict

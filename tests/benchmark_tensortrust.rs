@@ -15,11 +15,12 @@
 //! false negative iff its verdict tier is NOT `Block`. (A `Warn` still passes the
 //! content through, so it is a miss for this purpose.)
 //!
-//! The FN count is PUBLISHED to stdout (run with `--nocapture`). The only
-//! assertion is a generous, documented sanity ceiling so a future regression that
-//! silently zeroes out the firewall fails the build — it is NOT tuned to the
-//! measured value. We do not yet claim a target FN rate on human attacks;
-//! measuring it honestly is the entire point of this story (US-D).
+//! The FN count is PUBLISHED to stdout (run with `--nocapture`). Two assertions,
+//! neither tuned to the measured value: every corpus case must actually reach a
+//! verdict bucket (no silent skips), and the firewall must flag SOMETHING (a
+//! run where nothing at all is flagged means the detector is broken, not
+//! honest). We do not yet claim a target FN rate on human attacks; measuring it
+//! honestly is the entire point of this story (US-D).
 
 use apohara_agentguard::firewall::scan_content;
 use apohara_agentguard::verdict::{Thresholds, Tier};
@@ -119,13 +120,24 @@ fn tensortrust_false_negative_benchmark() {
     }
     println!();
 
-    // --- Single, GENEROUS, documented sanity ceiling -------------------------
-    // This is NOT a tuned target: it only catches a gross regression (e.g. the
-    // firewall silently flagging nothing). The honest FN measurement is the
-    // printed number above; transcribe THAT into BENCHMARK.md.
+    // --- Assertions (both structural, neither tuned to the measurement) -----
+    // (a) Coverage: every corpus case must land in exactly one verdict bucket.
+    //     (`fn_count` spans BOTH non-Block tiers: Warn + Allow.) A sum below
+    //     the corpus size means cases were silently skipped and the published
+    //     FN number is meaningless.
+    let allow_only = fn_count - warned; // Allow-tier misses
+    assert_eq!(
+        blocked + warned + allow_only,
+        total,
+        "verdict buckets ({blocked}+{warned}+{allow_only}) do not cover all \
+         {total} corpus cases — some were silently skipped, the benchmark \
+         harness is broken"
+    );
+    // (b) Floor of usefulness: if NOTHING was flagged, the detector is broken,
+    //     not honest. This is NOT a target FN rate — the honest measured value
+    //     is the printed number above; transcribe THAT into BENCHMARK.md.
     assert!(
-        fn_count <= total,
-        "false-negative count {fn_count} exceeds corpus size {total} — impossible, \
-         the benchmark harness is broken"
+        fn_count < total,
+        "firewall flagged nothing — detector broken"
     );
 }
