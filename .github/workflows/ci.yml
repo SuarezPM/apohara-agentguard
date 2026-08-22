@@ -32,7 +32,7 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets -- -D warnings -D clippy::undocumented_unsafe_blocks
 
   deny:
     name: cargo-deny (licenses + advisories)
@@ -137,6 +137,35 @@ jobs:
           fi
           echo "Cargo.toml restored cleanly."
 
+  structure:
+    name: module dependency invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      # Architectural layering rules enforced as grep invariants over real code
+      # edges (doc-comment references excluded): policy must not depend on hook
+      # (the contract types live in the crate-level leaf), the sandbox stays an
+      # isolated leaf with zero imports from decision layers, and the gate never
+      # reaches into firewall/policy/sandbox/hook.
+      - name: Assert layering invariants
+        run: |
+          set -euo pipefail
+          if grep -rn "crate::hook" src/policy/ --include='*.rs' \
+             | grep -vE ':[0-9]+:\s*(//|///|//!)' | grep -q .; then
+            echo "::error::policy depends on hook — module cycle reintroduced"
+            exit 1
+          fi
+          if grep -rnE "crate::(gate|firewall|policy|hook)" src/sandbox/ --include='*.rs' | grep -q .; then
+            echo "::error::sandbox reached outside its boundary"
+            exit 1
+          fi
+          if grep -rnE "crate::(firewall|policy|sandbox|hook)" src/gate/ --include='*.rs' \
+             | grep -vE ':[0-9]+:\s*(//|///|//!)' | grep -q .; then
+            echo "::error::gate reached outside its boundary"
+            exit 1
+          fi
+          echo "Module dependency invariants hold."
+
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -163,7 +192,11 @@ jobs:
                      --test kill_switch_env \
                      --test pathguard --test firewall_posture \
                      --test benchmark --test benchmark_packs --test benchmark_tensortrust \
-                     --test policy_engine --test ask_corpus
+                     --test policy_engine --test ask_corpus \
+                     --test gate_evasions --test gate_normalize --test danger_warning \
+                     --test codex_hook --test audit --test check_cli \
+                     --test example_config_parses --test hook_config --test readme_sync \
+                     --test config_failclosed
           # sandbox_offlinux only exists (and matters) off Linux.
           if [ "${{ runner.os }}" != "Linux" ]; then
             cargo test --test sandbox_offlinux
@@ -190,5 +223,6 @@ jobs:
         continue-on-error: true
         run: |
           echo "::group::sandbox tests (require userns + Landlock; non-blocking on CI)"
-          cargo test --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e -- --nocapture
+          cargo test --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e \
+                     --test sandbox_escape --test sandbox_failclosed -- --nocapture
           echo "::endgroup::"
