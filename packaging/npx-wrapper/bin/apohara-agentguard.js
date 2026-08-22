@@ -226,7 +226,20 @@ async function ensureBinary() {
   }
 
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(file, buf, { mode: 0o755 });
+  // Write to a temp file in the cache dir, then rename over the final path so
+  // a concurrent or crashed invocation can never observe a partial binary.
+  const tmpFile = `${file}.tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmpFile, buf, { mode: 0o755 });
+    fs.renameSync(tmpFile, file);
+  } catch (e) {
+    try {
+      fs.unlinkSync(tmpFile);
+    } catch (_) {
+      /* best-effort cleanup */
+    }
+    throw e;
+  }
   return file;
 }
 

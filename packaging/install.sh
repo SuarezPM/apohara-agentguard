@@ -10,6 +10,16 @@
 # missing checksum manifest or a checksum mismatch ABORTS — an unverified
 # binary is never installed or run.
 #
+# Idempotent and non-destructive:
+#   - If the target path already holds a binary whose checksum matches the
+#     manifest for this version, the script prints "already installed" and
+#     exits 0 without re-downloading anything.
+#   - When a different build is already present, it is preserved as
+#     <target>.bak.<previous-mtime-timestamp> before the verified download
+#     atomically replaces it (temp file in the same directory + rename).
+#   - Failed or interrupted runs never leave a partial binary behind, and
+#     files the installer does not manage are never touched.
+#
 # glibc and musl Linux builds are both published since v0.3; libc detection
 # selects between them.
 #
@@ -27,6 +37,23 @@ VERSION="${AGENTGUARD_VERSION:-0.3.0}"
 BASE_URL="${AGENTGUARD_DOWNLOAD_BASE:-https://github.com/SuarezPM/apohara-agentguard/releases/download/v${VERSION}}"
 PREFIX="${AGENTGUARD_PREFIX:-${HOME}/.local/share/apohara-agentguard}"
 
+# Temp paths currently in flight; removed by the cleanup trap so a failed or
+# interrupted run never leaves partial downloads behind.
+sums_file=""
+tmp_bin=""
+opt_tmp=""
+
+cleanup() {
+  rm -f "${sums_file:-}" "${tmp_bin:-}" "${opt_tmp:-}"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+err() {
+  printf 'apohara-agentguard: %s\n' "$1" >&2
+  exit 1
+}
+
 # --- Runtime SHA256 resolution from the release manifest. --------------------
 # The release publishes a combined SHA256SUMS asset (standard sha256sum output:
 # "<hash>  <filename>", one line per artifact). Nothing is pinned in this
@@ -38,14 +65,13 @@ checksum_for_triple() {
 
   printf 'apohara-agentguard: fetching %s\n' "$sums_url" >&2
   if ! try_download "$sums_url" "$sums_file"; then
-    rm -f "$sums_file"
     err "checksum manifest not available at $sums_url.
 Refusing to install an unverified binary. Offline? Install from source instead:
   cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked --version ${VERSION}"
   fi
 
   hash="$(sed -n "s/^\([0-9a-fA-F]\{64\}\)[[:space:]]\{1,\}\*\{0,1\}apohara-agentguard-$1\$/\1/p" "$sums_file" | head -n 1)"
-  rm -f "$sums_file"
+  sums_file=""
 
   if [ -z "$hash" ]; then
     err "no checksum for target $1 in the v${VERSION} checksum manifest.
@@ -54,11 +80,6 @@ Refusing to install an unverified binary. Install from source instead:
   fi
 
   printf '%s\n' "$hash"
-}
-
-err() {
-  printf 'apohara-agentguard: %s\n' "$1" >&2
-  exit 1
 }
 
 # --- Detect target triple. ---------------------------------------------------
@@ -102,6 +123,22 @@ sha256_of() {
   fi
 }
 
+# --- Previous-file mtime (epoch seconds) for backup suffixes. ----------------
+# Best effort across GNU stat (-c) and BSD stat (-f); falls back to now.
+mtime_of() {
+  mtime=""
+  if command -v stat >/dev/null 2>&1; then
+    mtime="$(stat -c %Y "$1" 2>/dev/null || true)"
+    if [ -z "$mtime" ]; then
+      mtime="$(stat -f %m "$1" 2>/dev/null || true)"
+    fi
+  fi
+  if [ -z "$mtime" ]; then
+    mtime="$(date +%s)"
+  fi
+  printf '%s\n' "$mtime"
+}
+
 # --- Download (curl or wget). ------------------------------------------------
 # try_download returns the downloader's exit status so callers can decide how
 # to report a failure; download() treats any failure as fatal.
@@ -121,40 +158,77 @@ download() {
   try_download "$1" "$2" || err "download failed: $1"
 }
 
+# fetch_optional downloads <url> to a temp file next to <dest> and only moves
+# it onto <dest> when the download succeeded, so an existing file is never
+# clobbered by a failed or partial download. Failures are non-fatal.
+fetch_optional() {
+  opt_url="$1"
+  opt_dest="$2"
+  printf 'apohara-agentguard: fetching %s\n' "$opt_url" >&2
+  opt_tmp="$(mktemp "${opt_dest}.tmp.XXXXXXXX")" || return 0
+  if try_download "$opt_url" "$opt_tmp"; then
+    chmod 0644 "$opt_tmp"
+    mv -f "$opt_tmp" "$opt_dest"
+  else
+    rm -f "$opt_tmp"
+    printf 'apohara-agentguard: warning: could not fetch %s; keeping any existing file\n' "$opt_url" >&2
+  fi
+  opt_tmp=""
+}
+
 main() {
   triple="$(detect_triple)"
   expected="$(checksum_for_triple "$triple")"
 
+  bin_dir="${PREFIX}/bin"
+  mkdir -p "$bin_dir"
+  bin_path="${bin_dir}/apohara-agentguard"
+
+  # Idempotent fast path: a binary that already matches this version's
+  # checksum means nothing to do — no re-download, no rewrite.
+  if [ -e "$bin_path" ] &&
+    [ "$(sha256_of "$bin_path" 2>/dev/null || true)" = "$expected" ]; then
+    printf 'apohara-agentguard: already installed (v%s, checksum ok)\n' "$VERSION" >&2
+    return 0
+  fi
+
   artifact="apohara-agentguard-${triple}"
   url="${BASE_URL}/${artifact}"
-  tmp="$(mktemp)"
+  # Temp file lives in the target directory so the final move is an atomic
+  # rename within the same filesystem — the installed path never holds a
+  # partial binary.
+  tmp_bin="$(mktemp "${bin_dir}/.apohara-agentguard.XXXXXXXX")"
 
   printf 'apohara-agentguard: downloading %s\n' "$url" >&2
-  download "$url" "$tmp"
+  download "$url" "$tmp_bin"
 
-  got="$(sha256_of "$tmp")"
+  got="$(sha256_of "$tmp_bin")"
   if [ "$got" != "$expected" ]; then
-    rm -f "$tmp"
     err "SHA256 mismatch — refusing to install an unverified binary.
   target:   $triple
   expected: $expected
   got:      $got"
   fi
 
-  # --- Place the binary. -----------------------------------------------------
-  bin_dir="${PREFIX}/bin"
-  mkdir -p "$bin_dir"
-  bin_path="${bin_dir}/apohara-agentguard"
-  mv "$tmp" "$bin_path"
-  chmod 0755 "$bin_path"
+  # --- Place the binary: preserve the previous one, then atomic swap. --------
+  if [ -e "$bin_path" ]; then
+    bak="${bin_path}.bak.$(mtime_of "$bin_path")"
+    mv -f "$bin_path" "$bak"
+    printf 'apohara-agentguard: kept previous binary as %s\n' "$bak" >&2
+  fi
+  chmod 0755 "$tmp_bin"
+  mv -f "$tmp_bin" "$bin_path"
+  tmp_bin=""
   printf 'apohara-agentguard: installed binary at %s\n' "$bin_path" >&2
 
   # --- Register the plugin/hook config. --------------------------------------
   # Place plugin.json + hooks.json next to the binary so ${CLAUDE_PLUGIN_ROOT}
   # resolves to PREFIX and the hooks invoke ${CLAUDE_PLUGIN_ROOT}/bin/apohara-agentguard.
+  # Both are optional and fetched via fetch_optional, so pre-existing files
+  # survive a failed download untouched.
   printf 'apohara-agentguard: fetching plugin manifest + hook config\n' >&2
-  download "${BASE_URL}/plugin.json" "${PREFIX}/plugin.json" || true
-  download "${BASE_URL}/hooks.json" "${PREFIX}/hooks.json" || true
+  fetch_optional "${BASE_URL}/plugin.json" "${PREFIX}/plugin.json"
+  fetch_optional "${BASE_URL}/hooks.json" "${PREFIX}/hooks.json"
 
   cat >&2 <<EOF
 apohara-agentguard: install complete.
