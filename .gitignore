@@ -22,3 +22,14 @@
 /AGENTS.md
 /CLAUDE.md
 /CLAUDE.local.md
+
+# Deepwork session state (git-local, OpenCode-readable)
+.slim/deepwork/
+.slim/
+
+# Working analysis docs (local-only; not part of the published repo)
+/docs/
+
+# Generated/local tooling artifacts
+codemap.md
+/HANDOFF.md
