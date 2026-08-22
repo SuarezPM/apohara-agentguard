@@ -45,10 +45,15 @@ multiple-versions = "allow"
 wildcards = "allow"
 
 [advisories]
-# RUSTSEC advisory checks run in CI as advisory (not a hard gate for v0.1);
-# the licenses gate is the required one. Bump to "deny" once an audit cadence
-# is established.
-yanked = "warn"
+# Hard gate (Story ADV-HARD). NOTE: cargo-deny >=0.18 changed this schema:
+# - `vulnerability` / `unsound` / `notice` lint-level keys were REMOVED;
+#   those advisories are now ALWAYS hard errors (stricter than the old
+#   `vulnerability = "deny"` this section used to schedule).
+# - `unmaintained` takes a SCOPE (all|workspace|transitive|none), not a lint
+#   level; "warn" is no longer expressible. We gate on direct workspace deps
+#   so a stale-but-sound TRANSITIVE dep can never block a build.
+yanked = "deny"
+unmaintained = "workspace"
 
 [sources]
 # Only crates.io is trusted; a git/path source for a dependency is a hard error
