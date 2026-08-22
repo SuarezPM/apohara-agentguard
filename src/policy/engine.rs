@@ -44,7 +44,7 @@ use std::sync::Mutex;
 use thiserror::Error;
 
 use crate::config::Config;
-use crate::hook::contract::HookInput;
+use crate::contract::HookInput;
 use crate::verdict::{severity_to_tier, Tier, Verdict};
 
 use super::matcher::pattern_matches;

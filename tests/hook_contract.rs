@@ -2,7 +2,7 @@
 //! tier, the kill-switch, and the length-cap — driven through `hook::run`.
 
 use apohara_agentguard::config::Config;
-use apohara_agentguard::hook::contract::MAX_CONTEXT_BYTES;
+use apohara_agentguard::contract::MAX_CONTEXT_BYTES;
 use apohara_agentguard::hook::run;
 use serde_json::Value;
 

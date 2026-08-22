@@ -4,6 +4,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod contract;
 pub mod firewall;
 pub mod gate;
 pub mod hook;

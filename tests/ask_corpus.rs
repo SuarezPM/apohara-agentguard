@@ -47,7 +47,7 @@
 use std::path::PathBuf;
 
 use apohara_agentguard::config::Config;
-use apohara_agentguard::hook::contract::HookInput;
+use apohara_agentguard::contract::HookInput;
 use apohara_agentguard::policy::engine::PolicySet;
 use apohara_agentguard::verdict::{Tier, Verdict};
 use serde_json::json;

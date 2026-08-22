@@ -21,8 +21,13 @@
 //! mock so the posture matrix is verified without touching the network.
 
 pub mod canary;
-pub mod contract;
 pub mod pathguard;
+
+// Facade re-export: the hook-contract types live canonically in the crate-level
+// leaf module (`crate::contract`) so `policy` can depend on them without a
+// dependency on `hook` (which depends on `policy`). Every historical path
+// (`crate::hook::contract::…`) keeps resolving through this re-export.
+pub use crate::contract;
 
 use crate::audit::{self, AuditRecord};
 use crate::config::{Config, EnvDisable};

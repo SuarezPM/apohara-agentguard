@@ -71,7 +71,7 @@ impl Verdict {
 
     /// An ask verdict carrying the given reason. The hook output
     /// `permissionDecision: "ask"` (exit 0) is produced downstream by
-    /// [`crate::hook::contract::HookOutput::ask`] + [`crate::hook::contract::emit`].
+    /// [`crate::contract::HookOutput::ask`] + [`crate::contract::emit`].
     pub fn ask(reason: impl Into<String>) -> Self {
         Self {
             tier: Tier::Ask,
