@@ -3,39 +3,57 @@
 # apohara-agentguard one-command installer (POSIX sh).
 #
 # Detects platform x arch x libc, downloads the matching release binary,
-# verifies its SHA256 against a pinned manifest, places it under the plugin
-# directory, and registers the Claude Code plugin/hook config. Because
-# apohara-agentguard is a security tool, a checksum mismatch ABORTS — an unverified
+# verifies its SHA256 against the release's combined SHA256SUMS manifest
+# (fetched at install time from the same release — no hashes are pinned in
+# this script), places it under the plugin directory, and registers the Claude
+# Code plugin/hook config. Because apohara-agentguard is a security tool, a
+# missing checksum manifest or a checksum mismatch ABORTS — an unverified
 # binary is never installed or run.
 #
-# musl is detected and refused (use `cargo install` instead); musl release
-# binaries are deferred to v0.2.
+# glibc and musl Linux builds are both published since v0.3; libc detection
+# selects between them.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh
 #
 # Env overrides:
-#   AGENTGUARD_VERSION        release tag to install (default: 0.1.0)
+#   AGENTGUARD_VERSION        release tag to install (default: 0.3.0)
 #   AGENTGUARD_DOWNLOAD_BASE  artifact base URL (default: GitHub release)
 #   AGENTGUARD_PREFIX         install dir (default: ~/.local/share/apohara-agentguard)
 
 set -eu
 
-VERSION="${AGENTGUARD_VERSION:-0.1.0}"
+VERSION="${AGENTGUARD_VERSION:-0.3.0}"
 BASE_URL="${AGENTGUARD_DOWNLOAD_BASE:-https://github.com/SuarezPM/apohara-agentguard/releases/download/v${VERSION}}"
 PREFIX="${AGENTGUARD_PREFIX:-${HOME}/.local/share/apohara-agentguard}"
 
-# --- Pinned SHA256 manifest (target triple -> sha256). -----------------------
-# Filled in by the release workflow before publish; a literal placeholder means
-# this version is not yet pinned and the installer must refuse to download.
-sha_for_triple() {
-  case "$1" in
-    x86_64-unknown-linux-gnu)  echo "REPLACE_WITH_RELEASE_SHA256" ;;
-    aarch64-unknown-linux-gnu) echo "REPLACE_WITH_RELEASE_SHA256" ;;
-    x86_64-apple-darwin)       echo "REPLACE_WITH_RELEASE_SHA256" ;;
-    aarch64-apple-darwin)      echo "REPLACE_WITH_RELEASE_SHA256" ;;
-    *) echo "" ;;
-  esac
+# --- Runtime SHA256 resolution from the release manifest. --------------------
+# The release publishes a combined SHA256SUMS asset (standard sha256sum output:
+# "<hash>  <filename>", one line per artifact). Nothing is pinned in this
+# script: the manifest for the exact version being installed is fetched and
+# parsed, so a hash can never drift from the release it belongs to.
+checksum_for_triple() {
+  sums_url="${BASE_URL}/SHA256SUMS"
+  sums_file="$(mktemp)"
+
+  printf 'apohara-agentguard: fetching %s\n' "$sums_url" >&2
+  if ! try_download "$sums_url" "$sums_file"; then
+    rm -f "$sums_file"
+    err "checksum manifest not available at $sums_url.
+Refusing to install an unverified binary. Offline? Install from source instead:
+  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked --version ${VERSION}"
+  fi
+
+  hash="$(sed -n "s/^\([0-9a-fA-F]\{64\}\)[[:space:]]\{1,\}\*\{0,1\}apohara-agentguard-$1\$/\1/p" "$sums_file" | head -n 1)"
+  rm -f "$sums_file"
+
+  if [ -z "$hash" ]; then
+    err "no checksum for target $1 in the v${VERSION} checksum manifest.
+Refusing to install an unverified binary. Install from source instead:
+  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked --version ${VERSION}"
+  fi
+
+  printf '%s\n' "$hash"
 }
 
 err() {
@@ -56,13 +74,13 @@ detect_triple() {
 
   case "$uname_s" in
     Linux)
-      # musl detection: ldd --version mentions musl on musl systems.
+      # libc detection picks between the glibc and musl builds (both
+      # published since v0.3): ldd --version mentions musl on musl systems.
       if (ldd --version 2>&1 || true) | grep -qi musl; then
-        err "musl libc is not yet supported in v0.1. Install from source instead:
-  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked
-(musl release binaries are planned for v0.2.)"
+        echo "${arch}-unknown-linux-musl"
+      else
+        echo "${arch}-unknown-linux-gnu"
       fi
-      echo "${arch}-unknown-linux-gnu"
       ;;
     Darwin)
       echo "${arch}-apple-darwin"
@@ -85,27 +103,27 @@ sha256_of() {
 }
 
 # --- Download (curl or wget). ------------------------------------------------
-download() {
+# try_download returns the downloader's exit status so callers can decide how
+# to report a failure; download() treats any failure as fatal.
+try_download() {
   url="$1"
   dest="$2"
   if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "$url" -o "$dest" || err "download failed: $url"
+    curl -fsSL "$url" -o "$dest"
   elif command -v wget >/dev/null 2>&1; then
-    wget -q "$url" -O "$dest" || err "download failed: $url"
+    wget -q "$url" -O "$dest"
   else
     err "no downloader found (need curl or wget)"
   fi
 }
 
+download() {
+  try_download "$1" "$2" || err "download failed: $1"
+}
+
 main() {
   triple="$(detect_triple)"
-  expected="$(sha_for_triple "$triple")"
-
-  if [ -z "$expected" ] || [ "$expected" = "REPLACE_WITH_RELEASE_SHA256" ]; then
-    err "no pinned SHA256 for target $triple in this installer.
-Install from source instead:
-  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked"
-  fi
+  expected="$(checksum_for_triple "$triple")"
 
   artifact="apohara-agentguard-${triple}"
   url="${BASE_URL}/${artifact}"

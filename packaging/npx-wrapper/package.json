@@ -1,6 +1,6 @@
 {
   "name": "apohara-agentguard",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Deterministic, offline, no-model safety hook + local seccomp+Landlock sandbox + input firewall for Claude Code. This npm package is a thin launcher that downloads and SHA256-verifies the platform-specific apohara-agentguard release binary.",
   "license": "(MIT OR Apache-2.0)",
   "homepage": "https://github.com/SuarezPM/apohara-agentguard",

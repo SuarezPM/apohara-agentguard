@@ -4,19 +4,24 @@
 //
 // apohara-agentguard is a security tool, so this launcher NEVER runs an unverified
 // binary. It resolves the correct release artifact by platform x arch x libc,
-// downloads it, verifies its SHA256 against a pinned manifest, and only then
+// downloads it, verifies its SHA256 against the release's combined SHA256SUMS
+// manifest (fetched at resolution time from the same release), and only then
 // execs it — forwarding argv and stdio unchanged. A checksum mismatch aborts.
 //
-// Resolution matrix (v0.1):
+// Resolution matrix (v0.3):
 //   linux  x86_64  (glibc)  -> x86_64-unknown-linux-gnu
 //   linux  aarch64 (glibc)  -> aarch64-unknown-linux-gnu
-//   linux  *       (musl)   -> NOT SUPPORTED in v0.1 (clear message, no fallback)
+//   linux  x86_64  (musl)   -> x86_64-unknown-linux-musl
+//   linux  aarch64 (musl)   -> aarch64-unknown-linux-musl
 //   darwin x86_64           -> x86_64-apple-darwin
 //   darwin aarch64          -> aarch64-apple-darwin
 //   win32  x86_64           -> x86_64-pc-windows-msvc (.exe)
 //
-// musl is detected and explicitly refused rather than running a glibc binary
-// against a musl loader (which would crash or, worse, behave unpredictably).
+// Expected hashes are NOT pinned in this file. At resolution time the launcher
+// downloads the release's SHA256SUMS manifest and looks up the hash for the
+// resolved artifact, so a hash can never drift from the release it belongs to.
+// If the manifest is unreachable (e.g. offline), the launcher refuses to run
+// and points at `cargo install`.
 
 "use strict";
 
@@ -27,26 +32,12 @@ const https = require("https");
 const crypto = require("crypto");
 const { spawnSync, execFileSync } = require("child_process");
 
-const VERSION = "0.1.0";
+const VERSION = "0.3.0";
 
 // Base URL for release artifacts. Overridable for testing / mirrors.
 const BASE_URL =
   process.env.AGENTGUARD_DOWNLOAD_BASE ||
   `https://github.com/SuarezPM/apohara-agentguard/releases/download/v${VERSION}`;
-
-// SHA256 manifest, keyed by Rust target triple. These are the canonical hashes
-// of the v0.1.0 release artifacts; they are filled in by the release workflow
-// (release.yml emits a SHA256SUMS manifest) and committed here before publish.
-// A literal "REPLACE_WITH_RELEASE_SHA256" means the manifest is not yet pinned
-// for this version: the launcher refuses to download rather than trust an
-// unverifiable artifact.
-const SHA256 = {
-  "x86_64-unknown-linux-gnu": "REPLACE_WITH_RELEASE_SHA256",
-  "aarch64-unknown-linux-gnu": "REPLACE_WITH_RELEASE_SHA256",
-  "x86_64-apple-darwin": "REPLACE_WITH_RELEASE_SHA256",
-  "aarch64-apple-darwin": "REPLACE_WITH_RELEASE_SHA256",
-  "x86_64-pc-windows-msvc": "REPLACE_WITH_RELEASE_SHA256",
-};
 
 function fail(msg) {
   process.stderr.write(`apohara-agentguard: ${msg}\n`);
@@ -55,7 +46,7 @@ function fail(msg) {
 
 // Best-effort musl detection on Linux. ldd --version prints "musl" on musl
 // systems; alternatively the dynamic loader path contains "musl". We treat any
-// positive signal as musl and refuse (deferred to v0.2).
+// positive signal as musl and resolve to the matching musl target.
 function isMusl() {
   if (process.platform !== "linux") return false;
   // Node >= 18 exposes the libc family via report.
@@ -86,15 +77,18 @@ function resolveTarget() {
   const arch = process.arch; // 'x64' | 'arm64' | ...
 
   if (platform === "linux") {
-    if (isMusl()) {
-      fail(
-        "musl libc is not yet supported in v0.1. Install from source instead:\n" +
-          "  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked\n" +
-          "(musl release binaries are planned for v0.2.)"
-      );
-    }
-    if (arch === "x64") return { triple: "x86_64-unknown-linux-gnu", bin: "apohara-agentguard" };
-    if (arch === "arm64") return { triple: "aarch64-unknown-linux-gnu", bin: "apohara-agentguard" };
+    // Both libcs have release binaries since v0.3; resolve accordingly.
+    const musl = isMusl();
+    if (arch === "x64")
+      return {
+        triple: musl ? "x86_64-unknown-linux-musl" : "x86_64-unknown-linux-gnu",
+        bin: "apohara-agentguard",
+      };
+    if (arch === "arm64")
+      return {
+        triple: musl ? "aarch64-unknown-linux-musl" : "aarch64-unknown-linux-gnu",
+        bin: "apohara-agentguard",
+      };
     fail(`unsupported Linux architecture: ${arch} (supported: x64, arm64)`);
   }
 
@@ -154,6 +148,43 @@ function sha256(buf) {
   return crypto.createHash("sha256").update(buf).digest("hex");
 }
 
+// Parse a SHA256SUMS manifest (standard sha256sum output: "<hash>  <filename>",
+// optionally with a binary-mode "*" marker) into a filename -> hash map.
+function parseChecksums(manifestText) {
+  const sums = new Map();
+  for (const line of manifestText.split("\n")) {
+    const m = /^([0-9a-fA-F]{64})\s+\*?(.+)$/.exec(line.trim());
+    if (m) sums.set(m[2], m[1].toLowerCase());
+  }
+  return sums;
+}
+
+// Resolve the expected SHA256 for an artifact at run time by fetching the
+// release's combined SHA256SUMS manifest. Refuses clearly when the manifest
+// cannot be reached or does not cover the artifact.
+async function expectedShaFor(artifact) {
+  const url = `${BASE_URL}/SHA256SUMS`;
+  let buf;
+  try {
+    buf = await download(url);
+  } catch (e) {
+    fail(
+      `cannot fetch checksum manifest ${url}: ${e.message}\n` +
+        "Refusing to run an unverified binary. Offline? Install from source instead:\n" +
+        "  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked"
+    );
+  }
+  const expected = parseChecksums(buf.toString("utf8")).get(artifact);
+  if (!expected) {
+    fail(
+      `no checksum for ${artifact} in the v${VERSION} checksum manifest.\n` +
+        "Refusing to run an unverified binary. Install from source instead:\n" +
+        "  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked"
+    );
+  }
+  return expected;
+}
+
 // Cache the verified binary under the OS temp dir keyed by version + triple, so
 // repeated `npx apohara-agentguard` invocations don't re-download.
 function cachePath(triple, bin) {
@@ -163,17 +194,11 @@ function cachePath(triple, bin) {
 
 async function ensureBinary() {
   const { triple, bin } = resolveTarget();
-  const expected = SHA256[triple];
-  if (!expected || expected === "REPLACE_WITH_RELEASE_SHA256") {
-    fail(
-      `no pinned SHA256 for target ${triple}. This build of the launcher was\n` +
-        "published without a release manifest. Install from source instead:\n" +
-        "  cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked"
-    );
-  }
+  const artifact = `apohara-agentguard-${triple}${bin.endsWith(".exe") ? ".exe" : ""}`;
+  const expected = await expectedShaFor(artifact);
 
   const { dir, file } = cachePath(triple, bin);
-  // Reuse a cached binary only if it still matches the pinned hash.
+  // Reuse a cached binary only if it still matches the expected hash.
   if (fs.existsSync(file)) {
     try {
       if (sha256(fs.readFileSync(file)) === expected) return file;
@@ -182,7 +207,7 @@ async function ensureBinary() {
     }
   }
 
-  const url = `${BASE_URL}/apohara-agentguard-${triple}${bin.endsWith(".exe") ? ".exe" : ""}`;
+  const url = `${BASE_URL}/${artifact}`;
   let buf;
   try {
     buf = await download(url);
@@ -224,4 +249,4 @@ if (require.main === module) {
   main().catch((e) => fail(e && e.message ? e.message : String(e)));
 }
 
-module.exports = { resolveTarget, isMusl, sha256, SHA256, VERSION };
+module.exports = { resolveTarget, isMusl, sha256, parseChecksums, VERSION };
