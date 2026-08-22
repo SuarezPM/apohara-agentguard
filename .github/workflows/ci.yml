@@ -227,3 +227,46 @@ jobs:
           cargo test --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e \
                      --test sandbox_escape --test sandbox_failclosed -- --nocapture
           echo "::endgroup::"
+
+  coverage:
+    name: coverage (regions >= 92, kernel layer excluded)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Install cargo-llvm-cov
+        run: cargo install --locked cargo-llvm-cov
+
+      # STAGED gate (Story T5): REGION coverage on stable. Branch coverage
+      # (`cargo llvm-cov --branch`) requires a nightly toolchain, so the gate
+      # uses region coverage until a kernel-CI/nightly decision lands.
+      #
+      # Threshold derivation: measured region coverage is 94.38% with
+      # src/sandbox/linux excluded; floor(94.38 - 2) = 92. The 2pp margin
+      # absorbs normal measurement variance so the gate never false-REDs,
+      # while a real regression of >2pp trips it.
+      #
+      # The target list mirrors the portable (all-OS) hard gate in the `test`
+      # job above: the kernel-capability sandbox suites are excluded because
+      # they cannot be required on shared runners, and src/sandbox/linux is
+      # excluded from the accounting itself until kernel-CI lands.
+      - name: Region coverage gate (hard)
+        run: |
+          set -euo pipefail
+          cargo llvm-cov --summary-only --fail-under-regions 92 \
+            --ignore-filename-regex 'src/sandbox/linux' \
+            --lib --bins \
+            --test headline_bypass --test gate_fp --test hook_contract \
+            --test kill_switch_env \
+            --test pathguard --test firewall_posture \
+            --test benchmark --test benchmark_packs --test benchmark_tensortrust \
+            --test policy_engine --test ask_corpus \
+            --test gate_evasions --test gate_normalize --test danger_warning \
+            --test codex_hook --test audit --test check_cli \
+            --test example_config_parses --test hook_config --test readme_sync \
+            --test config_failclosed --test eval_harness \
+            | tee coverage-summary.txt
+          cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
