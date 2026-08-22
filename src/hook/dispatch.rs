@@ -424,17 +424,20 @@ fn dispatch_posttooluse(
     if input.tool_name.as_deref() != Some("Bash") {
         return Verdict::allow();
     }
-    let stdout = match input.tool_stdout() {
+    // Borrowed extraction (zero-copy for the common stdout/stderr shapes) so
+    // the full buffer is never cloned on this path.
+    let stdout = match input.tool_stdout_cow() {
         Some(s) => s,
         None => return Verdict::allow(),
     };
 
     // Firewall injection scan first (existing behavior, WARN-only here). Bypassed
-    // when the firewall component is disabled.
+    // when the firewall component is disabled. The captured stdout is passed to
+    // the firewall BORROWED (zero-copy): no full-buffer clone on the hot path.
     if !config.is_component_disabled(COMPONENT_FIREWALL, env_disabled) {
         let verdict = firewall::scan_surface(
             Surface::BashStdout,
-            &FirewallInput::inline(stdout.clone()),
+            &FirewallInput::inline(stdout.as_ref()),
             src,
             &config.effective_thresholds(),
         );

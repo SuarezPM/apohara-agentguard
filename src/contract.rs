@@ -13,6 +13,8 @@
 //! free-text field is length-capped at [`MAX_CONTEXT_BYTES`] so a runaway reason
 //! can't produce an oversized/malformed payload.
 
+use std::borrow::Cow;
+
 use serde::{Deserialize, Serialize};
 
 use crate::verdict::{Tier, Verdict};
@@ -127,6 +129,25 @@ impl HookInput {
                     Some(s.to_string())
                 } else {
                     Some(v.to_string())
+                }
+            }
+        }
+    }
+
+    /// Borrowed twin of [`Self::tool_stdout`]: identical extraction semantics,
+    /// but the text borrows from `self` instead of being cloned out of the
+    /// parsed JSON. Only the rare "whole-JSON fallback" branch allocates.
+    pub fn tool_stdout_cow(&self) -> Option<Cow<'_, str>> {
+        match &self.tool_response {
+            serde_json::Value::Null => None,
+            serde_json::Value::String(s) => Some(Cow::Borrowed(s)),
+            v => {
+                if let Some(s) = v.get("stdout").and_then(|x| x.as_str()) {
+                    Some(Cow::Borrowed(s))
+                } else if let Some(s) = v.get("stderr").and_then(|x| x.as_str()) {
+                    Some(Cow::Borrowed(s))
+                } else {
+                    Some(Cow::Owned(v.to_string()))
                 }
             }
         }

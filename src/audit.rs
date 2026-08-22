@@ -108,6 +108,9 @@ fn now_millis() -> u64 {
 ///   secret-redacted + truncated when present;
 /// - on ANY I/O error, prints a one-line stderr warning and RETURNS (never
 ///   changes a verdict or exit code).
+///
+/// The record is serialized through a borrowed view ([`RecordLine`]) with the
+/// command policy applied — the caller's record is never cloned.
 pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
     if !cfg.enabled {
         return;
@@ -118,13 +121,21 @@ pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
 
     // Apply the command policy: drop entirely unless opted in; otherwise
     // redact secrets THEN truncate (so a secret can never survive a cut).
-    let mut rec = rec.clone();
-    rec.command = match (cfg.include_command, rec.command.take()) {
-        (true, Some(cmd)) => Some(truncate_bytes(&redact_secrets(&cmd), MAX_COMMAND_BYTES)),
+    let command = match (cfg.include_command, rec.command.as_deref()) {
+        (true, Some(cmd)) => Some(truncate_bytes(&redact_secrets(cmd), MAX_COMMAND_BYTES)),
         _ => None,
     };
+    let line_rec = RecordLine {
+        timestamp: rec.timestamp,
+        event: &rec.event,
+        decision: &rec.decision,
+        rule_id: &rec.rule_id,
+        category: &rec.category,
+        surface: &rec.surface,
+        command: command.as_deref(),
+    };
 
-    let mut line = match serde_json::to_string(&rec) {
+    let mut line = match serde_json::to_string(&line_rec) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("apohara-agentguard audit: failed to serialize record: {e}");
@@ -139,6 +150,25 @@ pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
             path.display()
         );
     }
+}
+
+/// Borrowed serialization view of an [`AuditRecord`] with the command policy
+/// already applied. Field order MUST mirror [`AuditRecord`]'s declaration
+/// order so the JSONL bytes stay deterministic and identical to the pre-borrow
+/// implementation (serde emits fields in declaration order).
+#[derive(Serialize)]
+struct RecordLine<'a> {
+    timestamp: u64,
+    event: &'a str,
+    decision: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rule_id: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    category: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    surface: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<&'a str>,
 }
 
 /// Open `path` append-only (creating it owner-only, 0600 on unix) and write the

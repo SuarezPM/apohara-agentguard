@@ -79,6 +79,7 @@ dependencies = [
  "nix",
  "proptest",
  "regex",
+ "regex-automata",
  "seccompiler",
  "serde",
  "serde_json",

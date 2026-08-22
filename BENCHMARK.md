@@ -66,14 +66,15 @@ live, no-network decision paths:
 
 | Scenario                  | Path                 | Decision | p50         | p99         | min        | max         |
 | ------------------------- | -------------------- | -------- | ----------- | ----------- | ---------- | ----------- |
-| Benign Bash (`ls -la`)    | gate::evaluate       | Allow    | **1.383 µs** | **2.043 µs** | 1.342 µs   | 619.798 µs  |
-| Blocked Bash (`rm -rf ~`) | gate::evaluate       | Block    | **1.974 µs** | **2.936 µs** | 1.924 µs   | 165.004 µs  |
-| Injection prompt          | firewall (UserPrompt)| Warn     | **208.617 µs** | **295.983 µs** | 201.403 µs | 1.893 ms    |
+| Benign Bash (`ls -la`)    | gate::evaluate       | Allow    | **1.823 µs** | **2.255 µs** | 1.372 µs   | 983.891 µs  |
+| Blocked Bash (`rm -rf ~`) | gate::evaluate       | Block    | **1.994 µs** | **2.445 µs** | 1.943 µs   | 50.436 µs   |
+| Injection prompt          | firewall (UserPrompt)| Warn     | **841 ns** | **1.352 µs** | 791 ns   | 7.614 µs    |
 
 The Bash gate (allow + block) costs ~1–2 µs per call — negligible against tool
-execution. The firewall content scan over the full rule set is the heavier path
-at ~200 µs p50 (it runs a RegexSet of ~100 patterns plus two-stage validators);
-still well under a millisecond at p99, and only on prompt/content surfaces. The
+execution. The firewall content scan over the full rule set runs a single-pass
+lazy-DFA pre-match (equivalent RegexSet fallback on non-ASCII haystacks) with
+two-stage validators engaged only when their broad gate hits: ~0.8–1 µs p50 on
+prompt/content surfaces, sub-2 µs at p99. The
 `max` outliers are scheduler jitter on a shared box, not algorithmic blowup — the
 [ReDoS guard](benches/regex_redos.rs) separately asserts the scan stays linear.
 

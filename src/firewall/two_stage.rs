@@ -37,8 +37,13 @@ pub(crate) fn matches(id: &str, text: &str) -> bool {
 // Stage 1: broad `\b\d{3}-\d{2}-\d{4}\b`.
 // Stage 2: reject area in {000, 666, 900..=999}, group == 00, serial == 0000.
 
+/// Stage-1 broad pattern for [`ssn_matches`]. Shared with the firewall's
+/// single-pass pre-match automaton so the validator only runs on candidate
+/// hits; the post-validator below remains the acceptance authority.
+pub(crate) const SSN_BROAD_PAT: &str = r"\b(\d{3})-(\d{2})-(\d{4})\b";
+
 static SSN_BROAD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\b(\d{3})-(\d{2})-(\d{4})\b").expect("valid SSN regex"));
+    LazyLock::new(|| Regex::new(SSN_BROAD_PAT).expect("valid SSN regex"));
 
 /// True iff `text` contains a structurally valid US SSN (matching the Python
 /// lookahead-guarded rule's semantics).
@@ -67,8 +72,12 @@ pub(crate) fn ssn_matches(text: &str) -> bool {
 // anchors are redundant with the digit-boundary lookarounds for digit runs.
 // Stage 1: find every maximal digit run; Stage 2: accept iff its length is 11.
 
+/// Stage-1 broad pattern for [`steuer_id_matches`] (see the note on
+/// [`SSN_BROAD_PAT`]).
+pub(crate) const DIGIT_RUN_PAT: &str = r"\d+";
+
 static DIGIT_RUN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\d+").expect("valid digit-run regex"));
+    LazyLock::new(|| Regex::new(DIGIT_RUN_PAT).expect("valid digit-run regex"));
 
 /// True iff `text` contains a maximal run of exactly 11 digits (no adjacent
 /// digit on either side), matching the Python digit-boundary semantics.
@@ -89,12 +98,23 @@ pub(crate) fn steuer_id_matches(text: &str) -> bool {
 // offset right after the target word. Stage 2: reject if the next char is a
 // word-char or hyphen.
 
-static WEAPONS_BROAD: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?i)\b(?:how\s+to\s+(?:make|build|assemble|construct)|step[s]?\s+to\s+(?:make|build|assemble)|recipe\s+for|instructions?\s+for)\s+(?:a\s+|an\s+)?(?:bomb|explosive|ied|pipe[\s\-]?bomb|nail[\s\-]?bomb|nerve\s+agent|chemical\s+weapon|biological\s+weapon|firearm|untraceable\s+(?:gun|weapon)|ghost\s+gun|silencer|suppressor)",
-    )
-    .expect("valid weapons regex")
-});
+/// Stage-1 broad pattern for [`weapons_matches`] (see the note on
+/// [`SSN_BROAD_PAT`]).
+pub(crate) const WEAPONS_BROAD_PAT: &str = r"(?i)\b(?:how\s+to\s+(?:make|build|assemble|construct)|step[s]?\s+to\s+(?:make|build|assemble)|recipe\s+for|instructions?\s+for)\s+(?:a\s+|an\s+)?(?:bomb|explosive|ied|pipe[\s\-]?bomb|nail[\s\-]?bomb|nerve\s+agent|chemical\s+weapon|biological\s+weapon|firearm|untraceable\s+(?:gun|weapon)|ghost\s+gun|silencer|suppressor)";
+
+static WEAPONS_BROAD: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(WEAPONS_BROAD_PAT).expect("valid weapons regex"));
+
+/// The three two-stage rules' broad stage-1 patterns as `(rule_id, pattern)`,
+/// for the firewall's single-pass pre-match automaton. Order is insignificant;
+/// severities are resolved from the DJL table by id at pre-match build time.
+pub(crate) fn broad_patterns() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("DJL-PII-001", SSN_BROAD_PAT),
+        ("DJL-PII-008", DIGIT_RUN_PAT),
+        ("DJL-HARM-003", WEAPONS_BROAD_PAT),
+    ]
+}
 
 /// True iff `text` requests weapons/explosives assembly with the target word
 /// standalone, reproducing the Python `(?![\w\-])` trailing guard.
