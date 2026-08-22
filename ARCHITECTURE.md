@@ -47,15 +47,16 @@ It is a **total reimplementation in Rust** — see
    NO_NEW_PRIVS  →  Landlock  →  seccomp (LAST)  →  execvpe
 ```
 
-## The 3-tier verdict model
+## The 4-tier verdict model
 
 Every component returns the same [`Verdict`](src/verdict.rs): a `Tier` plus a
 reason and optional agent-facing feedback.
 
-| Tier      | Meaning                                  | Hook effect (PreToolUse)        |
-|-----------|------------------------------------------|---------------------------------|
-| **Allow** | permit the action                        | no output, exit 0               |
-| **Warn**  | permit, but surface a caution            | `additionalContext`, exit 0     |
+| Tier      | Meaning                                  | Hook effect (PreToolUse)          |
+|-----------|------------------------------------------|-----------------------------------|
+| **Allow** | permit the action                        | no output, exit 0                 |
+| **Warn**  | permit, but surface a caution            | `additionalContext`, exit 0       |
+| **Ask**   | permit only after the human confirms     | `permissionDecision=ask`, exit 0 (downgrades to Warn on non-PreToolUse events) |
 | **Block** | refuse the action                        | `permissionDecision=deny`, exit 2 |
 
 The tier is derived from a numeric **severity** via `severity_to_tier`, using

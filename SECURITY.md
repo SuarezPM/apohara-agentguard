@@ -43,6 +43,16 @@ it makes no "blocks 100% of attacks" claim.
 
 ---
 
+## Local-only guarantee
+
+Every decision apohara-agentguard makes is computed on your machine. The hook
+reads the event from stdin, evaluates it in-process, and writes the decision to
+stdout — there is no cloud analysis endpoint, no telemetry, no account, and no
+upload path anywhere in the tree. Audit logs (off by default) stay on local
+disk. Tools that forward agent activity to remote services for scoring trade
+workspace confidentiality for convenience; this project's threat model treats
+your command stream as sensitive data and never transmits it.
+
 ## Release integrity (signed binaries + build provenance)
 
 The release binaries are **signed and carry a build-provenance attestation**
@@ -239,6 +249,23 @@ thread.
   code — it logs one stderr line and continues.
 
 ---
+
+### 6. Gate verdict → execution gap (TOCTOU)
+
+The hook's verdict is **advisory at the process boundary**: `apohara-agentguard
+hook` inspects the event JSON and returns a `permissionDecision`, but the host
+executes the tool later, outside this process. A compromised host harness — or
+anything that can suppress or rewrite the hook's output — bypasses the gate
+entirely. This is the same class of gap as the web re-fetch TOCTOU above, one
+level up, and it is documented here rather than hidden:
+
+- **What closes it:** the `sandbox` subcommand. `apohara-agentguard sandbox --
+  <cmd>` performs confinement and execution atomically in-process
+  (NO_NEW_PRIVS → Landlock → seccomp → execvpe), so there is no window between
+  decision and enforcement.
+- **What does not:** hook wiring alone. Treat hook results as a screening
+  layer; treat `sandbox` as the load-bearing enforcement layer for code you
+  would not run unsandboxed.
 
 ## Non-goals (deliberately not built)
 
