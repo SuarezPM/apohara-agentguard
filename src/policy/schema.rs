@@ -69,6 +69,7 @@ pub enum DefaultAction {
 
 /// The `[defaults]` table.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Defaults {
     /// Fallback action when no rule matches AND the tool has no explicit
     /// `[[tools]]` entry. Defaults to [`DefaultAction::Allow`] (preserves
@@ -81,6 +82,7 @@ pub struct Defaults {
 /// contribute a verdict at the given severity (mapped to a [`crate::verdict::Tier`]
 /// via the config thresholds). The worst match wins.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolRule {
     /// Which key (or dotted nested path) of `tool_input` to read.
     pub arg: String,
@@ -96,6 +98,7 @@ pub struct ToolRule {
 
 /// A `[[tools]]` entry. Matches on the HookInput's `tool_name`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolSpec {
     /// The tool name (matches `HookInput::tool_name`).
     pub name: String,
@@ -116,6 +119,7 @@ pub struct ToolSpec {
 /// [`super::engine`]) and `invocations` (call count for the same tool in
 /// the same session).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolBudget {
     /// Max tokens across all invocations of THIS tool in the same session.
     #[serde(default)]
@@ -128,6 +132,7 @@ pub struct ToolBudget {
 /// The `[budgets.session]` table. Caps apply across the whole session
 /// (any tool / event), in addition to any per-tool caps.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionBudget {
     /// Max tokens across the whole session.
     #[serde(default)]
@@ -140,6 +145,7 @@ pub struct SessionBudget {
 /// The `[budgets.*]` table. The session budget applies globally; the
 /// `per_tool` map applies per-tool (keyed by tool name).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Budgets {
     /// Whole-session caps.
     #[serde(default)]
@@ -151,6 +157,7 @@ pub struct Budgets {
 
 /// The top-level policy file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyFile {
     /// Must equal [`CURRENT_SCHEMA_VERSION`]; otherwise the load is
     /// rejected.

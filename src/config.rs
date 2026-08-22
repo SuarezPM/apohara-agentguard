@@ -1,9 +1,20 @@
 //! TOML configuration: allow-list, custom blocks, severity thresholds.
 //!
-//! An absent config file means [`Config::default`] (built-in defaults). A
-//! present file may be partial: every field carries `#[serde(default)]`, so an
-//! empty TOML still parses to the defaults. [`Thresholds`] lives in
-//! [`crate::verdict`] (single source of truth) and is re-exported here.
+//! Loading is FAIL-CLOSED with a strict missing-vs-malformed split:
+//!
+//! - **No config file in any default location** ⇒ silent
+//!   [`Config::default`] (the empty-config byte-identical invariant).
+//! - **A config file exists but fails to parse/deserialize** ⇒
+//!   [`Err`](anyhow::Err) carrying the offending key/field name in the error
+//!   context. Callers (see `main.rs`) print a loud diagnostic and exit 2 — a
+//!   broken config must never be silently discarded by a security gate.
+//!
+//! A present file may otherwise be partial: every field carries
+//! `#[serde(default)]`, so an empty TOML still parses to the defaults.
+//! Unknown keys are rejected (`#[serde(deny_unknown_fields)]` on every struct
+//! here) so a typo'd key fails loudly instead of silently doing nothing.
+//! [`Thresholds`] lives in [`crate::verdict`] (single source of truth) and is
+//! re-exported here.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,6 +27,7 @@ pub use crate::verdict::Thresholds;
 
 /// A user-added block pattern with its severity and category.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CustomBlock {
     /// Pattern to match against a command (substring/`*`-glob).
     pub pattern: String,
@@ -30,6 +42,7 @@ pub struct CustomBlock {
 /// match, contributes `severity` (a numeric severity in the same scale as
 /// [`CustomBlock::severity`], driving the resulting tier via [`Thresholds`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ToolRule {
     /// Tool name the rule applies to (e.g. `"web_fetch"`).
     pub tool: String,
@@ -47,6 +60,7 @@ pub struct ToolRule {
 /// US-Bscan). All fields `#[serde(default)]` so an empty/absent TOML leaves the
 /// canary OFF (the `Default` derive yields `enabled = false`).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CanaryConfig {
     /// Whether the canary feature is active. Default `false` (off).
     #[serde(default)]
@@ -61,6 +75,7 @@ pub struct CanaryConfig {
 /// Layered loading (CLI > env > config) is the runtime concern of the engine
 /// in `src/policy/`; this struct only owns the on-disk `Config` surface.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     /// Path to a TOML policy file. When `None`, no policy is loaded.
     #[serde(default)]
@@ -69,6 +84,7 @@ pub struct PolicyConfig {
 
 /// User-facing configuration that overrides built-in defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Commands / path-globs that short-circuit to Allow.
     #[serde(default)]
@@ -163,6 +179,14 @@ impl Config {
     }
 
     /// Load from the first existing default location, else built-in defaults.
+    ///
+    /// Missing-vs-malformed split (fail-closed contract):
+    /// - NO config file found in any default location ⇒ `Ok(Config::default())`
+    ///   silently (the empty-config byte-identical invariant).
+    /// - A file EXISTS but fails to read/parse/deserialize ⇒ `Err` with the
+    ///   file path in the context and the offending key/field name in the
+    ///   underlying error. Callers must surface it (see `main.rs`: loud
+    ///   stderr diagnostic + exit 2), never discard a malformed config.
     ///
     /// Lookup order:
     /// 1. `./agentguard.toml` (project-local, highest priority)
@@ -707,5 +731,43 @@ mod tests {
         // Other fields remain at defaults.
         assert_eq!(cfg.thresholds, Thresholds::default());
         assert!(!cfg.disable);
+    }
+
+    // ---- Story D1: unknown keys are rejected (deny_unknown_fields) ----
+
+    #[test]
+    fn unknown_top_level_key_is_rejected() {
+        let err = toml::from_str::<Config>("bogus_key = true").expect_err("must reject");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("bogus_key"),
+            "error must name the offending key: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_key_in_sub_table_is_rejected() {
+        let text = r#"
+            [canary]
+            enabled = false
+            typo_key = true
+        "#;
+        let err = toml::from_str::<Config>(text).expect_err("must reject");
+        assert!(
+            format!("{err:#}").contains("typo_key"),
+            "error must name the offending key"
+        );
+    }
+
+    #[test]
+    fn unknown_key_in_custom_block_entry_is_rejected() {
+        let text = r#"
+            [[custom_blocks]]
+            pattern = "shutdown"
+            severity = 9
+            category = "system"
+            severitiy = 9
+        "#;
+        assert!(toml::from_str::<Config>(text).is_err(), "must reject");
     }
 }

@@ -100,6 +100,27 @@ fn apply_policy_override(config: &mut Config, cli_path: Option<&std::path::Path>
     }
 }
 
+/// Load the user config from the default locations, FAIL-CLOSED.
+///
+/// Missing-vs-malformed split:
+/// - No config file in any default location ⇒ silent [`Config::default`]
+///   (the empty-config byte-identical invariant).
+/// - A file exists but fails to parse/deserialize ⇒ loud one-line stderr
+///   diagnostic carrying the underlying error (the offending key/field
+///   name), then exit 2. For `hook`, exit 2 IS the deny signal, so a
+///   malformed config can never silently disable the gate.
+fn load_config_fail_closed(subcommand: &str) -> Config {
+    match Config::load_default_locations() {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!(
+                "apohara-agentguard {subcommand}: invalid agentguard.toml (failing closed): {e:#}"
+            );
+            std::process::exit(2);
+        }
+    }
+}
+
 /// Read all of stdin, run the hook, print the stdout JSON (if any), and exit
 /// with the returned code. On a blocking exit (code 2) the decision JSON is
 /// printed to stdout AND the reason is mirrored to stderr (belt-and-suspenders:
@@ -111,7 +132,7 @@ fn run_hook(cli_policy: Option<&std::path::Path>) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let mut config = Config::load_default_locations().unwrap_or_default();
+    let mut config = load_config_fail_closed("hook");
     apply_policy_override(&mut config, cli_policy);
     let (stdout_json, code) = hook::run(&stdin_json, &config);
 
@@ -136,7 +157,7 @@ fn run_scan(cli_policy: Option<&std::path::Path>) -> ExitCode {
         eprintln!("apohara-agentguard scan: could not read stdin");
         return ExitCode::from(2);
     }
-    let mut config = Config::load_default_locations().unwrap_or_default();
+    let mut config = load_config_fail_closed("scan");
     apply_policy_override(&mut config, cli_policy);
     let verdict = apohara_agentguard::firewall::scan_content(&content, &Default::default());
     use apohara_agentguard::verdict::Tier;
@@ -168,7 +189,7 @@ fn run_scan(cli_policy: Option<&std::path::Path>) -> ExitCode {
 /// pipelines), 0 otherwise (Allow/Warn). The config supplies allow_list,
 /// custom_blocks, thresholds, and the disable kill-switch.
 fn run_check(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode {
-    let mut config = Config::load_default_locations().unwrap_or_default();
+    let mut config = load_config_fail_closed("check");
     apply_policy_override(&mut config, cli_policy);
     let verdict = apohara_agentguard::gate::evaluate(&args.command, &config);
     use apohara_agentguard::verdict::Tier;
@@ -206,7 +227,7 @@ fn run_check(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode 
 /// (`Verdict::allow()`) and the result is byte-identical to `check`.
 /// This is the empty-TOML invariant for the `ask` subcommand.
 fn run_ask(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode {
-    let mut config = Config::load_default_locations().unwrap_or_default();
+    let mut config = load_config_fail_closed("ask");
     apply_policy_override(&mut config, cli_policy);
 
     // Gate verdict (existing surface, v0.2).
@@ -218,7 +239,7 @@ fn run_ask(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode {
     let policy_v =
         match apohara_agentguard::policy::engine::PolicySet::load(config.policy.file.as_deref()) {
             Ok(set) => set.evaluate(
-                &apohara_agentguard::hook::contract::HookInput {
+                &apohara_agentguard::contract::HookInput {
                     hook_event_name: "PreToolUse".to_string(),
                     session_id: None,
                     tool_name: Some("Bash".to_string()),
@@ -278,7 +299,7 @@ fn run_ask(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode {
 /// and exits when stdin closes. The gate uses the loaded user config (same
 /// loader as `check`/`scan`). A stdin/stdout I/O error exits non-zero.
 fn run_mcp(cli_policy: Option<&std::path::Path>) -> ExitCode {
-    let mut config = Config::load_default_locations().unwrap_or_default();
+    let mut config = load_config_fail_closed("mcp");
     apply_policy_override(&mut config, cli_policy);
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -316,7 +337,7 @@ fn warn_danger_full_access(command: &[String]) {
     // Record the danger invocation (best-effort; never affects the exit code).
     // Command text is opt-in + secret-redacted per the audit config; the
     // default (metadata-only) records no command.
-    let config = Config::load_default_locations().unwrap_or_default();
+    let config = load_config_fail_closed("sandbox");
     let rec = AuditRecord::new(
         "danger_full_access",
         "warn",
@@ -410,7 +431,7 @@ mod tests {
         let cfg = apohara_agentguard::config::Config::default();
         let gate_v = apohara_agentguard::gate::evaluate(cmd, &cfg);
         let policy_v = apohara_agentguard::policy::engine::PolicySet::default().evaluate(
-            &apohara_agentguard::hook::contract::HookInput {
+            &apohara_agentguard::contract::HookInput {
                 hook_event_name: "PreToolUse".to_string(),
                 session_id: None,
                 tool_name: Some("Bash".to_string()),
@@ -510,7 +531,7 @@ max_invocations = 1
         // counter accumulates (the engine's counters are per-set).
         let set = apohara_agentguard::policy::engine::PolicySet::load(cfg.policy.file.as_deref())
             .unwrap();
-        let make_input = || apohara_agentguard::hook::contract::HookInput {
+        let make_input = || apohara_agentguard::contract::HookInput {
             hook_event_name: "PreToolUse".to_string(),
             session_id: Some("ask-test".to_string()),
             tool_name: Some("Bash".to_string()),
