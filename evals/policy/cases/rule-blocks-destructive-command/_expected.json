@@ -1,0 +1,4 @@
+{
+  "expected_tier": "block",
+  "notes": "A matching severity-8 rule short-circuits default-deny/budget and Blocks."
+}

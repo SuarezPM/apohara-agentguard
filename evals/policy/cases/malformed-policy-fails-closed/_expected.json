@@ -1,0 +1,4 @@
+{
+  "expected_tier": "block",
+  "notes": "Malformed TOML fails the load; the dispatcher maps that to Block (fail-closed), which is what the harness pins."
+}

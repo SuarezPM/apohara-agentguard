@@ -1,0 +1,5 @@
+{
+  "expected_tier": "block",
+  "reason_contains": "find-delete",
+  "notes": "Recursive deletion without any rm token in the command line."
+}

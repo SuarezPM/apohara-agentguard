@@ -1,0 +1,5 @@
+{
+  "expected_tier": "allow",
+  "surface": "user_prompt",
+  "notes": "Ordinary benign prompt must stay Allow."
+}

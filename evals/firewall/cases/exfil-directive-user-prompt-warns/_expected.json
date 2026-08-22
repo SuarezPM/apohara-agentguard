@@ -1,0 +1,5 @@
+{
+  "expected_tier": "warn",
+  "surface": "user_prompt",
+  "notes": "Send-to-external-endpoint directive: flagged (Warn) under the WARN-only prompt posture."
+}

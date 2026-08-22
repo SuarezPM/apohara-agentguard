@@ -1,0 +1,7 @@
+schema_version = 1
+
+[defaults]
+default_action = "allow"
+
+[budgets.per_tool.Bash]
+max_invocations = 1

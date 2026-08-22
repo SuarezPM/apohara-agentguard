@@ -1,0 +1,5 @@
+{
+  "expected_tier": "ask",
+  "repeat": 2,
+  "notes": "Per-tool invocation cap is 1: first call is Allow, second exceeds the cap and escalates to Ask (repeat evaluates against the same counters)."
+}

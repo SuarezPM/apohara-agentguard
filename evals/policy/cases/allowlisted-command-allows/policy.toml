@@ -1,0 +1,8 @@
+schema_version = 1
+
+[defaults]
+default_action = "deny"
+
+[[tools]]
+name = "Bash"
+allow = ["list_dir", "read_file", "search", "git", "cargo", "echo"]

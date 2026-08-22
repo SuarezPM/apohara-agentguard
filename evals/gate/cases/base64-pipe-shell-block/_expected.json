@@ -1,0 +1,5 @@
+{
+  "expected_tier": "block",
+  "reason_contains": "destructive [rm-rf]",
+  "notes": "base64-encoded payload piped to a shell; pre-split decode rescans the payload."
+}

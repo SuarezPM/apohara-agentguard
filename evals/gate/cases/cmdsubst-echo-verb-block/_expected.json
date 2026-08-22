@@ -1,0 +1,5 @@
+{
+  "expected_tier": "block",
+  "reason_contains": "destructive [rm-rf]",
+  "notes": "Command substitution emits the verb; normalize splices the leg head in place."
+}

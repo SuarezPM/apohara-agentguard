@@ -1,0 +1,4 @@
+{
+  "expected_tier": "block",
+  "notes": "Default-deny posture blocks a tool that has no explicit allow entry."
+}

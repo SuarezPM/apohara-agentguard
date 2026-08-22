@@ -1,0 +1,5 @@
+{
+  "expected_tier": "block",
+  "reason_contains": "destructive [rm-rf]",
+  "notes": "ANSI-C quoting encodes rm as hex escapes; normalize decodes the span."
+}

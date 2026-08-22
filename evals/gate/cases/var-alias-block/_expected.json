@@ -1,0 +1,5 @@
+{
+  "expected_tier": "block",
+  "reason_contains": "destructive [rm-rf]",
+  "notes": "Variable alias: x=rm defers the destructive verb until resolution resolves it."
+}

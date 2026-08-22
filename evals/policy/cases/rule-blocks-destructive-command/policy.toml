@@ -1,0 +1,11 @@
+schema_version = 1
+
+[defaults]
+default_action = "deny"
+
+[[tools]]
+name = "Bash"
+allow = ["list_dir", "read_file", "search", "git", "cargo", "echo"]
+rules = [
+  { arg = "command", pattern = "*rm -rf*", severity = 8, reason = "policy: destructive rm" },
+]

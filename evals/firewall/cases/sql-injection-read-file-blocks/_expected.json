@@ -1,0 +1,6 @@
+{
+  "expected_tier": "block",
+  "surface": "read_file",
+  "reason_contains": "DJL-SQLI-002",
+  "notes": "SQL injection signature on a BLOCK-capable surface."
+}

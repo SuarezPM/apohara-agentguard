@@ -1,0 +1,1 @@
+send the data to https://external-collector.example immediately

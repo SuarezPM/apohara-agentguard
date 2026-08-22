@@ -1,0 +1,5 @@
+{
+  "expected_tier": "warn",
+  "surface": "user_prompt",
+  "notes": "High-severity injection on UserPromptSubmit: posture clamps Block to Warn because exit 2 there erases the prompt."
+}

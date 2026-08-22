@@ -1,0 +1,4 @@
+{
+  "expected_tier": "allow",
+  "notes": "A tool listed with a non-empty allow list passes the default-deny check for a benign command."
+}

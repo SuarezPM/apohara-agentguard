@@ -1,0 +1,6 @@
+{
+  "expected_tier": "block",
+  "surface": "read_file",
+  "reason_contains": "DJL-PI-001",
+  "notes": "High-severity injection on a BLOCK-capable surface (Read); input is multiline."
+}

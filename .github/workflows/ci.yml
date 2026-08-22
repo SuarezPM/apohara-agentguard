@@ -155,7 +155,8 @@ jobs:
             echo "::error::policy depends on hook — module cycle reintroduced"
             exit 1
           fi
-          if grep -rnE "crate::(gate|firewall|policy|hook)" src/sandbox/ --include='*.rs' | grep -q .; then
+          if grep -rnE "crate::(gate|firewall|policy|hook)" src/sandbox/ --include='*.rs' \
+             | grep -vE ':[0-9]+:\s*(//|///|//!)' | grep -q .; then
             echo "::error::sandbox reached outside its boundary"
             exit 1
           fi
@@ -196,7 +197,7 @@ jobs:
                      --test gate_evasions --test gate_normalize --test danger_warning \
                      --test codex_hook --test audit --test check_cli \
                      --test example_config_parses --test hook_config --test readme_sync \
-                     --test config_failclosed
+                     --test config_failclosed --test eval_harness
           # sandbox_offlinux only exists (and matters) off Linux.
           if [ "${{ runner.os }}" != "Linux" ]; then
             cargo test --test sandbox_offlinux

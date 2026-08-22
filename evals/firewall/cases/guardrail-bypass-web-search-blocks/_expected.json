@@ -1,0 +1,6 @@
+{
+  "expected_tier": "block",
+  "surface": "web_search",
+  "reason_contains": "asi01",
+  "notes": "OWASP ASI01 default-deny pattern on a BLOCK-capable surface."
+}

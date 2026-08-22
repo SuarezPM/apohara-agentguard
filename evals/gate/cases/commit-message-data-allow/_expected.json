@@ -1,0 +1,4 @@
+{
+  "expected_tier": "allow",
+  "notes": "Destructive text inside a quoted argument to a non-executing verb is data."
+}

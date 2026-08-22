@@ -1,0 +1,6 @@
+{
+  "expected_tier": "warn",
+  "surface": "user_prompt",
+  "reason_contains": "DJL-PI-010",
+  "notes": "Homoglyph cluster is a genuine mid-severity Warn (below Block threshold even before posture)."
+}
