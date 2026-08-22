@@ -10,22 +10,30 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 /// One OWASP ASI pattern, tagged with category + intent + FP-risk note.
-pub struct OwaspPattern {
+pub(crate) struct OwaspPattern {
     /// Stable name, e.g. `"asi01_bypass_safety_guardrails"`.
     pub name: &'static str,
     /// OWASP ASI category: ASI01/ASI02/ASI05/ASI06/ASI10/BIZEMAIL.
+    #[allow(dead_code)] // provenance metadata: documents the table row
     pub category: &'static str,
     /// Compiled regex.
     pub regex: &'static Regex,
     /// Short reason the pattern is in the pack.
+    #[allow(dead_code)] // provenance metadata: documents the table row
     pub rationale: &'static str,
     /// Honest false-positive-risk note.
+    #[allow(dead_code)] // provenance metadata: documents the table row
     pub fp_risk: &'static str,
 }
 
 impl OwaspPattern {
     /// True iff this pattern matches `text`.
-    pub fn is_match(&self, text: &str) -> bool {
+    ///
+    /// The scan loop matches on the compiled regex directly; this convenience
+    /// method is retained (and pinned by the unit tests below) as the readable
+    /// form of the same logic.
+    #[allow(dead_code)]
+    pub(crate) fn is_match(&self, text: &str) -> bool {
         self.regex.is_match(text)
     }
 }
@@ -39,7 +47,7 @@ macro_rules! re {
 }
 
 /// All 24 OWASP ASI patterns in insertion order.
-pub fn patterns() -> &'static [OwaspPattern] {
+pub(crate) fn patterns() -> &'static [OwaspPattern] {
     &PATTERNS
 }
 

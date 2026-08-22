@@ -35,7 +35,7 @@ fn m_truncate(s: &str) -> bool {
 }
 
 /// All db-pack per-leg rules.
-pub fn rules() -> &'static [DestructiveRule] {
+pub(crate) fn rules() -> &'static [DestructiveRule] {
     &[
         DestructiveRule {
             id: "drop-table",

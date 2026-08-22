@@ -14,14 +14,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 pub mod error;
-pub mod pathsafe;
+mod pathsafe;
 pub mod permission;
 
 #[cfg(target_os = "linux")]
-pub mod linux;
+mod linux;
 
 #[cfg(not(target_os = "linux"))]
-pub mod fallback;
+mod fallback;
 
 pub use error::{Result, SandboxError};
 pub use permission::PermissionTier;

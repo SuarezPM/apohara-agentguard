@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// Decision tier for a single evaluation.
 ///
-/// Precedence (most-severe wins, used by [`crate::hook::max_verdict`]):
+/// Precedence (most-severe wins, used by [`crate::hook::dispatch::max_verdict`]):
 /// `Block > Ask > Warn > Allow`. A default-deny request for human
 /// confirmation (`Ask`) outranks `Warn` (so it is never silently
 /// downgraded to a caution) and is outranked by `Block` (a hard refusal

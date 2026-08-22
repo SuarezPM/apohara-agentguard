@@ -50,7 +50,7 @@ const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 /// to) `workspace_root`. The workdir defaults to `workspace_root` itself when
 /// the caller doesn't narrow it; in that case the resolved paths are equal,
 /// which is allowed (the workspace root is the legitimate working directory).
-pub fn validate_workdir(workdir: &Path, workspace_root: &Path) -> Result<PathBuf> {
+pub(crate) fn validate_workdir(workdir: &Path, workspace_root: &Path) -> Result<PathBuf> {
     let root = canonicalize_recursive(workspace_root).map_err(|e| {
         SandboxError::Workdir(format!(
             "cannot canonicalize workspace_root {}: {e}",
@@ -73,7 +73,7 @@ pub fn validate_workdir(workdir: &Path, workspace_root: &Path) -> Result<PathBuf
     Ok(work)
 }
 
-pub fn run_linux(req: &SandboxRequest) -> Result<SandboxResult> {
+pub(crate) fn run_linux(req: &SandboxRequest) -> Result<SandboxResult> {
     let started = Instant::now();
 
     if req.command.is_empty() {

@@ -30,17 +30,17 @@ use crate::sandbox::linux::syscalls;
 use crate::sandbox::permission::PermissionTier;
 
 /// A compiled-or-empty seccomp profile for a permission tier.
-pub struct SeccompProfile {
+pub(crate) struct SeccompProfile {
     tier: PermissionTier,
 }
 
 impl SeccompProfile {
-    pub fn new(tier: PermissionTier) -> Self {
+    pub(crate) fn new(tier: PermissionTier) -> Self {
         Self { tier }
     }
 
     /// Compile the BPF program for this tier. `None` for DangerFullAccess.
-    pub fn build_filter(&self) -> Result<Option<BpfProgram>> {
+    pub(crate) fn build_filter(&self) -> Result<Option<BpfProgram>> {
         if matches!(self.tier, PermissionTier::DangerFullAccess) {
             return Ok(None);
         }
@@ -64,7 +64,7 @@ impl SeccompProfile {
     }
 
     /// Install the filter into the calling process. No-op for DangerFullAccess.
-    pub fn install(&self) -> Result<()> {
+    pub(crate) fn install(&self) -> Result<()> {
         match self.build_filter()? {
             None => Ok(()),
             Some(filter) => apply_filter(&filter)
@@ -73,7 +73,7 @@ impl SeccompProfile {
     }
 
     /// Build the seccompiler JSON spec. Exposed for tests.
-    pub fn build_json_spec(&self) -> Value {
+    pub(crate) fn build_json_spec(&self) -> Value {
         let mut rules: Vec<Value> = Vec::new();
 
         for syscall in syscalls::pure_allow_for(self.tier) {

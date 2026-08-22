@@ -22,11 +22,11 @@
 
 /// Maximum size (in bytes) of the rewrite buffer. Inputs/rewrites past this are
 /// left intact (mirrors `decode::MAX_DECODE_BYTES`).
-pub const MAX_NORMALIZE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_NORMALIZE_BYTES: usize = 64 * 1024;
 
 /// Maximum number of in-place splices across the whole pre-pass. A pathological
 /// input with hundreds of spans cannot fan out past this.
-pub const MAX_REWRITES: usize = 64;
+pub(crate) const MAX_REWRITES: usize = 64;
 
 /// A decoded/extracted span may not exceed this multiple of its source length.
 const MAX_EXPANSION_RATIO: usize = 4;
@@ -43,6 +43,10 @@ pub struct Normalized {
 }
 
 /// Apply the four bounded normalization passes in order, in one shared buffer.
+///
+/// The gate calls this internally; this is `pub` (hidden from docs) so the fuzz
+/// target + `tests/gate_normalize.rs` can pin the pre-pass directly.
+#[doc(hidden)]
 pub fn normalize_command(cmd: &str) -> Normalized {
     if cmd.len() > MAX_NORMALIZE_BYTES {
         return Normalized {

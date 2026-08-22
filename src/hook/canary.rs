@@ -39,7 +39,7 @@ const TOKEN_HEX_LEN: usize = 32;
 /// Best-effort: if the token cannot be persisted (e.g. an unwritable TMPDIR)
 /// the freshly generated sentinel is still returned so the caller may seed the
 /// session context — the later scan simply won't have a stored token to match.
-pub fn emit_token(session_id: &str) -> String {
+pub(crate) fn emit_token(session_id: &str) -> String {
     let token = generate_token(session_id);
     let _ = persist_token(session_id, &token);
     token
@@ -48,7 +48,7 @@ pub fn emit_token(session_id: &str) -> String {
 /// Read the persisted canary sentinel for `session_id`, if one exists and looks
 /// like a token. Returns `None` when no token was emitted, the file is absent,
 /// or it cannot be read (the canary then simply does not fire).
-pub fn read_token(session_id: &str) -> Option<String> {
+pub(crate) fn read_token(session_id: &str) -> Option<String> {
     let path = token_path(session_id)?;
     let raw = std::fs::read_to_string(path).ok()?;
     let token = raw.trim().to_string();

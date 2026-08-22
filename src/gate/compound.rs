@@ -18,6 +18,10 @@
 /// Returns `vec![command]` for a non-compound command, otherwise one entry per
 /// detected leg. Substitution bodies (`$(...)`, `` `...` ``, `<(...)`, `>(...)`)
 /// are extracted recursively. Empty legs (e.g. a trailing `;`) are dropped.
+///
+/// The gate consumes the split internally; this is `pub` (hidden from docs) so
+/// the fuzz target + `tests/gate_normalize.rs` can pin the splitter directly.
+#[doc(hidden)]
 pub fn split_compound(command: &str) -> Vec<String> {
     split_compound_with_separators(command, &[])
 }
@@ -29,7 +33,7 @@ pub fn split_compound(command: &str) -> Vec<String> {
 /// substitution bodies uses the default separator set, so an extracted `$(...)`
 /// keeps its own splitting. Passing an empty `extra_seps` is byte-for-byte
 /// identical to [`split_compound`] (additive, default-preserving).
-pub fn split_compound_with_separators(command: &str, extra_seps: &[char]) -> Vec<String> {
+pub(crate) fn split_compound_with_separators(command: &str, extra_seps: &[char]) -> Vec<String> {
     let bytes = command.as_bytes();
     let mut result: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -124,7 +128,12 @@ pub fn split_compound_with_separators(command: &str, extra_seps: &[char]) -> Vec
 }
 
 /// True iff `command` decomposes into more than one logical leg.
-pub fn is_compound(command: &str) -> bool {
+///
+/// No production caller remains (the gate works on the split legs directly);
+/// retained as a crate-internal helper because its behavior is pinned by the
+/// unit tests below.
+#[allow(dead_code)]
+pub(crate) fn is_compound(command: &str) -> bool {
     split_compound(command).len() > 1
 }
 
@@ -141,7 +150,7 @@ pub fn is_compound(command: &str) -> bool {
 /// `split_compound` + taxonomy pipeline). Bounded by [`MAX_SUBST_BODIES`] and the
 /// substitution depth-tracking already present in the extractors, so a crafted
 /// nest cannot blow up.
-pub fn extract_double_quoted_substitutions(leg: &str) -> Vec<String> {
+pub(crate) fn extract_double_quoted_substitutions(leg: &str) -> Vec<String> {
     let bytes = leg.as_bytes();
     let mut bodies: Vec<String> = Vec::new();
     let mut i = 0usize;
@@ -189,7 +198,7 @@ pub fn extract_double_quoted_substitutions(leg: &str) -> Vec<String> {
 
 /// Cap on how many double-quoted substitution bodies a single leg may surface,
 /// consistent with the normalize/decode bounds (no unbounded fan-out).
-pub const MAX_SUBST_BODIES: usize = 64;
+pub(crate) const MAX_SUBST_BODIES: usize = 64;
 
 /// Trim and push `current` as a leg if non-empty, then clear it.
 fn push_leg(current: &mut String, result: &mut Vec<String>) {

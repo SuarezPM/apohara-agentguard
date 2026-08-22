@@ -178,7 +178,7 @@ fn truncate_bytes(s: &str, max: usize) -> String {
 ///
 /// This is a deliberate, bounded set — the same secret-name discipline used by
 /// the sandbox env sanitizer — not a general PII scrubber.
-pub fn redact_secrets(text: &str) -> String {
+pub(crate) fn redact_secrets(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
 
     // Tokenize on whitespace but preserve the original separators so the masked

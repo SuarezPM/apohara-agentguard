@@ -18,11 +18,11 @@
 //! re-split -> take the MAX severity -> map to a tier via the thresholds.
 
 pub mod compound;
-pub mod decode;
+mod decode;
 pub mod normalize;
-pub mod packs;
-pub mod resolve;
-pub mod taxonomy;
+mod packs;
+mod resolve;
+mod taxonomy;
 
 use crate::config::{Config, CustomBlock};
 use crate::verdict::{severity_to_tier, Tier, Verdict};

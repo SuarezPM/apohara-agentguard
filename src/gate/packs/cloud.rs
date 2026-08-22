@@ -45,7 +45,7 @@ fn m_az_delete(s: &str) -> bool {
 }
 
 /// All cloud-pack per-leg rules.
-pub fn rules() -> &'static [DestructiveRule] {
+pub(crate) fn rules() -> &'static [DestructiveRule] {
     &[
         DestructiveRule {
             id: "aws-s3-rb-force",

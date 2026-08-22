@@ -3,7 +3,7 @@
 //! The engine is loaded from a TOML policy file (zero new runtime deps: the
 //! existing `toml` crate is the parser) and produces [`Verdict`]s that
 //! compose with the gate/firewall/pathguard/tool-rules via
-//! [`crate::hook::max_verdict`] in the hook dispatch.
+//! [`crate::hook::dispatch::max_verdict`] in the hook dispatch.
 //!
 //! ## Module shape
 //!
@@ -43,5 +43,5 @@
 //!   separate, separately-justified change.
 
 pub mod engine;
-pub mod matcher;
+mod matcher;
 pub mod schema;

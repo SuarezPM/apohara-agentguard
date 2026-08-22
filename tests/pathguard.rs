@@ -28,6 +28,19 @@ fn read_env_blocks_at_tool_level() {
 }
 
 #[test]
+fn read_dotenv_denies() {
+    // Moved from the former inline hook tests (integration-style: drives the
+    // full `hook::run` PreToolUse + Read path). Pins the same deny shape as
+    // `read_env_blocks_at_tool_level`.
+    let json =
+        r#"{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":".env"}}"#;
+    let (out, code) = run(json, &Config::default());
+    assert_eq!(code, 2);
+    let v: Value = serde_json::from_str(&out.unwrap()).unwrap();
+    assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
+}
+
+#[test]
 fn read_secret_blocks() {
     assert_eq!(check_path("Read", ".env", false).tier, Tier::Block);
     assert_eq!(

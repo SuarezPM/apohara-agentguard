@@ -7,6 +7,6 @@ use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::{SandboxRequest, SandboxResult};
 
 /// Always refuse: running unconfined would silently drop the sandbox.
-pub fn run(_req: &SandboxRequest) -> Result<SandboxResult> {
+pub(crate) fn run(_req: &SandboxRequest) -> Result<SandboxResult> {
     Err(SandboxError::Unavailable)
 }

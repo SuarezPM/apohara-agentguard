@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 /// Current on-disk schema version. A load with any other value is an error
 /// (forces migration paths to be explicit; v0.3 rejects future-schema files
 /// loudly rather than silently misinterpreting them).
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const CURRENT_SCHEMA_VERSION: u32 = 1;
 
 /// The fallback action when no rule matches AND the tool has no explicit
 /// `[[tools]]` entry.

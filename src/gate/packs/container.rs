@@ -44,7 +44,7 @@ fn m_kubectl_delete_all(s: &str) -> bool {
 }
 
 /// All container-pack per-leg rules.
-pub fn rules() -> &'static [DestructiveRule] {
+pub(crate) fn rules() -> &'static [DestructiveRule] {
     &[
         DestructiveRule {
             id: "docker-system-prune",

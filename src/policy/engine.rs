@@ -355,7 +355,7 @@ fn tokens_for(s: &str) -> u64 {
 }
 
 /// Local `max_verdict` so this module is self-contained; semantically
-/// identical to [`crate::hook::max_verdict`] (Block > Ask > Warn > Allow;
+/// identical to [`crate::hook::dispatch::max_verdict`] (Block > Ask > Warn > Allow;
 /// ties keep the leftmost `a`). The local copy is justified because
 /// [`crate::hook::tier_rank`] is `pub(crate)`; using the canonical
 /// function from `hook/mod.rs` would import a `pub(crate)` symbol, which

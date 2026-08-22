@@ -23,20 +23,24 @@ use regex::Regex;
 /// For ordinary rules `regex` holds the compiled pattern. For the three
 /// lookaround rules, `regex` is `None` and `two_stage` is `true`: matching is
 /// delegated to [`crate::firewall::two_stage::matches`] keyed on `id`.
-pub struct DjlRule {
+pub(crate) struct DjlRule {
     /// Stable identifier, e.g. `"DJL-PI-001"`.
     pub id: &'static str,
     /// Compiled pattern, or `None` for two-stage (lookaround) rules.
     pub regex: Option<&'static Regex>,
     /// Category label, e.g. `"prompt_injection"`.
+    #[allow(dead_code)] // provenance metadata: documents the table row
     pub category: &'static str,
     /// Severity 1..=10 driving the tier.
     pub severity: u8,
     /// One-line human-readable description.
+    #[allow(dead_code)] // provenance metadata: documents the table row
     pub description: &'static str,
     /// CVE/CWE/OWASP/NIST references.
+    #[allow(dead_code)] // provenance metadata: documents the table row
     pub refs: &'static [&'static str],
     /// Authored false-positive risk note (benign string most likely to trip).
+    #[allow(dead_code)] // provenance metadata: documents the table row
     pub fp_risk: &'static str,
     /// True iff matching is delegated to [`crate::firewall::two_stage`].
     pub two_stage: bool,
@@ -44,7 +48,12 @@ pub struct DjlRule {
 
 impl DjlRule {
     /// True iff this rule matches `text` (direct regex or two-stage delegate).
-    pub fn is_match(&self, text: &str) -> bool {
+    ///
+    /// The scan loop matches on the fields directly; this convenience method is
+    /// retained (and pinned by the unit tests below) as the readable form of
+    /// the same logic.
+    #[allow(dead_code)]
+    pub(crate) fn is_match(&self, text: &str) -> bool {
         if self.two_stage {
             crate::firewall::two_stage::matches(self.id, text)
         } else {
@@ -63,7 +72,7 @@ macro_rules! re {
 }
 
 /// All 78 DJL rules in insertion order (PI, SQLI, XSS, PII, EXF, MIS, POL, HARM).
-pub fn rules() -> &'static [DjlRule] {
+pub(crate) fn rules() -> &'static [DjlRule] {
     &RULES
 }
 

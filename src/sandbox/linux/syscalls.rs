@@ -63,7 +63,7 @@ use crate::sandbox::permission::PermissionTier;
 /// Covers read I/O, fd management, memory, signals, time, entropy, process
 /// info, and clean exits. `openat` / `open` are NOT here — they're conditional
 /// (RDONLY-masked) for this tier.
-pub const READONLY_PURE_ALLOW: &[&str] = &[
+pub(crate) const READONLY_PURE_ALLOW: &[&str] = &[
     // Read I/O
     "read",
     "pread64",
@@ -177,7 +177,7 @@ pub const READONLY_PURE_ALLOW: &[&str] = &[
 ///
 /// `(name, human description)`. The BPF condition is constructed in
 /// `profile.rs`; this is the declarative manifest used for docs and tests.
-pub const READONLY_CONDITIONAL: &[(&str, &str)] = &[
+pub(crate) const READONLY_CONDITIONAL: &[(&str, &str)] = &[
     ("openat", "access mode must be O_RDONLY (low 2 bits zero)"),
     ("open", "access mode must be O_RDONLY (low 2 bits zero)"),
 ];
@@ -186,7 +186,7 @@ pub const READONLY_CONDITIONAL: &[(&str, &str)] = &[
 ///
 /// Adds process spawn, write I/O, path mutation, directory iteration, fd
 /// lifecycle, ownership, and the local-IPC primitives cargo's jobserver needs.
-pub const WORKSPACE_WRITE_ADDITIONS_PURE_ALLOW: &[&str] = &[
+pub(crate) const WORKSPACE_WRITE_ADDITIONS_PURE_ALLOW: &[&str] = &[
     // Thread/process spawn. `clone3` is allowed (Go/glibc use it for threads);
     // the namespace-escape concern is handled because the child has no
     // CAP_SYS_ADMIN inside its userns hierarchy and `unshare`/`setns` stay
@@ -257,7 +257,7 @@ pub const WORKSPACE_WRITE_ADDITIONS_PURE_ALLOW: &[&str] = &[
 ];
 
 /// Tier 2: WorkspaceWrite ADDITIONS — conditional syscalls.
-pub const WORKSPACE_WRITE_ADDITIONS_CONDITIONAL: &[(&str, &str)] = &[
+pub(crate) const WORKSPACE_WRITE_ADDITIONS_CONDITIONAL: &[(&str, &str)] = &[
     ("openat", "all access modes allowed"),
     ("open", "all access modes allowed"),
     (
@@ -275,7 +275,7 @@ pub const WORKSPACE_WRITE_ADDITIONS_CONDITIONAL: &[(&str, &str)] = &[
 ];
 
 /// Full pure-allow list for `tier`. WorkspaceWrite is ReadOnly + its additions.
-pub fn pure_allow_for(tier: PermissionTier) -> Vec<&'static str> {
+pub(crate) fn pure_allow_for(tier: PermissionTier) -> Vec<&'static str> {
     match tier {
         PermissionTier::ReadOnly => READONLY_PURE_ALLOW.to_vec(),
         PermissionTier::WorkspaceWrite => {
@@ -288,7 +288,7 @@ pub fn pure_allow_for(tier: PermissionTier) -> Vec<&'static str> {
 }
 
 /// Conditional constraint manifest for `tier`.
-pub fn conditional_for(tier: PermissionTier) -> Vec<(&'static str, &'static str)> {
+pub(crate) fn conditional_for(tier: PermissionTier) -> Vec<(&'static str, &'static str)> {
     match tier {
         PermissionTier::ReadOnly => READONLY_CONDITIONAL.to_vec(),
         PermissionTier::WorkspaceWrite => WORKSPACE_WRITE_ADDITIONS_CONDITIONAL.to_vec(),

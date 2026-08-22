@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 /// A single destructive-pattern rule.
-pub struct DestructiveRule {
+pub(crate) struct DestructiveRule {
     /// Stable identifier for reporting.
     pub id: &'static str,
     /// Severity that drives the tier (see [`crate::verdict::Thresholds`]).
@@ -30,7 +30,7 @@ pub struct DestructiveRule {
 
 impl DestructiveRule {
     /// True iff this rule matches `leg`.
-    pub fn matches(&self, leg: &str) -> bool {
+    pub(crate) fn matches(&self, leg: &str) -> bool {
         (self.matcher)(leg)
     }
 }
@@ -124,7 +124,7 @@ fn m_fetch_run_inline(s: &str) -> bool {
 }
 
 /// All per-leg destructive rules.
-pub fn rules() -> &'static [DestructiveRule] {
+pub(crate) fn rules() -> &'static [DestructiveRule] {
     &[
         DestructiveRule {
             id: "rm-rf",
@@ -226,7 +226,7 @@ pub fn rules() -> &'static [DestructiveRule] {
 /// separately by [`live_substitution_bodies`] and scanned as commands, so this
 /// stripping cannot hide them. (Inside SINGLE quotes a substitution is literal,
 /// so it is correctly suppressed by the strip.)
-pub fn effective_match_text(leg: &str) -> String {
+pub(crate) fn effective_match_text(leg: &str) -> String {
     // A comment line is entirely inert text.
     if leg.trim_start().starts_with('#') {
         return String::new();
@@ -253,7 +253,7 @@ pub fn effective_match_text(leg: &str) -> String {
 /// Returns empty for EXECUTING verbs (their whole content is already kept and
 /// matched by [`effective_match_text`]) and for comments (inert). Single-quoted
 /// substitutions are literal and are NOT returned.
-pub fn live_substitution_bodies(leg: &str) -> Vec<String> {
+pub(crate) fn live_substitution_bodies(leg: &str) -> Vec<String> {
     if leg.trim_start().starts_with('#') {
         return Vec::new();
     }
@@ -265,7 +265,7 @@ pub fn live_substitution_bodies(leg: &str) -> Vec<String> {
 
 /// True iff the leg's HEAD verb is one whose quoted arguments are DATA, not a
 /// command to execute.
-pub fn is_non_executing_verb(leg: &str) -> bool {
+pub(crate) fn is_non_executing_verb(leg: &str) -> bool {
     let trimmed = leg.trim_start();
     let mut tokens = trimmed.split_whitespace();
     let verb = match tokens.next() {
@@ -315,7 +315,7 @@ fn strip_quoted_spans(leg: &str) -> String {
 ///
 /// Returns the matching `DestructiveRule`-equivalent (id, severity, category) if
 /// a download stage pipes directly into a shell interpreter stage.
-pub fn fetch_pipe_to_shell(command: &str) -> Option<(&'static str, u8, &'static str)> {
+pub(crate) fn fetch_pipe_to_shell(command: &str) -> Option<(&'static str, u8, &'static str)> {
     let stages: Vec<&str> = command.split('|').map(str::trim).collect();
     if stages.len() < 2 {
         return None;
@@ -341,7 +341,7 @@ pub fn fetch_pipe_to_shell(command: &str) -> Option<(&'static str, u8, &'static 
 /// signature across legs before any per-leg matcher can see it (the same reason
 /// `fetch_pipe_to_shell` is checked pre-split). Returns the rule triple if the
 /// whitespace-insensitive signature is present.
-pub fn fork_bomb_presplit(command: &str) -> Option<(&'static str, u8, &'static str)> {
+pub(crate) fn fork_bomb_presplit(command: &str) -> Option<(&'static str, u8, &'static str)> {
     if m_fork_bomb(command) {
         Some(("fork-bomb", 9, "dos"))
     } else {

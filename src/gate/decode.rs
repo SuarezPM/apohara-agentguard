@@ -17,10 +17,10 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine as _;
 
 /// Maximum recursion depth for decode-and-rescan (guards against decode loops).
-pub const MAX_DECODE_DEPTH: u8 = 2;
+pub(crate) const MAX_DECODE_DEPTH: u8 = 2;
 
 /// Maximum decoded payload size in bytes (64 KiB). Larger payloads are refused.
-pub const MAX_DECODE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_DECODE_BYTES: usize = 64 * 1024;
 
 /// If `leg` contains a `base64 -d` / `base64 --decode` stage fed by a literal
 /// payload, decode the payload and return the decoded UTF-8 text for rescanning.
@@ -28,7 +28,7 @@ pub const MAX_DECODE_BYTES: usize = 64 * 1024;
 /// Returns `None` when: there is no base64-decode stage, no decodable payload is
 /// present, `depth >= MAX_DECODE_DEPTH`, the decoded size exceeds
 /// `MAX_DECODE_BYTES`, or the bytes are not valid UTF-8.
-pub fn decode_and_expand(leg: &str, depth: u8) -> Option<String> {
+pub(crate) fn decode_and_expand(leg: &str, depth: u8) -> Option<String> {
     if depth >= MAX_DECODE_DEPTH {
         return None;
     }

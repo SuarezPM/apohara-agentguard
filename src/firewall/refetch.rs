@@ -33,6 +33,10 @@ use std::time::Duration;
 
 /// Hard cap on how many bytes of a fetched body are read and scanned. Oversized
 /// bodies are truncated to this prefix rather than buffered whole (DoS guard).
+///
+/// `pub` (hidden from docs) so `tests/firewall_posture.rs` can assert against
+/// the exact cap value.
+#[doc(hidden)]
 pub const MAX_FETCH_BYTES: usize = 1024 * 1024; // 1 MiB
 
 /// Connect timeout for the production fetch.
@@ -117,6 +121,10 @@ pub trait ContentSource {
 /// DENIES private (RFC1918), loopback, link-local, RFC4193 ULA, and
 /// cloud-metadata addresses. Public addresses are allowed. No DNS, no network —
 /// tests assert `169.254.169.254` and `127.0.0.1` are refused directly.
+///
+/// The fetch path calls this internally; `pub` (hidden from docs) so
+/// `tests/firewall_posture.rs` can pin the deny matrix directly.
+#[doc(hidden)]
 pub fn ssrf_check_ip(ip: IpAddr) -> Result<(), SsrfRejected> {
     let reject = |reason| Err(SsrfRejected { reason });
     match ip {
@@ -184,6 +192,10 @@ fn check_v6(
 /// any rejected address the whole host is refused (deny-by-default: a host that
 /// resolves to a mix is treated as hostile). Checking the *resolved* IP is what
 /// defeats DNS rebinding.
+///
+/// The fetch path calls this internally; `pub` (hidden from docs) so
+/// `tests/firewall_posture.rs` can pin the resolution behavior directly.
+#[doc(hidden)]
 pub fn ssrf_check(host: &str) -> Result<IpAddr, SsrfRejected> {
     // `to_socket_addrs` needs a port; 0 is fine for resolution-only.
     let addrs = (host, 0u16).to_socket_addrs().map_err(|_| SsrfRejected {
@@ -210,11 +222,11 @@ pub fn ssrf_check(host: &str) -> Result<IpAddr, SsrfRejected> {
 /// Production [`ContentSource`]: reads local files for [`Surface::ReadFile`] and
 /// performs an SSRF-guarded, size/time-capped HTTP GET for the web surfaces.
 #[derive(Debug, Default, Clone, Copy)]
-pub struct UreqSource;
+pub(crate) struct UreqSource;
 
 impl UreqSource {
     /// Construct the production source.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }

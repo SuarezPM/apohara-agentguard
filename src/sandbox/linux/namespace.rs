@@ -32,7 +32,7 @@ use std::io::Write;
 use crate::sandbox::error::{Result, SandboxError};
 
 /// Enter a fresh user + mount + PID namespace bundle and write the uid/gid maps.
-pub fn enter_isolated_namespaces() -> Result<()> {
+pub(crate) fn enter_isolated_namespaces() -> Result<()> {
     let host_uid = getuid().as_raw();
     let host_gid = getgid().as_raw();
 

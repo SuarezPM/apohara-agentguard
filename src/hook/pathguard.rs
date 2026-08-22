@@ -22,6 +22,10 @@ use crate::verdict::Verdict;
 /// Returns [`Verdict::block`] for a forbidden access, otherwise
 /// [`Verdict::allow`]. Pure function — never reads the filesystem (tests pass
 /// literal paths to stay hermetic).
+///
+/// The hook dispatch consumes this internally; `pub` (hidden from docs) so
+/// `tests/pathguard.rs` can pin the deny-glob matrix directly.
+#[doc(hidden)]
 pub fn check_path(tool: &str, path: &str, write: bool) -> Verdict {
     let norm = normalize(path);
 

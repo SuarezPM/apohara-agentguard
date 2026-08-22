@@ -20,7 +20,7 @@ use regex::Regex;
 
 /// Stable id => two-stage matcher fn, so the registry in [`super::djl`] can
 /// route the three lookaround rules without inlining their logic.
-pub fn matches(id: &str, text: &str) -> bool {
+pub(crate) fn matches(id: &str, text: &str) -> bool {
     match id {
         "DJL-PII-001" => ssn_matches(text),
         "DJL-PII-008" => steuer_id_matches(text),
@@ -42,7 +42,7 @@ static SSN_BROAD: LazyLock<Regex> =
 
 /// True iff `text` contains a structurally valid US SSN (matching the Python
 /// lookahead-guarded rule's semantics).
-pub fn ssn_matches(text: &str) -> bool {
+pub(crate) fn ssn_matches(text: &str) -> bool {
     SSN_BROAD.captures_iter(text).any(|c| {
         let area = &c[1];
         let group = &c[2];
@@ -72,7 +72,7 @@ static DIGIT_RUN: LazyLock<Regex> =
 
 /// True iff `text` contains a maximal run of exactly 11 digits (no adjacent
 /// digit on either side), matching the Python digit-boundary semantics.
-pub fn steuer_id_matches(text: &str) -> bool {
+pub(crate) fn steuer_id_matches(text: &str) -> bool {
     // A *maximal* digit run has no adjacent digit by construction, so its length
     // being exactly 11 is equivalent to `(?<!\d)\d{11}(?!\d)`.
     DIGIT_RUN.find_iter(text).any(|m| m.as_str().len() == 11)
@@ -98,7 +98,7 @@ static WEAPONS_BROAD: LazyLock<Regex> = LazyLock::new(|| {
 
 /// True iff `text` requests weapons/explosives assembly with the target word
 /// standalone, reproducing the Python `(?![\w\-])` trailing guard.
-pub fn weapons_matches(text: &str) -> bool {
+pub(crate) fn weapons_matches(text: &str) -> bool {
     WEAPONS_BROAD.find_iter(text).any(|m| {
         // (?![\w\-]): the char immediately after the match must not be a
         // word-char or hyphen.

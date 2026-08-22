@@ -18,10 +18,10 @@
 //! which surfaces may BLOCK, which are WARN-only, and which obtain their content
 //! out-of-band via [`refetch`] before scanning.
 
-pub mod djl;
-pub mod owasp;
+mod djl;
+mod owasp;
 pub mod refetch;
-pub mod two_stage;
+mod two_stage;
 
 use std::sync::LazyLock;
 

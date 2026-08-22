@@ -21,6 +21,10 @@ use crate::verdict::{Tier, Verdict};
 ///
 /// Oversized payloads risk being rejected or truncated unpredictably by the
 /// harness; we truncate ourselves (with an ellipsis marker) to stay well-formed.
+///
+/// `pub` (hidden from docs) so `tests/hook_contract.rs` can assert against the
+/// exact cap value.
+#[doc(hidden)]
 pub const MAX_CONTEXT_BYTES: usize = 4096;
 
 /// Marker appended when a reason is truncated to [`MAX_CONTEXT_BYTES`].

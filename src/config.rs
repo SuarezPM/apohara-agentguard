@@ -163,6 +163,11 @@ impl Default for Config {
     }
 }
 
+/// Upper bound of the documented severity scale (`0..=9`, see
+/// `examples/agentguard.toml`). A configured severity above this bound can
+/// never be distinguished from the maximum and is treated as a typo.
+const MAX_SEVERITY: u8 = 9;
+
 impl Config {
     /// Load config from `path` if given and existing; otherwise return defaults.
     pub fn load(path: Option<&Path>) -> Result<Config> {
@@ -172,6 +177,13 @@ impl Config {
                     .with_context(|| format!("reading config file {}", p.display()))?;
                 let cfg: Config = toml::from_str(&text)
                     .with_context(|| format!("parsing config file {}", p.display()))?;
+                // Fail-closed on invalid cross-field combinations: a config that
+                // PARSES but makes no sense (e.g. warn_at > block_at) must fail
+                // loudly here, not silently misbehave at evaluation time. The
+                // caller (see `main.rs`) surfaces the error with the same loud
+                // diagnostic + exit 2 treatment as a parse error.
+                cfg.validate()
+                    .with_context(|| format!("invalid configuration in {}", p.display()))?;
                 Ok(cfg)
             }
             _ => Ok(Config::default()),
@@ -202,7 +214,7 @@ impl Config {
     }
 
     /// Whether `command` matches the allow-list (substring or `*`-glob).
-    pub fn is_allowed(&self, command: &str) -> bool {
+    pub(crate) fn is_allowed(&self, command: &str) -> bool {
         self.allow_list
             .iter()
             .any(|pattern| glob_match(pattern, command))
@@ -220,7 +232,7 @@ impl Config {
     ///
     /// `component` and the configured/env names are compared case-insensitively
     /// after trimming. Unknown names simply never match (not an error).
-    pub fn is_component_disabled(&self, component: &str, env_disabled: &EnvDisable) -> bool {
+    pub(crate) fn is_component_disabled(&self, component: &str, env_disabled: &EnvDisable) -> bool {
         if self.disable || env_disabled.all {
             return true;
         }
@@ -247,6 +259,72 @@ impl Config {
             _ => self.thresholds,
         }
     }
+
+    /// Enforce the cross-field invariants of a parsed [`Config`].
+    ///
+    /// Called from BOTH load paths ([`Config::load`] and, through it,
+    /// [`Config::load_default_locations`]) right AFTER deserialization, so an
+    /// invalid combination fails closed with the same loud diagnostic + exit 2
+    /// treatment as a parse error (the D1 channel in `main.rs`). A `Config`
+    /// built directly in memory (e.g. `Config::default()`, or a struct literal
+    /// in tests) is NOT routed through this check — only on-disk configs are.
+    ///
+    /// Invariants:
+    /// 1. **Thresholds ordering** — `thresholds.warn_at <= thresholds.block_at`.
+    ///    An inverted pair silently reclassifies Block-tier severities as Warn.
+    /// 2. **Severity presets within bounds** —
+    ///    (a) `level`, when set, must name a known preset (`strict`, `high`,
+    ///    or `critical`; case-insensitive). An unrecognized name would
+    ///    otherwise be silently ignored — a typo'd preset must fail loudly,
+    ///    mirroring the `deny_unknown_fields` posture for keys.
+    ///    (b) every configured severity (`custom_blocks[].severity`,
+    ///    `tool_rules[].severity`) stays within the documented `0..=9` scale
+    ///    (see `examples/agentguard.toml`).
+    /// 3. **Budget caps positive where applicable** — not applicable here:
+    ///    budget caps are not part of `Config` (they live in the policy-file
+    ///    schema and are validated by `PolicySet::load`).
+    /// 4. **custom_blocks patterns non-empty** — an empty pattern matches
+    ///    EVERY command (substring semantics), silently widening the block
+    ///    list into a blanket deny.
+    pub fn validate(&self) -> Result<()> {
+        if self.thresholds.warn_at > self.thresholds.block_at {
+            anyhow::bail!(
+                "thresholds.warn_at ({}) must be <= thresholds.block_at ({})",
+                self.thresholds.warn_at,
+                self.thresholds.block_at
+            );
+        }
+        if let Some(level) = &self.level {
+            if level_preset(level).is_none() {
+                anyhow::bail!(
+                    "unknown severity preset `level = \"{level}\"` \
+                     (expected \"strict\", \"high\", or \"critical\")"
+                );
+            }
+        }
+        for block in &self.custom_blocks {
+            if block.pattern.is_empty() {
+                anyhow::bail!(
+                    "custom_blocks.pattern must not be empty (it would match everything)"
+                );
+            }
+            if block.severity > MAX_SEVERITY {
+                anyhow::bail!(
+                    "custom_blocks.severity ({}) is out of range 0..={MAX_SEVERITY}",
+                    block.severity
+                );
+            }
+        }
+        for rule in &self.tool_rules {
+            if rule.severity > MAX_SEVERITY {
+                anyhow::bail!(
+                    "tool_rules.severity ({}) is out of range 0..={MAX_SEVERITY}",
+                    rule.severity
+                );
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The `AGENTGUARD_DISABLE` env var parsed into a disabled-component set.
@@ -257,17 +335,17 @@ impl Config {
 /// tokens are kept verbatim (lowercased) and simply never match a real
 /// component, so they are effectively ignored without being an error.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct EnvDisable {
+pub(crate) struct EnvDisable {
     /// All components disabled (`AGENTGUARD_DISABLE=1` / `true`).
-    pub all: bool,
+    pub(crate) all: bool,
     /// Explicit component names (lowercased, trimmed).
-    pub names: Vec<String>,
+    pub(crate) names: Vec<String>,
 }
 
 impl EnvDisable {
     /// Parse a raw `AGENTGUARD_DISABLE` value. An absent var maps to `None` at
     /// the call site; here `raw` is the present value.
-    pub fn parse(raw: &str) -> Self {
+    pub(crate) fn parse(raw: &str) -> Self {
         let trimmed = raw.trim().to_ascii_lowercase();
         if trimmed == "1" || trimmed == "true" {
             return Self {
@@ -769,5 +847,137 @@ mod tests {
             severitiy = 9
         "#;
         assert!(toml::from_str::<Config>(text).is_err(), "must reject");
+    }
+
+    // ---- Story M5: Config::validate() cross-field invariants ----
+
+    #[test]
+    fn validate_accepts_default_config() {
+        // The default config (and by extension an empty TOML) must always pass.
+        Config::default().validate().expect("defaults are valid");
+    }
+
+    #[test]
+    fn validate_accepts_valid_non_default_config() {
+        // The round-trip fixture exercises every field with sane values; it
+        // must pass validation (level preset known, severities in range,
+        // warn_at <= block_at, patterns non-empty).
+        non_default_config().validate().expect("fixture is valid");
+    }
+
+    #[test]
+    fn validate_accepts_equal_thresholds_boundary() {
+        // warn_at == block_at is allowed (<=): severity == block_at blocks,
+        // everything below allows — a coherent (if coarse) configuration.
+        let cfg = Config {
+            thresholds: Thresholds {
+                block_at: 6,
+                warn_at: 6,
+            },
+            ..Config::default()
+        };
+        cfg.validate().expect("equal thresholds are valid");
+    }
+
+    #[test]
+    fn validate_rejects_inverted_thresholds() {
+        let cfg = Config {
+            thresholds: Thresholds {
+                block_at: 5,
+                warn_at: 8,
+            },
+            ..Config::default()
+        };
+        let err = cfg.validate().expect_err("inverted thresholds must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("warn_at") && msg.contains("block_at"),
+            "error must name both offending fields: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_unknown_level_preset() {
+        let cfg = Config {
+            level: Some("strick".to_string()),
+            ..Config::default()
+        };
+        let err = cfg.validate().expect_err("typo'd preset must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("strick") && msg.contains("strict"),
+            "error must name the bad value and a valid option: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_custom_block_pattern() {
+        let cfg = Config {
+            custom_blocks: vec![CustomBlock {
+                pattern: String::new(),
+                severity: 9,
+                category: "oops".to_string(),
+            }],
+            ..Config::default()
+        };
+        let err = cfg.validate().expect_err("empty pattern must fail");
+        assert!(
+            format!("{err:#}").contains("custom_blocks.pattern"),
+            "error must name the offending field"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_severities() {
+        // custom_blocks severity above the documented 0..=9 scale.
+        let cfg = Config {
+            custom_blocks: vec![CustomBlock {
+                pattern: "boom".to_string(),
+                severity: 10,
+                category: "scale".to_string(),
+            }],
+            ..Config::default()
+        };
+        assert!(cfg.validate().is_err(), "severity 10 must fail");
+
+        // tool_rules severity far out of range.
+        let cfg = Config {
+            tool_rules: vec![ToolRule {
+                tool: "Bash".to_string(),
+                arg: "command".to_string(),
+                pattern: "boom".to_string(),
+                severity: 200,
+            }],
+            ..Config::default()
+        };
+        let err = cfg.validate().expect_err("severity 200 must fail");
+        assert!(
+            format!("{err:#}").contains("tool_rules.severity"),
+            "error must name the offending field: {err:#}"
+        );
+    }
+
+    #[test]
+    fn load_fails_closed_on_invalid_cross_field_combo() {
+        // A config that PARSES but violates an invariant must fail the LOAD
+        // path (same loud Err as a parse error), not silently load.
+        let dir = std::env::temp_dir().join(format!(
+            "agentguard-validate-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("agentguard.toml");
+        std::fs::write(&path, "[thresholds]\nblock_at = 5\nwarn_at = 8\n").unwrap();
+        let err = Config::load(Some(&path)).expect_err("invalid combo must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid configuration") && msg.contains("warn_at"),
+            "error must carry the file context and the invariant: {msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

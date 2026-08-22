@@ -138,7 +138,7 @@ fn toolchain_write_paths() -> Vec<std::path::PathBuf> {
 /// `workspace_root` must already be canonicalized (the runner does this before
 /// calling). Returns a [`SandboxError::Landlock`] carrying an actionable
 /// taxonomy message if the kernel can't enforce Landlock.
-pub fn apply(tier: PermissionTier, workspace_root: &Path) -> Result<()> {
+pub(crate) fn apply(tier: PermissionTier, workspace_root: &Path) -> Result<()> {
     if matches!(tier, PermissionTier::DangerFullAccess) {
         return Ok(());
     }

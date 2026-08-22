@@ -7,9 +7,9 @@
 //! ignored. With an empty `config.packs` (the default) [`enabled_rules`] yields
 //! nothing, so the gate is byte-identical to the no-packs build.
 
-pub mod cloud;
-pub mod container;
-pub mod db;
+mod cloud;
+mod container;
+mod db;
 
 use crate::gate::taxonomy::DestructiveRule;
 
@@ -32,7 +32,9 @@ fn rules_for(name: &str) -> Option<&'static [DestructiveRule]> {
 //
 // TODO(v0.2.x): rule-level exclude (a `pack_exclude: Vec<String>` of rule ids)
 // — include-only for now to avoid over-engineering the v0.1 keystone.
-pub fn enabled_rules(names: &[String]) -> impl Iterator<Item = &'static DestructiveRule> + '_ {
+pub(crate) fn enabled_rules(
+    names: &[String],
+) -> impl Iterator<Item = &'static DestructiveRule> + '_ {
     names
         .iter()
         .filter_map(|name| rules_for(name))
