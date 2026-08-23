@@ -32,7 +32,7 @@ const https = require("https");
 const crypto = require("crypto");
 const { spawnSync, execFileSync } = require("child_process");
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 
 // Base URL for release artifacts. Overridable for testing / mirrors.
 const BASE_URL =

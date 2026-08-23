@@ -11,7 +11,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/SuarezPM/apohara-agentguard/release.yml?style=for-the-badge&label=CI)](https://github.com/SuarezPM/apohara-agentguard/actions)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=for-the-badge)](#-license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-0.3.0-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
+[![Version](https://img.shields.io/badge/version-0.4.0-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
 [![Sandbox](https://img.shields.io/badge/sandbox-seccomp%2BLandlock-success?style=for-the-badge)](#-how-it-works--honesty)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/SuarezPM/apohara-agentguard/badge?style=for-the-badge)](https://scorecard.dev/viewer/?uri=github.com/SuarezPM/apohara-agentguard)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13128/badge?style=for-the-badge)](https://www.bestpractices.dev/projects/13128)
@@ -120,7 +120,7 @@ export AGENTGUARD_DISABLE=1   # or: disable = true in the config file
 apohara-agentguard version
 ```
 
-**Subcommands:** `check <cmd>` (gate) · `ask <cmd>` (v0.3: gate + policy engine) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `version`.
+**Subcommands:** `check <cmd>` (gate) · `ask <cmd>` (v0.3: gate + policy engine) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `audit verify` (SHA-256 hash-chain check on the JSONL audit log: tamper / truncation detection) · `version`.
 
 **Other acquisition paths.** A thin `npx apohara-agentguard` launcher resolves the release binary by platform × arch × libc; `cargo install --git https://github.com/SuarezPM/apohara-agentguard apohara-agentguard --locked` builds from source (the supported path for musl Linux and any platform without a pinned artifact; the package is named so cargo skips the in-repo fuzz crate).
 
@@ -237,10 +237,10 @@ Where the hook contract actually ships today, stated plainly:
 |---|---|---|
 | **Claude Code** | Supported today | Ships as a plugin: manifest + hook config wire `apohara-agentguard hook` to `PreToolUse` / `PostToolUse` / `UserPromptSubmit` ([packaging/plugin.json](packaging/plugin.json), [packaging/hooks.json](packaging/hooks.json)). |
 | **OpenAI Codex** | Hook contract supported | Codex's `PreToolUse` payload is snake_case and identical to what the hook already parses; camelCase field spellings are accepted as aliases. Bash-command protection works identically; Codex's `apply_patch` edit tool is **not** mapped to the path-guard yet, so treat Codex wiring as Bash protection today. |
-| **OpenCode · Kilo Code · Kitty-Code** | Planned (v0.4 / v0.5) | Thin per-host shims over the same engine. Not shipped — do not rely on them. |
-| **MCP gateway** | Planned (v0.4 / v0.5) | MCP-as-transport-proxy (default-deny tool gating between agent and server). The read-only MCP _tool form_ (`check_command` / `scan_prompt` via `apohara-agentguard mcp`) ships today; the gateway does not. |
+| **OpenCode · Kilo Code · Kitty-Code** | Supported (v0.4) | OpenCode and Kilo Code run a plugin shim that spawns the binary per call, fail-closed; Kitty-Code takes the library-embed route (path dependency, ~µs per check), a failsafe augmenting its built-in Guard. |
+| **MCP gateway** | Supported (v0.4) | Ships as `agentguard-proxy`: TOFU SHA-256 pinning of the server's tool manifest with quarantine-on-drift; deliberate default-allow for ungoverned calls, with policy rules + a command/script deep check enforcing on governed ones. |
 
-A minimal auto-wiring command (`agentguard init`) that detects Claude Code / Codex installs and appends the hook configuration is implemented on `main` — it ships in v0.4.0 (`agentguard init --yes` to apply, plain `init` dry-runs, `--undo` removes immediately — no confirmation prompt). Until then, wire the hook yourself ([Quick Start](#-quick-start)).
+An auto-wiring command (`agentguard init`) detects supported installs (Claude Code, OpenAI Codex, OpenCode, Kilo Code, kitty-code) and appends the hook configuration (`agentguard init --yes` to apply, plain `init` dry-runs, `--undo` removes immediately — no confirmation prompt).
 
 ---
 
@@ -258,21 +258,21 @@ A minimal auto-wiring command (`agentguard init`) that detects Claude Code / Cod
 
 ### v0.4 — Multi-host + transport-layer MCP
 
-- [ ] **Adapters for Cursor / Copilot / Cline / Kiro** — currently Claude Code + Codex only
-- [ ] **MCP as a transport proxy** — default-deny, hide destructive tools, budget / spending caps between the agent and the MCP server (not just a tool form)
-- [ ] **Cryptographically-signed per-action audit trail** — every gated action emits a verifiable record
+- [x] **Adapters for OpenCode / Kilo Code / Kitty-Code** (+ Claude Code, Codex since v0.3) — Cursor / Copilot / Cline / Kiro were descoped in favor of the MCP gateway fallback.
+- [x] **MCP as a transport proxy** — shipped as `agentguard-proxy`: TOFU pinning + quarantine-on-drift; deliberately default-allow (policy rules + the command/script deep check enforce); measured 87.5% block @ 0% added FPR on the committed corpus.
+- [x] **Audit trail** — SHA-256 hash chain + `audit verify` (tamper/truncation detection); cryptographic signatures (Ed25519) deferred until compliance demand.
 
 ### v0.5+ — Polish, depth, honest opt-ins
 
-- [ ] **Community policy / plugin packs** — a registry of declarative policies others can import
-- [ ] **MiniBERT semantic-classifier tier** — **opt-in isolated sidecar only**; honestly framed as "raises paraphrase recall, not prevention" (gated on an accuracy ship-gate that beats today's 379 / 400 TensorTrust FN; default build stays model-free)
-- [ ] **eBPF / BPF-LSM enforcement** — real enforcement path, not just telemetry
+- [x] **Community policy / plugin packs** — shipped in v0.4 (TOML format, fail-closed loader, 3 examples).
+- **MiniBERT semantic-classifier tier** — **DESCOPED** (cou-1 review cut it: supply-chain surface + perpetual weight maintenance for an informational function; revisits only on real demand).
+- **eBPF / BPF-LSM enforcement** — **NO-GO (documented)** for the default build; the five GO-flip conditions live in the decision record ([docs/ebpf-spike-go-nogo.md](docs/ebpf-spike-go-nogo.md)).
 
 ### Transversal
 
 - [x] **Default-build purity guard** — CI keeps the lean default free of any model / wasm / eBPF runtime (`cargo tree -e normal` denial set)
 - [x] **External Tensor Trust** human-attack benchmark — 379 / 400 = 94.8% FN published
-- [ ] **Add the Mirror paraphrase corpus** as a second external benchmark — stress-test paraphrasing, the documented weakness of any regex/injection detector
+- [x] **Mirror paraphrase corpus published** as a second external benchmark — 100% FN paraphrases / 0% FP controls: the signature ceiling made measurable.
 
 ### Done (since v0.1)
 

@@ -33,7 +33,7 @@
 
 set -eu
 
-VERSION="${AGENTGUARD_VERSION:-0.3.0}"
+VERSION="${AGENTGUARD_VERSION:-0.4.0}"
 BASE_URL="${AGENTGUARD_DOWNLOAD_BASE:-https://github.com/SuarezPM/apohara-agentguard/releases/download/v${VERSION}}"
 PREFIX="${AGENTGUARD_PREFIX:-${HOME}/.local/share/apohara-agentguard}"
 

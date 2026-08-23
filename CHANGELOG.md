@@ -5,7 +5,53 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-08-23
+
+### Added
+
+- **Provider-agnostic adapters over a canonical IR** (`src/adapters/`): Claude
+  Code, Codex, and Kilo Code are parsed and formatted through one intermediate
+  representation with capability-driven output — the Ask→Deny degradation on
+  hosts that cannot ask is fixed by construction instead of per-host special
+  cases.
+- **`agentguard init` extended to five hosts** (`claude-code`, `codex-code`,
+  `opencode`, `kilo`, `kitty-code`): dry-run by default, `--yes` applies,
+  `--undo` removes immediately; writes are atomic and a corrupt host config is
+  refused with exit 2 and zero writes.
+- **OpenCode / Kilo Code plugin shim** (`packaging/opencode/agentguard-shim.mjs`):
+  a spawn-per-call bridge so plugin-only hosts reach the same binary the hooks
+  use.
+- **`agentguard-proxy` MCP transport proxy**: a second binary that sits between
+  agent and MCP server — TOFU SHA-256 pinning of the tools/list manifest with
+  quarantine-on-drift, NDJSON strict framing, and policy-gated `tools/call`
+  with a role-split deep check routing command/script-shaped arguments through
+  the anti-bypass gate.
+- **SHA-256 hash-chained audit trail** with `agentguard audit verify`: tamper
+  and tail-truncation detection over the decision log (Ed25519 signatures and
+  key rotation deferred until compliance demand).
+- **Community rule packs**: TOML-format rule files behind a fail-closed loader
+  with schema validation; three example packs ship in-tree.
+- **Measured MCP tool-call corpus** (`evals/mcp/`, 43 cases): a 87.5%
+  dangerous-shell block rate at 0% added false positives, including the
+  authoring class — closing what was an open measurement for the proxy.
+- **Mirror paraphrase benchmark published** (`evals/mirror/`): 100% FN on
+  paraphrased attacks / 0% FP on benign controls — the honest signature-ceiling
+  worst case, now measured ([BENCHMARK.md](BENCHMARK.md)).
+- **eBPF / BPF-LSM go/no-go decision documented**
+  ([docs/ebpf-spike-go-nogo.md](docs/ebpf-spike-go-nogo.md)): NO-GO for the
+  default build, with the five conditions that would flip it recorded.
+
+### Changed
+
+- **Typed spans on every policy-load error** (D2): rustc-style code frames,
+  zero new dependencies.
+- **Monotonic config tightening** (D3): layered user + project loading where
+  the project layer can only harden the user posture, never loosen it.
+- **CLI `scan` / `check` / `ask` reasons neutralized** like the MCP surface.
+- **Landlock grants execute on `/opt` toolcache paths**, so GitHub Actions
+  runners can execute hosted toolchains inside the sandbox.
+
+## [0.3.0] - 2026-08-22
 
 ### Added
 
@@ -164,6 +210,8 @@ safety layer for AI coding agents: one Rust binary, no network at scan time.
 - **Dual license**: MIT OR Apache-2.0; third-party licenses enumerated in
   `THIRD-PARTY-LICENSES` and gated by `cargo deny check licenses`.
 
-[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/SuarezPM/apohara-agentguard/releases/tag/v0.1.0
