@@ -53,7 +53,15 @@ const COMPONENT_CANARY: &str = "canary";
 
 /// Record a Block/Warn/Ask decision to the audit log (no-op when audit is
 /// disabled, or the verdict is Allow). Best-effort and verdict-isolated.
-fn audit_decision(input: &HookInput, verdict: &Verdict, config: &Config) {
+/// `policy_fingerprint` is stamped onto the record only when a policy file
+/// was actually loaded for this decision (`None` keeps the JSONL line
+/// byte-identical to the no-policy schema).
+fn audit_decision(
+    input: &HookInput,
+    verdict: &Verdict,
+    config: &Config,
+    policy_fingerprint: Option<&str>,
+) {
     if !config.audit.enabled {
         return;
     }
@@ -94,14 +102,17 @@ fn audit_decision(input: &HookInput, verdict: &Verdict, config: &Config) {
     };
 
     let (rule_id, category) = parse_rule_label(&verdict.reason);
-    let rec = AuditRecord::new(
-        event,
-        decision,
-        rule_id,
-        category,
-        surface.map(str::to_string),
-        command,
-    );
+    let rec = AuditRecord {
+        policy_fingerprint: policy_fingerprint.map(str::to_string),
+        ..AuditRecord::new(
+            event,
+            decision,
+            rule_id,
+            category,
+            surface.map(str::to_string),
+            command,
+        )
+    };
     audit::record(&config.audit, &rec);
 }
 

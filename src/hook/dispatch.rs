@@ -92,12 +92,13 @@ pub fn run_with_source(
         return session_start_output(&input, config, &env_disabled);
     }
 
-    let verdict = dispatch(&input, config, src, &env_disabled);
+    let (verdict, policy_fingerprint) = dispatch(&input, config, src, &env_disabled);
 
     // Best-effort audit (D): record Block/Warn gate + firewall decisions. This
     // call is verdict-isolated — it NEVER alters `verdict` or the returned
-    // (stdout, exit). Allow is not logged (keep the log minimal).
-    audit_decision(&input, &verdict, config);
+    // (stdout, exit). Allow is not logged (keep the log minimal). The policy
+    // fingerprint (when a policy file was loaded) is stamped onto the record.
+    audit_decision(&input, &verdict, config, policy_fingerprint.as_deref());
 
     crate::contract::emit(&input.hook_event_name, &verdict)
 }
@@ -120,36 +121,41 @@ fn kill_switch_active(config: &Config, env_disabled: &EnvDisable) -> bool {
     config.disable || env_disabled.all
 }
 
-/// Route a parsed input to the right evaluator and return its [`Verdict`].
+/// Route a parsed input to the right evaluator and return its [`Verdict`]
+/// plus the policy fingerprint (`Some` only when a policy file was actually
+/// loaded by the PreToolUse policy pass; `None` otherwise).
 fn dispatch(
     input: &HookInput,
     config: &Config,
     src: &dyn ContentSource,
     env_disabled: &EnvDisable,
-) -> Verdict {
+) -> (Verdict, Option<String>) {
     match input.hook_event_name.as_str() {
         "PreToolUse" => dispatch_pretooluse(input, config, src, env_disabled),
 
         // PostToolUse + Bash: scan captured stdout, WARN-only (cannot block).
-        "PostToolUse" => dispatch_posttooluse(input, config, src, env_disabled),
+        "PostToolUse" => (dispatch_posttooluse(input, config, src, env_disabled), None),
 
         // UserPromptSubmit: firewall scan of the prompt, WARN-only (exit 2 erases
         // it). Bypassed when the firewall component is disabled.
         "UserPromptSubmit" if config.is_component_disabled(COMPONENT_FIREWALL, env_disabled) => {
-            Verdict::allow()
+            (Verdict::allow(), None)
         }
         "UserPromptSubmit" => match input.prompt.as_deref() {
-            Some(text) => firewall::scan_surface(
-                Surface::UserPrompt,
-                &FirewallInput::inline(text),
-                src,
-                &config.effective_thresholds(),
+            Some(text) => (
+                firewall::scan_surface(
+                    Surface::UserPrompt,
+                    &FirewallInput::inline(text),
+                    src,
+                    &config.effective_thresholds(),
+                ),
+                None,
             ),
-            None => Verdict::allow(),
+            None => (Verdict::allow(), None),
         },
 
         // Unknown event: fail open.
-        _ => Verdict::allow(),
+        _ => (Verdict::allow(), None),
     }
 }
 
@@ -165,22 +171,25 @@ fn dispatch(
 /// tool-rule verdicts are combined by [`max_verdict`] — the MORE SEVERE wins.
 /// With the default empty `tool_rules`, [`tool_rule_verdict`] returns Allow, so
 /// the combine is a no-op and behavior is byte-identical to before.
+///
+/// Returns `(verdict, policy_fingerprint)`; the fingerprint is `Some` only
+/// when a policy file was actually loaded by [`policy_engine_evaluate`].
 fn dispatch_pretooluse(
     input: &HookInput,
     config: &Config,
     src: &dyn ContentSource,
     env_disabled: &EnvDisable,
-) -> Verdict {
+) -> (Verdict, Option<String>) {
     let builtin = dispatch_pretooluse_builtin(input, config, src, env_disabled);
     // Precedence: the more severe of the built-in check and any tool_rule match
     // wins. Empty tool_rules => Allow => `builtin` is returned unchanged.
     let with_rules = max_verdict(builtin, tool_rule_verdict(input, config));
-    // Policy engine pass (v0.3). `policy_engine_evaluate` is a no-op
-    // combine in Story 1; Story 2 replaces the body with the real
-    // engine. With `Config::default()` (no policy loaded) the
-    // `policy_engine_evaluate` returns `Verdict::allow()` and this
-    // `max_verdict` is a no-op.
-    max_verdict(with_rules, policy_engine_evaluate(input, config))
+    // Policy engine pass (v0.3). With `Config::default()` (no policy loaded)
+    // `policy_engine_evaluate` returns `(Verdict::allow(), None)` and this
+    // `max_verdict` is a no-op. The fingerprint is surfaced regardless of
+    // which verdict wins — it stamps the policy that was in force.
+    let (policy_verdict, fingerprint) = policy_engine_evaluate(input, config);
+    (max_verdict(with_rules, policy_verdict), fingerprint)
 }
 
 /// The pre-existing per-tool PreToolUse checks (Bash gate, Read/Write/Edit
@@ -379,7 +388,11 @@ pub(crate) fn tier_rank(tier: Tier) -> u8 {
 /// The v0.3 policy engine pass. Loads the policy from
 /// `config.policy.file` (when set) and evaluates the input; the verdict
 /// is composed with the built-in checks via `max_verdict` in
-/// `dispatch_pretooluse`.
+/// `dispatch_pretooluse`. Returns `(verdict, fingerprint)` where the
+/// fingerprint is the SHA-256 hex of the loaded policy's canonical
+/// representation — `Some` ONLY when a policy file was actually loaded
+/// (a configured-but-failed load is fail-closed Block with NO
+/// fingerprint, since no policy was in force).
 ///
 /// ## Failure posture (fail-closed)
 ///
@@ -395,19 +408,24 @@ pub(crate) fn tier_rank(tier: Tier) -> u8 {
 /// asserts that with `Config::default()` (no `policy.file`), the hook
 /// `(out, code)` matches the built-in checks alone — the engine is a
 /// true no-op combine.
-fn policy_engine_evaluate(input: &HookInput, config: &Config) -> Verdict {
+fn policy_engine_evaluate(input: &HookInput, config: &Config) -> (Verdict, Option<String>) {
     let path = config.policy.file.as_deref();
     let set = match crate::policy::engine::PolicySet::load(path) {
         Ok(s) => s,
         Err(e) => {
             // Fail-closed: a load error is a hard refusal. The
-            // dispatcher will surface this as a Block verdict.
-            return Verdict::block(format!("policy load error (fail-closed): {e}"));
+            // dispatcher will surface this as a Block verdict. No
+            // fingerprint: no policy was loaded.
+            return (
+                Verdict::block(format!("policy load error (fail-closed): {e}")),
+                None,
+            );
         }
     };
     // The engine returns a regular `Verdict`; no exotic variants to
     // match against.
-    set.evaluate(input, config)
+    let fingerprint = set.fingerprint().map(str::to_string);
+    (set.evaluate(input, config), fingerprint)
 }
 
 /// PostToolUse dispatch: only Bash stdout is scanned (WARN-only, cannot block).
@@ -575,14 +593,16 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.policy.file.is_none(), "precondition: no policy file");
 
-        // The slot itself returns Allow.
+        // The slot itself returns Allow with no fingerprint.
         let json = pretooluse_bash("rm -rf ~");
         let input: HookInput = serde_json::from_str(&json).unwrap();
+        let (slot_verdict, slot_fp) = policy_engine_evaluate(&input, &cfg);
         assert_eq!(
-            policy_engine_evaluate(&input, &cfg),
+            slot_verdict,
             Verdict::allow(),
             "policy slot must be a no-op combine with no policy loaded"
         );
+        assert!(slot_fp.is_none(), "no policy file => no fingerprint");
 
         // The full dispatch still matches the built-in path alone.
         let inj = CannedSource(INJECTION);
@@ -591,5 +611,85 @@ mod tests {
         let (exp_out, exp_code) = crate::contract::emit("PreToolUse", &builtin);
         assert_eq!(code, exp_code, "exit code differs after Story-1 wiring");
         assert_eq!(out, exp_out, "stdout differs after Story-1 wiring");
+    }
+
+    // ---- Policy fingerprint stamping (SEC5) ----
+
+    /// Unique temp dir for audit/policy files (pid + atomic counter, same
+    /// discipline as the engine tests).
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "agentguard-dispatch-{tag}-{pid}-{n}",
+            pid = std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn policy_fingerprint_present_in_audit_jsonl_with_policy() {
+        let dir = temp_dir("fp-present");
+        let policy_path = dir.join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            "schema_version = 1\n[defaults]\ndefault_action = \"allow\"\n",
+        )
+        .unwrap();
+        let log = dir.join("audit.jsonl");
+        let cfg = Config {
+            policy: crate::config::PolicyConfig {
+                file: Some(policy_path),
+            },
+            audit: crate::audit::AuditConfig {
+                enabled: true,
+                path: Some(log.clone()),
+                include_command: false,
+            },
+            ..Config::default()
+        };
+
+        // A Block verdict (gate) under a loaded policy — the record must
+        // carry the policy fingerprint.
+        let (out, code) = run(&pretooluse_bash("rm -rf ~"), &cfg);
+        assert_eq!(code, 2);
+        assert!(out.is_some());
+
+        let body = std::fs::read_to_string(&log).expect("audit file written");
+        let rec: serde_json::Value =
+            serde_json::from_str(body.lines().next().unwrap()).expect("valid JSONL");
+        let fp = rec["policy_fingerprint"]
+            .as_str()
+            .expect("policy_fingerprint present when a policy was loaded");
+        assert_eq!(fp.len(), 64, "SHA-256 hex fingerprint, got: {fp}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn policy_fingerprint_absent_in_audit_jsonl_without_policy() {
+        let dir = temp_dir("fp-absent");
+        let log = dir.join("audit.jsonl");
+        let cfg = Config {
+            audit: crate::audit::AuditConfig {
+                enabled: true,
+                path: Some(log.clone()),
+                include_command: false,
+            },
+            ..Config::default()
+        };
+
+        let (_out, code) = run(&pretooluse_bash("rm -rf ~"), &cfg);
+        assert_eq!(code, 2);
+
+        let body = std::fs::read_to_string(&log).expect("audit file written");
+        let rec: serde_json::Value =
+            serde_json::from_str(body.lines().next().unwrap()).expect("valid JSONL");
+        assert!(
+            rec.get("policy_fingerprint").is_none(),
+            "no policy loaded => field must be skipped entirely; got: {rec}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

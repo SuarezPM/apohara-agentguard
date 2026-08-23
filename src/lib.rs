@@ -9,6 +9,7 @@ pub mod firewall;
 pub mod gate;
 pub mod hook;
 pub mod mcp;
+mod neutralize;
 pub mod policy;
 pub mod sandbox;
 pub mod verdict;

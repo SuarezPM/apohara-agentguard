@@ -173,6 +173,15 @@ fn tools_call(params: &Value, config: &Config) -> Result<Value, (i64, String)> {
         other => return Err((INVALID_PARAMS, format!("unknown tool: {other}"))),
     };
 
+    // Display-layer neutralization at the MCP response boundary: verdict
+    // reasons can carry untrusted-derived text, so hidden bidi/zero-width
+    // controls, chat-role line impersonation, pseudo-tags, and markdown
+    // fence runs are rewritten to visible ASCII before the verdict is
+    // embedded in the tool result. Identity on clean text, so parity with
+    // direct engine calls is preserved.
+    let mut verdict = verdict;
+    neutralize_verdict(&mut verdict);
+
     // serde_json on a Verdict never fails (no map keys, no non-finite floats).
     let structured = serde_json::to_value(&verdict)
         .map_err(|e| (INVALID_PARAMS, format!("serialize verdict: {e}")))?;
@@ -191,6 +200,16 @@ fn string_arg(arguments: &Value, key: &str) -> Result<String, (i64, String)> {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or((INVALID_PARAMS, format!("missing string argument: {key}")))
+}
+
+/// Apply the display-layer neutralization to a verdict's free-text fields
+/// (reason + feedback) in place. See [`crate::neutralize`] for the rules.
+/// Identity on clean text.
+fn neutralize_verdict(verdict: &mut crate::verdict::Verdict) {
+    verdict.reason = crate::neutralize::neutralize(&verdict.reason).into_owned();
+    if let Some(fb) = verdict.feedback.as_deref() {
+        verdict.feedback = Some(crate::neutralize::neutralize(fb).into_owned());
+    }
 }
 
 /// Build a JSON-RPC success response string.
@@ -301,6 +320,33 @@ mod tests {
         let text = result["content"][0]["text"].as_str().unwrap();
         let from_text: Verdict = serde_json::from_str(text).unwrap();
         assert_eq!(from_text, verdict_of(&result));
+    }
+
+    #[test]
+    fn tool_result_neutralizes_embedded_bidi_chars() {
+        // The MCP response boundary must rewrite hidden bidi overrides in
+        // verdict free-text into the visible `\u{202b}` escape form. (The
+        // real gate pipeline re-encodes non-ASCII legs before echoing, so
+        // the boundary transform is exercised directly on the verdict it
+        // would carry — same shape the gate produces for such a command.)
+        let mut v = crate::verdict::Verdict::block(
+            "blocked dangerous leg `rm -rf ~/a\u{202b}b` (destructive [rm-rf])",
+        )
+        .with_feedback("the leg `rm -rf ~/a\u{2066}b` matches destructive [rm-rf]");
+        neutralize_verdict(&mut v);
+        assert!(
+            v.reason.contains("\\u{202b}"),
+            "expected visible escape placeholder, got: {}",
+            v.reason
+        );
+        assert!(
+            !v.reason.contains('\u{202b}')
+                && !v.feedback.as_deref().unwrap_or("").contains('\u{2066}'),
+            "raw bidi codepoints must not survive the MCP boundary: {v:?}"
+        );
+        assert!(v.feedback.as_deref().unwrap_or("").contains("\\u{2066}"));
+        // Clean fragments stay untouched.
+        assert!(v.reason.contains("(destructive [rm-rf])"));
     }
 
     #[test]

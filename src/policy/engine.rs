@@ -41,6 +41,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::Config;
@@ -90,6 +91,12 @@ pub struct PolicySet {
     /// The on-disk policy (post-load). `defaults`, `tools`, `budgets` are
     /// consulted by `evaluate`.
     file: PolicyFile,
+    /// SHA-256 hex fingerprint of the canonical policy representation —
+    /// present ONLY when a policy file was actually loaded (`None` for the
+    /// default no-op set). Surfaced on audit records via
+    /// [`PolicySet::fingerprint`] so a decision can be tied to the exact
+    /// policy content that produced it. See [`canonical_fingerprint`].
+    fingerprint: Option<String>,
     /// Per-session counters behind a mutex. The hook path is
     /// single-threaded per-process, but the mutex is the right primitive
     /// for a shared mut field that the test suite can poke from any
@@ -99,7 +106,8 @@ pub struct PolicySet {
 
 impl Default for PolicySet {
     /// A no-op policy (matches the empty-TOML invariant: no rules, no
-    /// budgets, every `evaluate` returns `Verdict::allow()`).
+    /// budgets, every `evaluate` returns `Verdict::allow()`). No policy
+    /// file was loaded, so there is no fingerprint.
     fn default() -> Self {
         Self {
             file: PolicyFile {
@@ -113,6 +121,7 @@ impl Default for PolicySet {
                     per_tool: BTreeMap::new(),
                 },
             },
+            fingerprint: None,
             counters: Mutex::new(BTreeMap::new()),
         }
     }
@@ -121,7 +130,9 @@ impl Default for PolicySet {
 impl PolicySet {
     /// Load a policy from `path`. `None` (no path configured) yields the
     /// default no-op set; `Some(p)` where `p` does not exist is
-    /// [`PolicyError::Load`].
+    /// [`PolicyError::Load`]. On success the set carries the SHA-256
+    /// fingerprint of the canonical policy representation (see
+    /// [`canonical_fingerprint`]).
     pub fn load(path: Option<&Path>) -> Result<Self, PolicyError> {
         let Some(path) = path else {
             return Ok(Self::default());
@@ -135,9 +146,18 @@ impl PolicySet {
             ));
         }
         Ok(Self {
+            fingerprint: Some(canonical_fingerprint(&file, &text)),
             file,
             counters: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// The SHA-256 hex fingerprint of the loaded policy's canonical
+    /// representation. `None` when no policy file was loaded (the default
+    /// no-op set), so callers can distinguish "no policy" from "policy
+    /// with empty content" and omit the audit field entirely.
+    pub(crate) fn fingerprint(&self) -> Option<&str> {
+        self.fingerprint.as_deref()
     }
 
     /// Evaluate `input` against the loaded policy. Pure with respect to
@@ -295,6 +315,27 @@ impl PolicySet {
         }
         None
     }
+}
+
+/// Compute the SHA-256 hex fingerprint of a loaded policy.
+///
+/// Canonical representation choice: the **serde_json serialization of the
+/// parsed [`PolicyFile`]** (not the raw file bytes). Typed parsing normalizes
+/// away everything that does not change meaning — comments, whitespace, TOML
+/// key order, quoting style — while struct fields serialize in declaration
+/// order and `budgets.per_tool` is a `BTreeMap` (sorted), so two loads of the
+/// same policy always produce identical canonical bytes, and two
+/// semantically-identical files produce the same fingerprint. Serialization
+/// cannot fail for this schema (no non-string map keys, no floats); the raw
+/// file bytes are hashed as a defensive fallback so the path never panics.
+fn canonical_fingerprint(file: &PolicyFile, raw_text: &str) -> String {
+    let canonical = serde_json::to_vec(file).unwrap_or_else(|_| raw_text.as_bytes().to_vec());
+    let digest = Sha256::digest(&canonical);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
 }
 
 /// Resolve an `arg` key against a [`HookInput`]. The same dotted-nested
@@ -887,5 +928,64 @@ max_tokens = 2
         assert_eq!(keep_left_warn.reason, "w1", "Warn/Warn tie keeps a");
         let keep_left_ask = max_verdict_local(Verdict::ask("a1"), Verdict::ask("a2"));
         assert_eq!(keep_left_ask.reason, "a1", "Ask/Ask tie keeps a");
+    }
+
+    // ---- Policy fingerprint stamping (SEC5) ----
+
+    #[test]
+    fn fingerprint_is_stable_across_two_loads_of_same_content() {
+        let toml_a = "schema_version = 1\n[defaults]\ndefault_action = \"allow\"\n";
+        let set1 = load_from_str(toml_a);
+        let set2 = load_from_str(toml_a);
+        let fp1 = set1.fingerprint().expect("loaded set has a fingerprint");
+        let fp2 = set2.fingerprint().expect("loaded set has a fingerprint");
+        assert_eq!(fp1, fp2, "same policy content => same fingerprint");
+        assert_eq!(fp1.len(), 64, "SHA-256 hex is 64 chars");
+        assert!(fp1
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
+
+    #[test]
+    fn fingerprint_ignores_comments_whitespace_and_key_order() {
+        // The canonical form is the parsed-file serialization, so cosmetic
+        // differences must not change the fingerprint.
+        let minimal = load_from_str(
+            "schema_version = 1\n[[tools]]\nname = \"Bash\"\nallow = [\"read_file\"]\n",
+        );
+        let decorated = load_from_str(
+            r#"
+# a comment with lots of prose
+schema_version   =   1
+
+[[tools]]
+allow = ["read_file"]
+name = "Bash"   # key reordered
+"#,
+        );
+        assert_eq!(
+            minimal.fingerprint(),
+            decorated.fingerprint(),
+            "semantically identical files must share a fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_differs_across_different_files() {
+        let set_a = load_from_str("schema_version = 1\n[defaults]\ndefault_action = \"allow\"\n");
+        let set_b = load_from_str("schema_version = 1\n[defaults]\ndefault_action = \"deny\"\n");
+        assert_ne!(
+            set_a.fingerprint(),
+            set_b.fingerprint(),
+            "different policy content => different fingerprints"
+        );
+    }
+
+    #[test]
+    fn default_set_has_no_fingerprint() {
+        // No policy file loaded => None, so downstream audit records can
+        // omit the field entirely (byte-identical no-policy JSONL).
+        assert!(PolicySet::default().fingerprint().is_none());
+        assert!(PolicySet::load(None).expect("load").fingerprint().is_none());
     }
 }

@@ -18,8 +18,10 @@
 //! truncated AFTER redaction to stay well within that bound.
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 /// Hard cap on the redacted command text written to the log. Kept well under
@@ -68,6 +70,13 @@ pub struct AuditRecord {
     /// Secret-redacted, truncated command text — ONLY when opted in.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// SHA-256 hex fingerprint of the policy file that produced this
+    /// decision — present ONLY when a policy file was actually loaded.
+    /// Absent (skipped in serialization) otherwise, so no-policy JSONL
+    /// lines stay byte-identical to the pre-field schema. Declared LAST so
+    /// existing field order is untouched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_fingerprint: Option<String>,
 }
 
 impl AuditRecord {
@@ -90,6 +99,7 @@ impl AuditRecord {
             category,
             surface,
             command,
+            policy_fingerprint: None,
         }
     }
 }
@@ -133,6 +143,7 @@ pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
         category: &rec.category,
         surface: &rec.surface,
         command: command.as_deref(),
+        policy_fingerprint: &rec.policy_fingerprint,
     };
 
     let mut line = match serde_json::to_string(&line_rec) {
@@ -169,6 +180,10 @@ struct RecordLine<'a> {
     surface: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<&'a str>,
+    /// Declared LAST, mirroring [`AuditRecord`], so the JSONL field order is
+    /// unchanged and no-policy lines (field skipped) stay byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    policy_fingerprint: &'a Option<String>,
 }
 
 /// Open `path` append-only (creating it owner-only, 0600 on unix) and write the
@@ -199,16 +214,166 @@ fn truncate_bytes(s: &str, max: usize) -> String {
     s[..end].to_string()
 }
 
-/// Mask secret-shaped material in `text` before it is written to disk. Covers:
-/// - `NAME=value` where NAME is secret-shaped (`*KEY`/`*TOKEN`/`*SECRET`/
-///   `*PASSWORD`/`*PASSWD`, plus the known prefixes) -> `NAME=***`;
-/// - `-p<password>` and `--password=<val>` / `--password <val>` -> `-p***`;
-/// - `Authorization: Bearer <token>` / `Authorization: <token>` (incl. inside a
-///   `-H "..."`) -> the token replaced with `***`.
+/// Mask secret-shaped material in `text` before it is written to disk.
+///
+/// Two layers, applied in order:
+///
+/// 1. **Typed issuer table** ([`ISSUERS`]): known credential formats are
+///    detected by shape and masked to a short recognizable prefix plus
+///    `…[REDACTED-<issuer>]` (e.g. `sk-ant-api03-…[REDACTED-anthropic]`).
+///    Each entry documents its minimum-length threshold; benign lookalikes
+///    below the threshold (`sk-demo`, the word `skull`, short demo tokens)
+///    are NOT flagged. The table runs BEFORE truncation so a secret can
+///    never survive a cut, and before the legacy pass below.
+/// 2. **Legacy name-shape pass**: `NAME=value` where NAME is secret-shaped
+///    (`*KEY`/`*TOKEN`/`*SECRET`/`*PASSWORD`/`*PASSWD`, plus known prefixes)
+///    -> `NAME=***`; `-p<password>` and `--password=<val>` -> `-p***`;
+///    `Authorization: Bearer <token>` / `Authorization: <token>` (incl.
+///    inside a `-H "..."`) -> the token replaced with `***`. Values already
+///    carrying a typed `[REDACTED-…]` marker are left as-is so the more
+///    informative mask survives.
 ///
 /// This is a deliberate, bounded set — the same secret-name discipline used by
 /// the sandbox env sanitizer — not a general PII scrubber.
 pub(crate) fn redact_secrets(text: &str) -> String {
+    // Layer 1: typed issuer masks (whole-text, handles multi-line PEM blocks
+    // and bare tokens the whitespace walk below cannot see).
+    let mut out = text.to_string();
+    for issuer in ISSUERS.iter() {
+        if issuer.re.is_match(&out) {
+            out = issuer
+                .re
+                .replace_all(&out, |caps: &regex::Captures| {
+                    let whole = caps.get(0).expect("group 0 always present");
+                    let prefix_end = caps
+                        .get(1)
+                        .map(|g| g.end() - whole.start())
+                        .unwrap_or(whole.len());
+                    format!(
+                        "{}…[REDACTED-{}]",
+                        &whole.as_str()[..prefix_end],
+                        issuer.name
+                    )
+                })
+                .into_owned();
+        }
+    }
+
+    // Layer 2: legacy token walk (NAME=, -p, Authorization headers).
+    redact_by_token_walk(&out)
+}
+
+/// One typed credential issuer. `re` MUST carry capture group 1 = the short
+/// recognizable prefix kept visible in the mask (the rest of the match is
+/// replaced with `…[REDACTED-<name>]`).
+struct Issuer {
+    /// Issuer tag embedded in the mask (`REDACTED-<name>`).
+    name: &'static str,
+    /// Detection regex. Minimum-length thresholds are part of each pattern —
+    /// they are what keeps benign lookalikes (`sk-demo`, `skull`, short demo
+    /// tokens) unflagged. Documented per entry below.
+    re: Regex,
+}
+
+/// Ordered most-specific-first: a credential sharing another entry's prefix
+/// shape must be caught by its own rule first (`sk-ant-…` and `sk_live_…`
+/// before openai's generic `sk-…`; after masking, the remnant no longer
+/// satisfies the later rule's minimum length, so double-masking cannot occur).
+static ISSUERS: LazyLock<Vec<Issuer>> = LazyLock::new(|| {
+    vec![
+        // Anthropic: `sk-ant-api03-…` / `sk-ant-admin…` — ≥16 chars after the
+        // versioned prefix (real keys are far longer).
+        Issuer {
+            name: "anthropic",
+            re: Regex::new(r"\b(sk-ant-(?:api|admin)\d{2}-)[A-Za-z0-9_-]{16,}").expect("regex"),
+        },
+        // Stripe live-mode secret/restricted key: `sk_live_`/`rk_live_` +
+        // ≥16 chars. Test-mode keys (`sk_test_`) are not flagged. MUST run
+        // before the generic openai `sk-…` rule.
+        Issuer {
+            name: "stripe",
+            re: Regex::new(r"\b((?:sk|rk)_live_)[A-Za-z0-9]{16,}").expect("regex"),
+        },
+        // GitHub: `ghp_`/`gho_`/`ghs_`/`ghu_` classic/app tokens and
+        // `github_pat_` fine-grained tokens — ≥20 chars after the prefix.
+        Issuer {
+            name: "github",
+            re: Regex::new(r"\b(gh[posu]_|github_pat_)[A-Za-z0-9_]{20,}").expect("regex"),
+        },
+        // AWS access key id: `AKIA`/`ASIA` + exactly 16 UPPERCASE alphanumerics
+        // (the fixed length is the false-positive guard).
+        Issuer {
+            name: "aws",
+            re: Regex::new(r"\b((?:AKIA|ASIA))[A-Z0-9]{16}\b").expect("regex"),
+        },
+        // GitLab personal access token: `glpat-` + ≥20 chars.
+        Issuer {
+            name: "gitlab",
+            re: Regex::new(r"\b(glpat-)[A-Za-z0-9_-]{20,}").expect("regex"),
+        },
+        // GCP OAuth2 access token: `ya29.` + ≥20 chars.
+        Issuer {
+            name: "gcp",
+            re: Regex::new(r"\b(ya29\.)[A-Za-z0-9._-]{20,}").expect("regex"),
+        },
+        // PyPI API token: `pypi-` + ≥30 chars (real tokens are ~150).
+        Issuer {
+            name: "pypi",
+            re: Regex::new(r"\b(pypi-)[A-Za-z0-9_-]{30,}").expect("regex"),
+        },
+        // npm automation/deploy token: `npm_` + ≥20 chars.
+        Issuer {
+            name: "npm",
+            re: Regex::new(r"\b(npm_)[A-Za-z0-9]{20,}").expect("regex"),
+        },
+        // Hugging Face token: `hf_` + ≥20 chars.
+        Issuer {
+            name: "huggingface",
+            re: Regex::new(r"\b(hf_)[A-Za-z0-9]{20,}").expect("regex"),
+        },
+        // Slack bot/user/app tokens: `xox[baprs]-` + ≥10 chars.
+        Issuer {
+            name: "slack",
+            re: Regex::new(r"\b(xox[baprs]-)[A-Za-z0-9-]{10,}").expect("regex"),
+        },
+        // JWT: three dot-separated base64url segments, header starting with
+        // the `eyJ` signature of `{"alg"`/`{"typ"`, each segment ≥10 chars.
+        Issuer {
+            name: "jwt",
+            re: Regex::new(r"\b(eyJ)[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
+                .expect("regex"),
+        },
+        // PEM private key block: BEGIN header through END line (multi-line;
+        // the recognizable BEGIN header is what stays visible in the mask).
+        Issuer {
+            name: "pem",
+            re: Regex::new(
+                r"(-----BEGIN [A-Z ]*PRIVATE KEY-----)[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+            )
+            .expect("regex"),
+        },
+        // OpenAI: `sk-…` / `sk-proj-…` — requires ≥20 chars after the prefix
+        // (real keys are ≥40); `sk-demo`, `sk-test1` etc. stay unflagged.
+        // Runs AFTER anthropic/stripe so their `sk-…` shapes are consumed
+        // by their own rules first.
+        Issuer {
+            name: "openai",
+            re: Regex::new(r"\b(sk-(?:proj-)?)[A-Za-z0-9_-]{20,}").expect("regex"),
+        },
+        // Generic bearer credential outside an Authorization header:
+        // `Bearer ` + ≥20 token characters (short words after `Bearer` in
+        // prose stay unflagged).
+        Issuer {
+            name: "bearer",
+            re: Regex::new(r"\b([Bb]earer )[A-Za-z0-9._~+/=-]{20,}").expect("regex"),
+        },
+    ]
+});
+
+/// The legacy whitespace-token walk: `NAME=value` with a secret-shaped NAME,
+/// `-p<password>` / `--password=` flags, and `Authorization:` headers. Runs
+/// AFTER the typed issuer pass (see [`redact_secrets`]).
+fn redact_by_token_walk(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
 
     // Tokenize on whitespace but preserve the original separators so the masked
@@ -252,11 +417,15 @@ fn mask_token(token: &str, awaiting_auth_value: &mut bool) -> String {
 
     // 2) We are mid-Authorization value (the token after `Authorization:` or
     //    `Bearer`): mask the whole token unless it's the `Bearer` keyword.
+    //    A value already carrying a typed issuer mask keeps it.
     if *awaiting_auth_value {
         if body.eq_ignore_ascii_case("Bearer") {
             return format!("{open_q}{body}{close_q}");
         }
         *awaiting_auth_value = false;
+        if body.contains("[REDACTED") {
+            return format!("{open_q}{body}{close_q}");
+        }
         return format!("{open_q}***{close_q}");
     }
 
@@ -342,6 +511,11 @@ fn mask_secret_assignment(body: &str) -> Option<String> {
     let name = &body[..eq];
     let value = &body[eq + 1..];
     if name.is_empty() || value.is_empty() {
+        return None;
+    }
+    // A value already carrying a typed issuer mask keeps its more
+    // informative form — do not collapse it to `***`.
+    if value.contains("[REDACTED") {
         return None;
     }
     // `export NAME=value` — peel a leading keyword so the name shape is checked.
@@ -442,5 +616,193 @@ mod tests {
         let long = "A".repeat(1000);
         let t = truncate_bytes(&long, MAX_COMMAND_BYTES);
         assert!(t.len() <= MAX_COMMAND_BYTES);
+    }
+
+    // ---- Typed issuer table (SEC4) ----
+
+    /// Assert `secret` is replaced by a mask carrying `issuer`, with a
+    /// recognizable prefix preserved.
+    fn assert_issuer_masked(text: &str, secret: &str, issuer: &str) {
+        let out = redact_secrets(text);
+        assert!(
+            !out.contains(secret),
+            "{issuer} secret must not survive; got: {out}"
+        );
+        assert!(
+            out.contains(&format!("…[REDACTED-{issuer}]")),
+            "expected typed {issuer} mask; got: {out}"
+        );
+    }
+
+    #[test]
+    fn masks_anthropic_key_with_prefix() {
+        let key = "sk-ant-api03-AbCdEf1234567890GhIjKlMnOpQrStUv";
+        assert_issuer_masked(&format!("export ANTHROPIC_KEY={key}"), key, "anthropic");
+        let out = redact_secrets(&format!("curl -H \"x-api-key: {key}\""));
+        assert!(
+            out.contains("sk-ant-api03-…[REDACTED-anthropic]"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn masks_openai_key_with_prefix() {
+        let key = "sk-proj-A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvWxYz";
+        assert_issuer_masked(&format!("OPENAI_API_KEY={key}"), key, "openai");
+        let out = redact_secrets(&format!("echo {key}"));
+        assert!(out.contains("sk-proj-…[REDACTED-openai]"), "got: {out}");
+    }
+
+    #[test]
+    fn masks_github_tokens() {
+        for prefix in ["ghp_", "gho_", "ghs_", "ghu_"] {
+            let tok = format!("{prefix}AbCdEf1234567890GhIjKl");
+            assert_issuer_masked(&format!("git push {tok}"), &tok, "github");
+        }
+        let pat = "github_pat_11AAAAAAA0AbCdEfGhIjKlMnOp";
+        assert_issuer_masked(&format!("gh auth login --with-token {pat}"), pat, "github");
+    }
+
+    #[test]
+    fn masks_aws_access_key_id() {
+        let key = "AKIAIOSFODNN7EXAMPLE";
+        assert_issuer_masked(&format!("aws s3 cp x s3://y --no-verify {key}"), key, "aws");
+        let asia = "ASIAIOSFODNN7EXAMPLE";
+        assert_issuer_masked(&format!("AWS_ACCESS_KEY_ID={asia}"), asia, "aws");
+    }
+
+    #[test]
+    fn masks_gcp_oauth_token() {
+        let tok = "ya29.a0AfB_byAbCdEfGhIjKlMnOpQrStUvWxYz123456";
+        assert_issuer_masked(
+            &format!("gcloud auth print-access-token -> {tok}"),
+            tok,
+            "gcp",
+        );
+    }
+
+    #[test]
+    fn masks_pypi_token() {
+        let tok = "pypi-AgEIcHlwaS5vcmcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert_issuer_masked(&format!("twine upload -u __token__ -p {tok}"), tok, "pypi");
+    }
+
+    #[test]
+    fn masks_npm_token() {
+        let tok = "npm_AbCdEf1234567890GhIjKlMn";
+        assert_issuer_masked(&format!("npm publish --registry //registry.npmjs.org/ --//registry.npmjs.org/:_authToken={tok}"), tok, "npm");
+    }
+
+    #[test]
+    fn masks_huggingface_token() {
+        let tok = "hf_AbCdEf1234567890GhIjKlMnOpQrStUv";
+        assert_issuer_masked(
+            &format!("huggingface-cli login --token {tok}"),
+            tok,
+            "huggingface",
+        );
+    }
+
+    #[test]
+    fn masks_stripe_live_keys_but_not_test_mode() {
+        let sk = "sk_live_AbCdEf1234567890";
+        assert_issuer_masked(&format!("stripe listen --api-key {sk}"), sk, "stripe");
+        let rk = "rk_live_AbCdEf1234567890";
+        assert_issuer_masked(&format!("STRIPE_KEY={rk}"), rk, "stripe");
+        // Test-mode keys are not live credentials — left alone.
+        let test = "sk_test_AbCdEf1234567890";
+        assert!(redact_secrets(test).contains(test));
+    }
+
+    #[test]
+    fn masks_slack_tokens() {
+        for prefix in ["xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-"] {
+            let tok = format!("{prefix}1234567890-abcdef");
+            assert_issuer_masked(
+                &format!("slack chat.postMessage --token {tok}"),
+                &tok,
+                "slack",
+            );
+        }
+    }
+
+    #[test]
+    fn masks_jwt_three_segments() {
+        let jwt = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U";
+        assert_issuer_masked(
+            &format!("curl -H \"Authorization: Bearer {jwt}\" api"),
+            jwt,
+            "jwt",
+        );
+        let out = redact_secrets(jwt);
+        assert!(out.starts_with("eyJ…[REDACTED-jwt]"), "got: {out}");
+    }
+
+    #[test]
+    fn masks_pem_private_key_block() {
+        let pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA7\nabc\n-----END RSA PRIVATE KEY-----";
+        let out = redact_secrets(&format!("cat > key.pem <<'EOF'\n{pem}\nEOF"));
+        assert!(
+            !out.contains("MIIEowIBAAKCAQEA7"),
+            "key body must not hit disk; got: {out}"
+        );
+        assert!(
+            out.contains("-----BEGIN RSA PRIVATE KEY-----…[REDACTED-pem]"),
+            "recognizable BEGIN header must be preserved; got: {out}"
+        );
+    }
+
+    #[test]
+    fn masks_generic_bearer_outside_header() {
+        let tok = "AbCdEf1234567890GhIjKlMnOpQrStUv";
+        let out = redact_secrets(&format!(
+            "http GET api.example.com Authorization:{tok} Bearer {tok}"
+        ));
+        assert!(!out.contains(tok), "got: {out}");
+        assert!(out.contains("Bearer …[REDACTED-bearer]"), "got: {out}");
+    }
+
+    // ---- Lookalike negatives (must NOT be flagged) ----
+
+    #[test]
+    fn benign_lookalikes_are_not_flagged() {
+        let cases = [
+            // The word itself, no credential shape.
+            "the skull emoji is popular",
+            // Short demo keys below the openai length threshold.
+            "sk-demo",
+            "sk-test1234",
+            "echo sk-short",
+            // AWS prefix without the exact 16-uppercase tail.
+            "AKIAabc123def456",
+            "AKIA1234",
+            // GitHub prefixes below the length threshold.
+            "ghp_short",
+            // Slack-ish but not a token shape.
+            "xoxo gossip column",
+            // Bearer followed by prose.
+            "Bearer of good news",
+            // eyJ without three full segments.
+            "eyJhbGciOiJIUzI1NiIs",
+        ];
+        for c in cases {
+            assert_eq!(
+                redact_secrets(c),
+                c,
+                "benign lookalike must pass through unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_mask_survives_secret_named_assignment() {
+        // A long provider key inside a secret-shaped assignment keeps its
+        // typed mask instead of being collapsed to `***`.
+        let key = "sk-ant-api03-AbCdEf1234567890GhIjKlMnOpQrStUv";
+        let out = redact_secrets(&format!("export ANTHROPIC_API_KEY={key}"));
+        assert!(
+            out.contains("ANTHROPIC_API_KEY=sk-ant-api03-…[REDACTED-anthropic]"),
+            "typed mask must win over NAME=***; got: {out}"
+        );
     }
 }
