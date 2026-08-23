@@ -1,10 +1,13 @@
 name: Release
 
 # Builds the v0.1 cross-platform binaries, regenerates THIRD-PARTY-LICENSES,
-# and emits a SHA256 manifest of the artifacts. It does NOT auto-publish: tag
-# creation, GitHub Release submission, and crates.io/npm publish are left to a
-# maintainer. Trigger manually (workflow_dispatch) or on a v* tag to assemble
-# the artifact set for review.
+# and emits a SHA256 manifest of the artifacts. Each binary carries an
+# embedded dependency inventory (SBOM) injected by cargo-auditable at BUILD
+# time — strictly upstream of SHA256 hashing and SLSA attestation, so hashes
+# and provenance describe exactly the shipped bytes. It does NOT auto-publish:
+# tag creation, GitHub Release submission, and crates.io/npm publish are left
+# to a maintainer. Trigger manually (workflow_dispatch) or on a v* tag to
+# assemble the artifact set for review.
 
 on:
   workflow_dispatch:
@@ -95,6 +98,26 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      # SBOM story: embed a dependency inventory into each binary at BUILD
+      # time via cargo-auditable (zlib JSON in the `.dep-v0` linker section).
+      # It is an out-of-tree build tool — it wraps the build command only and
+      # adds nothing to Cargo.toml / Cargo.lock (purity guard). Native targets
+      # wrap cargo directly; `cross` targets need the wrapper INSIDE the build
+      # container: cross mounts host CARGO_HOME at /cargo but shadows
+      # /cargo/bin with an anonymous volume, so the wrapper is staged under
+      # libexec/ and built as a static musl binary that runs in any image.
+      - name: Install cargo-auditable (native)
+        if: matrix.cross != true
+        run: cargo install --locked cargo-auditable
+
+      - name: Install cargo-auditable (static wrapper for cross containers)
+        if: matrix.cross == true
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo install --locked cargo-auditable --target x86_64-unknown-linux-musl
+          mkdir -p "${CARGO_HOME:-$HOME/.cargo}/libexec/auditable"
+          cp "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-auditable" "${CARGO_HOME:-$HOME/.cargo}/libexec/auditable/cargo-auditable"
+
       # aarch64 Linux (glibc + musl) is cross-compiled with `cross`
       # (provides the cross toolchain + a suitable container image).
       # The other five build natively (Ubuntu, macOS, Windows).
@@ -104,14 +127,30 @@ jobs:
 
       - name: Build (native)
         if: matrix.cross != true
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo auditable build --release --locked --target ${{ matrix.target }}
 
       - name: Build (cross, default image)
         if: matrix.cross == true && matrix.cross_image == ''
+        env:
+          # cargo-auditable's rustc-wrapper mode requires this var (its entry
+          # gate + metadata flags); cross forwards it into the container by
+          # default. The JSON mirrors the flags actually passed (--locked).
+          CARGO_AUDITABLE_ORIG_ARGS: '{"offline":false,"locked":true,"frozen":false,"config":[]}'
+          # cross whitelists forwarded env vars and RUSTC_WORKSPACE_WRAPPER is
+          # not among them; inject it container-side only (host-side probes
+          # must stay unwrapped or they fail on the container-only path).
+          # Value is the IN-CONTAINER mount of CARGO_HOME (/cargo), under
+          # libexec/ because cross shadows /cargo/bin.
+          CROSS_CONTAINER_OPTS: >-
+            --env RUSTC_WORKSPACE_WRAPPER=/cargo/libexec/auditable/cargo-auditable
         run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Build (cross, custom image)
         if: matrix.cross == true && matrix.cross_image != ''
+        env:
+          CARGO_AUDITABLE_ORIG_ARGS: '{"offline":false,"locked":true,"frozen":false,"config":[]}'
+          CROSS_CONTAINER_OPTS: >-
+            --env RUSTC_WORKSPACE_WRAPPER=/cargo/libexec/auditable/cargo-auditable
         run: |
           cat > Cross.toml <<EOF
           [target.${{ matrix.target }}]
@@ -126,6 +165,27 @@ jobs:
           src="target/${{ matrix.target }}/release/apohara-agentguard${{ matrix.ext }}"
           dst="dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
           cp "$src" "$dst"
+
+      # Verify the dependency inventory actually landed in the shipped bytes,
+      # BEFORE any hashing or attestation below: if this fails, uninstrumented
+      # bytes can never enter SHA256SUMS or SLSA provenance. The payload is
+      # zlib-compressed, so `strings | grep` cannot see it; the documented
+      # detection is the `.dep-v0` linker section name (readelf ships with
+      # binutils on ubuntu runners). Covers all four Linux targets — including
+      # the cross-built ones — so a silent wrapper-forwarding regression in
+      # `cross` fails loudly here.
+      - name: Verify embedded dependency inventory (SBOM)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          f="dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
+          count=$(readelf -SW "$f" | grep -c '[.]dep-v0' || true)
+          echo ".dep-v0 sections in $f: $count"
+          if [ "$count" -lt 1 ]; then
+            echo "::error::dependency inventory missing (.dep-v0 section absent) in $f — cargo-auditable did not instrument this build" >&2
+            exit 1
+          fi
 
       # NOTE: provenance attestation NO LONGER happens here. It was moved to the
       # isolated reusable `attest` job (uses: ./.github/workflows/_attest.yml)

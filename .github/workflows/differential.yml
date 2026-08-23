@@ -1,0 +1,409 @@
+name: Differential parser comparison
+
+# STORY T7 — informational weekly differential between apohara-agentguard's
+# structural Bash splitter and tree-sitter-bash over the eval corpus
+# (evals/gate/cases/*/input.txt).
+#
+# DESIGN CONSTRAINT — WHY THIS LIVES ENTIRELY OUTSIDE THE WORKSPACE GRAPH:
+# tree-sitter must never enter this repo's Cargo.toml / Cargo.lock / deny
+# surface. The probe crate is generated at run time in a fresh /tmp scratch
+# dir with its OWN Cargo.lock (exact versions pinned there, never committed);
+# the repo checkout is consumed as a PATH dependency only.
+#
+# Version pins (the probe's lockfile resolves exact patches):
+# - tree-sitter = "0.25"      → caret on 0.y pins the minor family (0.25.x)
+# - tree-sitter-bash = "0.23" → same (0.23.x; a 0.25.x exists but is excluded)
+#
+# EXIT SEMANTICS: the probe always exits 0 — deltas are enumerated into a
+# report artifact and counted in the step summary, never failed on. Neither
+# parser is authoritative; the point is to enumerate structural differences.
+# Only infra failures (checkout, toolchain, missing corpus) turn the run red.
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: differential-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  differential:
+    name: differential gate vs tree-sitter-bash
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Generate probe crate in /tmp scratch dir
+        run: |
+          mkdir -p /tmp/differential-probe/src
+          cat > /tmp/differential-probe/Cargo.toml <<'EOF'
+          [package]
+          name = "differential-probe"
+          version = "0.1.0"
+          edition = "2021"
+
+          [dependencies]
+          apohara-agentguard = { path = "__WORKSPACE__" }
+          tree-sitter = "0.25"
+          tree-sitter-bash = "0.23"
+          serde_json = "1"
+          EOF
+          sed -i "s|__WORKSPACE__|$GITHUB_WORKSPACE|" /tmp/differential-probe/Cargo.toml
+          cat > /tmp/differential-probe/src/main.rs <<'EOF'
+          //! Differential structural comparison: apohara-agentguard's gate splitter vs
+          //! tree-sitter-bash over the eval corpus (`evals/gate/cases/*/input.txt`).
+          //!
+          //! INFORMATIONAL ONLY: always exits 0. Disagreements are enumerated into a
+          //! report artifact and counted in the step summary — never failed on. The
+          //! goal is to enumerate structural deltas between two independent Bash
+          //! parsers, not to declare either one authoritative.
+          //!
+          //! WHY doc(hidden) ITEMS ARE USED:
+          //! `apohara_agentguard::gate::compound::split_compound` is `#[doc(hidden)]
+          //! pub`. It is hidden from docs because its primary consumer is the gate
+          //! pipeline itself, but it is a stable surface inside this repository (its
+          //! behavior is pinned by the fuzz target and by property tests in
+          //! `src/gate/compound.rs`). It is the exact structural splitter whose per-leg
+          //! output the gate scans, so it is the correct signal for a structural
+          //! comparison; no fully documented API exposes leg structure.
+          //!
+          //! WORKED EXAMPLE OF AN EXPECTED (WELCOME) DELTA:
+          //!   input: `x=rm; $x -rf ~`
+          //!   - tree-sitter-bash sees 2 top-level units: `variable_assignment` (`x=rm`)
+          //!     and `command` (`$x -rf ~`).
+          //!   - the gate splits 2 legs (`x=rm`, `$x -rf ~`) — counts agree — but its
+          //!     assignment resolution additionally understands `$x` = `rm`, so it sees
+          //!     1 destructive leg where tree-sitter's bare syntax tree does not.
+          //!   That semantic gap is precisely the class of deltas this probe lists.
+          //!
+          //! Compared signals (per case):
+          //!   1. Top-level structure: flattened tree-sitter statement units vs gate
+          //!      legs excluding substitution-body legs.
+          //!   2. Substitution presence: any tree-sitter `command_substitution` node vs
+          //!      the gate splitter surfacing substitution-span interiors as legs (its
+          //!      documented contract). Known modeling difference, enumerated not
+          //!      resolved: a substitution in COMMAND position (`$(touch f) && rm`) is
+          //!      one executing unit for tree-sitter but only a body-leg for the gate.
+
+          use std::env;
+          use std::fs;
+          use std::path::{Path, PathBuf};
+
+          use apohara_agentguard::gate::compound::split_compound;
+          use tree_sitter::{Node, Parser};
+
+          /// Node kinds counted as leaf statements at top level.
+          const LEAF_STATEMENTS: &[&str] = &[
+              "command",
+              "variable_assignment",
+              "declaration_command",
+              "unset_command",
+              "function_definition",
+              "if_statement",
+              "while_statement",
+              "for_statement",
+              "case_statement",
+              "test_command",
+              "negated_command",
+          ];
+
+          /// Node kinds whose interior is NOT descended into: control-flow bodies are
+          /// opaque to the gate's flat splitter too (it only splits on separators), so
+          /// statements nested inside them must not inflate the top-level count.
+          const OPAQUE: &[&str] = &[
+              "if_statement",
+              "while_statement",
+              "for_statement",
+              "case_statement",
+              "test_command",
+              "negated_command",
+              "function_definition",
+          ];
+
+          #[derive(Default)]
+          struct TsAnalysis {
+              /// Flattened top-level statement units (substitution interiors excluded).
+              top_level: usize,
+              /// Whether any `command_substitution` node appears anywhere.
+              has_cmdsubst: bool,
+              /// Whether the parse produced any ERROR node.
+              parse_error: bool,
+          }
+
+          fn analyze(root: Node) -> TsAnalysis {
+              let mut a = TsAnalysis::default();
+              // (node, inside_command_substitution)
+              let mut stack: Vec<(Node, bool)> = Vec::new();
+              let mut cursor = root.walk();
+              let mut seed: Vec<Node> = root.children(&mut cursor).collect();
+              seed.reverse();
+              for child in seed {
+                  stack.push((child, false));
+              }
+              while let Some((node, in_subst)) = stack.pop() {
+                  let kind = node.kind();
+                  if kind == "ERROR" {
+                      a.parse_error = true;
+                  }
+                  if kind == "command_substitution" {
+                      a.has_cmdsubst = true;
+                  }
+                  let now_in_subst = in_subst || kind == "command_substitution";
+                  if !in_subst && LEAF_STATEMENTS.contains(&kind) {
+                      a.top_level += 1;
+                  }
+                  // Descend everywhere except control-flow bodies; substitution
+                  // interiors are entered but flagged so their statements stay out of
+                  // the top-level count. Plain `command` nodes are descended because
+                  // their name/argument fields can hold `command_substitution` nodes
+                  // (e.g. `$(echo rm) -rf ~`).
+                  if !OPAQUE.contains(&kind) {
+                      let mut c = node.walk();
+                      let mut children: Vec<Node> = node.children(&mut c).collect();
+                      children.reverse();
+                      for child in children {
+                          stack.push((child, now_in_subst));
+                      }
+                  }
+              }
+              a
+          }
+
+          /// Trimmed interiors of `$(`...`)` and backtick spans that the gate's
+          /// splitter extracts as legs. Mirrors `split_compound`: spans are honored
+          /// OUTSIDE single AND double quotes only (double-quoted substitutions are
+          /// handled by a later gate stage invisible to the splitter), with paren
+          /// nesting tracked inside `$(`...`)`.
+          fn substitution_span_interiors(input: &str) -> Vec<String> {
+              let b = input.as_bytes();
+              let mut interiors = Vec::new();
+              let (mut in_single, mut in_double) = (false, false);
+              let mut i = 0usize;
+              while i < b.len() {
+                  let c = b[i];
+                  if !in_double && c == b'\'' {
+                      in_single = !in_single;
+                      i += 1;
+                      continue;
+                  }
+                  if !in_single && c == b'"' {
+                      in_double = !in_double;
+                      i += 1;
+                      continue;
+                  }
+                  if !in_single && !in_double && c == b'$' && b.get(i + 1) == Some(&b'(') {
+                      let (inner, end) = paren_body(b, i + 2);
+                      interiors.push(inner.trim().to_string());
+                      i = end;
+                      continue;
+                  }
+                  if !in_single && !in_double && c == b'`' {
+                      if let Some(close) = (i + 1..b.len()).find(|&j| b[j] == b'`') {
+                          interiors.push(input[i + 1..close].trim().to_string());
+                          i = close + 1;
+                          continue;
+                      }
+                      break;
+                  }
+                  i += 1;
+              }
+              interiors.retain(|s| !s.is_empty());
+              interiors
+          }
+
+          /// Returns the body between the parens and the index just past `)` .
+          fn paren_body(b: &[u8], start: usize) -> (String, usize) {
+              let mut depth = 1usize;
+              let mut j = start;
+              while j < b.len() {
+                  match b[j] {
+                      b'(' => depth += 1,
+                      b')' => {
+                          depth -= 1;
+                          if depth == 0 {
+                              return (String::from_utf8_lossy(&b[start..j]).into_owned(), j + 1);
+                          }
+                      }
+                      _ => {}
+                  }
+                  j += 1;
+              }
+              (String::from_utf8_lossy(&b[start.min(b.len())..]).into_owned(), b.len())
+          }
+
+          /// Partition gate legs into (top-level legs, substitution-body legs) using
+          /// the splitter's own extracted span interiors as a multiset.
+          fn partition_legs(legs: &[String], span_interiors: &[String]) -> (Vec<String>, Vec<String>) {
+              let mut pool: Vec<String> = span_interiors.to_vec();
+              let mut top = Vec::new();
+              let mut subst = Vec::new();
+              for leg in legs {
+                  match pool.iter().position(|t| t == leg) {
+                      Some(i) => {
+                          pool.remove(i);
+                          subst.push(leg.clone());
+                      }
+                      None => top.push(leg.clone()),
+                  }
+              }
+              (top, subst)
+          }
+
+          fn collect_case_inputs(cases_dir: &Path) -> Vec<PathBuf> {
+              let mut inputs = Vec::new();
+              let Ok(entries) = fs::read_dir(cases_dir) else {
+                  return inputs;
+              };
+              for entry in entries.flatten() {
+                  let candidate = entry.path().join("input.txt");
+                  if candidate.is_file() {
+                      inputs.push(candidate);
+                  }
+              }
+              inputs.sort();
+              inputs
+          }
+
+          fn main() {
+              let cases_dir = env::var("CASES_DIR").expect("CASES_DIR must point at evals/gate/cases");
+              let out_dir = env::var("OUT_DIR").unwrap_or_else(|_| "differential-report".to_string());
+              fs::create_dir_all(&out_dir).expect("create OUT_DIR");
+
+              let inputs = collect_case_inputs(Path::new(&cases_dir));
+              let mut parser = Parser::new();
+              parser
+                  .set_language(&tree_sitter_bash::LANGUAGE.into())
+                  .expect("load tree-sitter-bash grammar");
+
+              let mut jsonl = String::new();
+              let mut md = String::from(
+                  "# Differential gate-vs-tree-sitter structural report\n\n\
+                   Informational enumeration of structural deltas; neither parser is\n\
+                   authoritative. Signals compared per case:\n\
+                   1. top-level units (tree-sitter, flattened) vs gate legs (excl. substitution bodies)\n\
+                   2. substitution presence (tree-sitter nodes vs gate splitter extraction)\n\n\
+                   | case | input | gate legs | ts top | gate top | ts subst | gate subst | delta |\n\
+                   |---|---|---|---|---|---|---|---|\n",
+              );
+
+              let (mut total, mut disagree_count, mut parse_errors) = (0usize, 0usize, 0usize);
+
+              for path in &inputs {
+                  let case_name = path
+                      .parent()
+                      .and_then(Path::file_name)
+                      .map(|n| n.to_string_lossy().into_owned())
+                      .unwrap_or_default();
+                  let raw = fs::read_to_string(path).unwrap_or_default();
+                  let input = raw.trim_end_matches(['\n', '\r']);
+
+                  let legs: Vec<String> = split_compound(input)
+                      .into_iter()
+                      .map(|l| l.trim().to_string())
+                      .filter(|l| !l.is_empty())
+                      .collect();
+
+                  let span_interiors = substitution_span_interiors(input);
+                  let (top_legs, subst_legs) = partition_legs(&legs, &span_interiors);
+
+                  let parsed = parser.parse(input, None);
+                  let analysis = match parsed {
+                      Some(tree) => analyze(tree.root_node()),
+                      None => TsAnalysis::default(),
+                  };
+
+                  let gate_has_subst = !subst_legs.is_empty();
+                  let mut reasons: Vec<String> = Vec::new();
+                  if analysis.parse_error {
+                      reasons.push("tree-sitter produced ERROR nodes".to_string());
+                  }
+                  if top_legs.len() != analysis.top_level {
+                      reasons.push(format!(
+                          "top-level mismatch: gate {} legs vs tree-sitter {} units",
+                          top_legs.len(),
+                          analysis.top_level
+                      ));
+                  }
+                  if gate_has_subst != analysis.has_cmdsubst {
+                      reasons.push(format!(
+                          "substitution presence mismatch: gate {} vs tree-sitter {}",
+                          gate_has_subst, analysis.has_cmdsubst
+                      ));
+                  }
+
+                  let disagrees = !reasons.is_empty();
+                  total += 1;
+                  if disagrees {
+                      disagree_count += 1;
+                  }
+                  if analysis.parse_error {
+                      parse_errors += 1;
+                  }
+
+                  jsonl.push_str(&format!(
+                      "{}\n",
+                      serde_json::json!({
+                          "case": case_name,
+                          "input": input,
+                          "gate_legs": legs,
+                          "gate_top_level_legs": top_legs,
+                          "gate_substitution_legs": subst_legs,
+                          "ts_top_level_units": analysis.top_level,
+                          "ts_has_command_substitution": analysis.has_cmdsubst,
+                          "ts_parse_error": analysis.parse_error,
+                          "disagreement": disagrees,
+                          "reasons": reasons,
+                      })
+                  ));
+                  if disagrees {
+                      md.push_str(&format!(
+                          "| {case_name} | `{input}` | {} | {} | {} | {} | {} | {} |\n",
+                          legs.len(),
+                          analysis.top_level,
+                          top_legs.len(),
+                          analysis.has_cmdsubst,
+                          gate_has_subst,
+                          reasons.join("; "),
+                      ));
+                  }
+              }
+
+              md.push_str(&format!(
+                  "\n**Total cases:** {total} · **Disagreements:** {disagree_count} · **tree-sitter ERROR parses:** {parse_errors}\n"
+              ));
+
+              fs::write(Path::new(&out_dir).join("differential.jsonl"), jsonl).expect("write jsonl report");
+              fs::write(Path::new(&out_dir).join("README.md"), md).expect("write md report");
+              println!("differential-probe: cases={total} disagreements={disagree_count} ts_parse_errors={parse_errors}");
+          }
+          EOF
+
+      - name: Build probe (pins exact versions in the probe's own /tmp lockfile)
+        working-directory: /tmp/differential-probe
+        run: |
+          cargo generate-lockfile
+          cargo build --locked --release
+
+      - name: Run differential comparison
+        env:
+          CASES_DIR: ${{ github.workspace }}/evals/gate/cases
+          OUT_DIR: ${{ github.workspace }}/differential-report
+        working-directory: /tmp/differential-probe
+        run: ./target/release/differential-probe
+
+      - name: Publish run summary
+        if: always()
+        run: cat "$GITHUB_WORKSPACE/differential-report/README.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: differential-report
+          path: differential-report/*
