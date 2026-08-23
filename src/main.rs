@@ -10,6 +10,7 @@ use std::process::ExitCode;
 use apohara_agentguard::audit::{self, AuditRecord};
 use apohara_agentguard::config::Config;
 use apohara_agentguard::hook;
+use apohara_agentguard::init::{self, InitError, Mode, Outcome};
 use apohara_agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
 use clap::{Args, Parser, Subcommand};
 
@@ -49,12 +50,32 @@ enum Command {
     Ask(CheckArgs),
     /// Serve the gate + firewall as MCP tools over stdio (JSON-RPC 2.0).
     Mcp,
+    /// Detect Claude Code / OpenAI Codex installs and wire the
+    /// apohara-agentguard hook into their hook configs (append-only,
+    /// idempotent). WITHOUT `--yes` this is a DRY-RUN: it prints the planned
+    /// changes and modifies nothing. `--undo` removes previously-installed
+    /// wiring instead (applied immediately — the flag IS the consent).
+    /// A corrupt host config aborts with exit code 2 and no modification.
+    Init(InitArgs),
 }
 
 #[derive(Args)]
 struct CheckArgs {
     /// The command to evaluate against the gate.
     command: String,
+}
+
+#[derive(Args)]
+struct InitArgs {
+    /// Apply the installation. Without this flag, `init` is a DRY-RUN: it
+    /// prints the planned changes and modifies nothing (exit 0).
+    #[arg(long)]
+    yes: bool,
+    /// Remove previously-installed apohara-agentguard wiring instead of
+    /// installing (applied immediately; preserving all other user content).
+    /// Mutually exclusive with `--yes`.
+    #[arg(long, conflicts_with = "yes")]
+    undo: bool,
 }
 
 #[derive(Args)]
@@ -86,6 +107,7 @@ fn main() -> ExitCode {
         Command::Check(args) => run_check(args, cli.policy.as_deref()),
         Command::Ask(args) => run_ask(args, cli.policy.as_deref()),
         Command::Mcp => run_mcp(cli.policy.as_deref()),
+        Command::Init(args) => run_init(args),
     }
 }
 
@@ -308,6 +330,94 @@ fn run_mcp(cli_policy: Option<&std::path::Path>) -> ExitCode {
         Err(e) => {
             eprintln!("apohara-agentguard mcp: {e}");
             ExitCode::from(74)
+        }
+    }
+}
+
+/// Detect the agent hosts and wire (or unwire) the apohara-agentguard hook
+/// into their user-level configs. One output line per host; exit 0 on
+/// success / dry-run / clean no-op, 2 on a corrupt-config refusal, 1 on an
+/// environment or I/O failure.
+fn run_init(args: InitArgs) -> ExitCode {
+    let mode = if args.undo {
+        Mode::Uninstall
+    } else {
+        Mode::Install
+    };
+    // Consent model: `--yes` applies an install; `--undo` IS the consent for
+    // removal (applied immediately). The two flags are mutually exclusive.
+    let apply = args.yes || args.undo;
+
+    // `home_dir` was un-deprecated in Rust 1.85 (the MSRV); it reads $HOME /
+    // %USERPROFILE% with a passwd fallback and no deprecation warning.
+    let Some(home) = std::env::home_dir() else {
+        eprintln!("apohara-agentguard init: could not determine the user home directory");
+        return ExitCode::from(1);
+    };
+    // ${CLAUDE_PLUGIN_ROOT} does not work in settings.json — write the
+    // absolute path of THIS binary instead.
+    let exe = match std::env::current_exe().map(std::fs::canonicalize) {
+        Ok(Ok(p)) => p,
+        _ => {
+            eprintln!("apohara-agentguard init: could not resolve the running binary path");
+            return ExitCode::from(1);
+        }
+    };
+
+    match init::run(&home, &exe, mode, apply) {
+        Ok(results) => {
+            let mut codex_note = false;
+            for r in &results {
+                let line = match &r.outcome {
+                    Outcome::Wired { dir_created } => {
+                        if r.host == "codex-code" {
+                            codex_note = true;
+                        }
+                        let create_note = if *dir_created {
+                            let dir = r.path.parent().unwrap_or(&r.path).display();
+                            if apply {
+                                format!(" (created {dir})")
+                            } else {
+                                format!(" (would create {dir})")
+                            }
+                        } else {
+                            String::new()
+                        };
+                        let verb = if apply { "wired" } else { "would wire" };
+                        format!("{}: {verb} ({}){create_note}", r.host, r.path.display())
+                    }
+                    Outcome::AlreadyWired => format!("{}: already wired", r.host),
+                    Outcome::Refreshed { .. } => {
+                        let verb = if apply { "refreshed" } else { "would refresh" };
+                        format!("{}: {verb} ({})", r.host, r.path.display())
+                    }
+                    Outcome::Unwired { .. } => {
+                        format!("{}: unwired ({})", r.host, r.path.display())
+                    }
+                    Outcome::NothingToUnwire => format!("{}: nothing to undo", r.host),
+                };
+                println!("{line}");
+            }
+            if codex_note {
+                println!(
+                    "note: Codex may require reviewing trusted hooks via /hooks on next start"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(InitError::CorruptConfig { path, reason }) => {
+            eprintln!(
+                "apohara-agentguard init: refusing to modify corrupt config ({}): {reason}",
+                path.display()
+            );
+            ExitCode::from(2)
+        }
+        Err(InitError::Io { path, source }) => {
+            eprintln!(
+                "apohara-agentguard init: i/o error on {}: {source}",
+                path.display()
+            );
+            ExitCode::from(1)
         }
     }
 }

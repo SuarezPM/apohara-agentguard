@@ -8,6 +8,7 @@ pub mod contract;
 pub mod firewall;
 pub mod gate;
 pub mod hook;
+pub mod init;
 pub mod mcp;
 mod neutralize;
 pub mod policy;
