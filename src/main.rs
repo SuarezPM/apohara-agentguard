@@ -50,12 +50,13 @@ enum Command {
     Ask(CheckArgs),
     /// Serve the gate + firewall as MCP tools over stdio (JSON-RPC 2.0).
     Mcp,
-    /// Detect Claude Code / OpenAI Codex installs and wire the
-    /// apohara-agentguard hook into their hook configs (append-only,
-    /// idempotent). WITHOUT `--yes` this is a DRY-RUN: it prints the planned
-    /// changes and modifies nothing. `--undo` removes previously-installed
-    /// wiring instead (applied immediately — the flag IS the consent).
-    /// A corrupt host config aborts with exit code 2 and no modification.
+    /// Detect supported agent hosts (Claude Code, OpenAI Codex, OpenCode,
+    /// Kilo Code, kitty-code) and wire the apohara-agentguard hook into
+    /// their configs / plugin dirs (append-only, idempotent). WITHOUT
+    /// `--yes` this is a DRY-RUN: it prints the planned changes and modifies
+    /// nothing. `--undo` removes previously-installed wiring instead
+    /// (applied immediately — the flag IS the consent). A corrupt host
+    /// config aborts with exit code 2 and no modification.
     Init(InitArgs),
 }
 
@@ -378,11 +379,15 @@ fn run_init(args: InitArgs) -> ExitCode {
     match init::run(&home, &exe, mode, apply) {
         Ok(results) => {
             let mut codex_note = false;
+            let mut opencode_note = false;
             for r in &results {
                 let line = match &r.outcome {
                     Outcome::Wired { dir_created } => {
                         if r.host == "codex-code" {
                             codex_note = true;
+                        }
+                        if r.host == "opencode" {
+                            opencode_note = true;
                         }
                         let create_note = if *dir_created {
                             let dir = r.path.parent().unwrap_or(&r.path).display();
@@ -399,6 +404,9 @@ fn run_init(args: InitArgs) -> ExitCode {
                     }
                     Outcome::AlreadyWired => format!("{}: already wired", r.host),
                     Outcome::Refreshed { .. } => {
+                        if r.host == "opencode" {
+                            opencode_note = true;
+                        }
                         let verb = if apply { "refreshed" } else { "would refresh" };
                         format!("{}: {verb} ({})", r.host, r.path.display())
                     }
@@ -406,12 +414,44 @@ fn run_init(args: InitArgs) -> ExitCode {
                         format!("{}: unwired ({})", r.host, r.path.display())
                     }
                     Outcome::NothingToUnwire => format!("{}: nothing to undo", r.host),
+                    Outcome::Scaffolded { dir_created } => {
+                        let create_note = if *dir_created {
+                            let dir = r.path.parent().unwrap_or(&r.path).display();
+                            if apply {
+                                format!(" (created {dir})")
+                            } else {
+                                format!(" (would create {dir})")
+                            }
+                        } else {
+                            String::new()
+                        };
+                        let verb = if apply {
+                            "scaffolded"
+                        } else {
+                            "would scaffold"
+                        };
+                        format!(
+                            "{}: {verb} ({}){create_note} — embedded via library — policy scaffold written",
+                            r.host,
+                            r.path.display()
+                        )
+                    }
+                    Outcome::DetectedExisting => format!(
+                        "{}: existing policy detected, untouched ({})",
+                        r.host,
+                        r.path.display()
+                    ),
                 };
                 println!("{line}");
             }
             if codex_note {
                 println!(
                     "note: Codex may require reviewing trusted hooks via /hooks on next start"
+                );
+            }
+            if opencode_note {
+                println!(
+                    "note: opencode.json was not modified — the plugins/ drop-in needs no config edit"
                 );
             }
             ExitCode::SUCCESS

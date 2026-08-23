@@ -1,12 +1,32 @@
 //! `agentguard init` — wire the apohara-agentguard hook into detected agent
-//! host configurations (Claude Code, OpenAI Codex).
+//! host configurations (Claude Code, OpenAI Codex, OpenCode, Kilo Code,
+//! kitty-code).
 //!
 //! The library core is hermetic: every entry point takes an explicit
 //! `base_home` (the user home directory) so tests can operate on a tempdir.
 //! The CLI wrapper (`src/main.rs`) resolves the real home directory and the
-//! currently-running binary.
+//! currently-running binary. The only environment read is
+//! `$XDG_CONFIG_HOME` (once, at [`run`] entry) for the OpenCode/Kilo plugin
+//! directories; unset/empty means `<home>/.config`.
 //!
-//! Integrity contract:
+//! Two host families:
+//!
+//! - JSON-hook hosts (`claude-code`, `codex-code`): edit the host's hook
+//!   config document (integrity contract below).
+//! - Drop-in hosts (`opencode`, `kilo`, `kitty-code`): NO host config file is
+//!   parsed or edited at all — a plugin-dir drop-in needs no config edit
+//!   (`opencode.json` / Kilo's config are never touched). We copy our own
+//!   reserved-name artifacts (shim / guide / scaffold) and manage them by
+//!   EXACT CONTENT EQUALITY:
+//!   - install writes an artifact when it is missing or divergent (our
+//!     reserved filenames are self-healed in place);
+//!   - undo removes an artifact ONLY when its content equals ours exactly —
+//!     a hand-edited artifact is never deleted;
+//!   - kitty-code is DETECTION + SCAFFOLD only (the engine embeds via
+//!     library there): an existing non-scaffold `policy.toml` is never
+//!     touched.
+//!
+//! Integrity contract (JSON-hook hosts):
 //! - APPEND-ONLY: existing user hooks are never clobbered or reordered; our
 //!   matcher groups are appended to the existing event arrays.
 //! - IDEMPOTENT + SELF-HEALING: a prior install is detected by scanning every
@@ -16,10 +36,12 @@
 //!   fields are refreshed IN PLACE (no duplicates, user content untouched).
 //! - CORRUPT-REFUSAL: a target file that exists but is not valid JSON (or is
 //!   not a JSON object / has a malformed `hooks` table) aborts the whole
-//!   operation BEFORE any file is modified — both hosts are parsed up-front,
-//!   so a corrupt config on one host never leaves the other half-wired. (An
+//!   operation BEFORE any file is modified — every host is planned up-front,
+//!   so a corrupt config on one host never leaves any other half-wired. (An
 //!   I/O failure during persistence can still leave an earlier host written;
-//!   each single write is atomic, cross-host is not transactional.)
+//!   each single write is atomic, cross-host is not transactional.) The
+//!   drop-in hosts touch no JSON configs, so they add no new corrupt-config
+//!   surface.
 //! - UNDO removes only marker-matched inner hooks (plus OUR exact stamped
 //!   Codex `description`, never a user-customized one), prunes arrays that
 //!   became empty, and leaves every other piece of user content untouched
@@ -41,16 +63,49 @@ const CLAUDE_FILE: &str = "settings.json";
 const CODEX_DIR: &str = ".codex";
 const CODEX_FILE: &str = "hooks.json";
 
-/// `description` stamped into a Codex `hooks.json` we create (Codex has no
-/// equivalent top-level description on Claude settings.json).
-pub const CODEX_DESCRIPTION: &str = "Installed by apohara-agentguard init";
+// --- Drop-in hosts (opencode / kilo / kitty-code) ---------------------------
 
-/// Per-hook timeout (seconds), matching `packaging/hooks.json`.
-const HOOK_TIMEOUT: i64 = 20;
+const OPENCODE_APP: &str = "opencode";
+const KILO_APP: &str = "kilo";
+const PLUGINS_SUBDIR: &str = "plugins";
+/// Reserved plugin filename in the OpenCode/Kilo `plugins/` drop-in dir.
+pub const SHIM_FILE_NAME: &str = "agentguard-shim.mjs";
+const KILO_GUIDE_FILE_NAME: &str = "agentguard-veto-guide.md";
+const KITTY_DIR_NAME: &str = ".kitty-code";
+const KITTY_POLICY_FILE_NAME: &str = "policy.toml";
+
+/// Embedded OpenCode/Kilo plugin shim — single source of truth is
+/// `packaging/opencode/agentguard-shim.mjs`; init copies it verbatim into
+/// each host's `plugins/` directory.
+pub const OPENCODE_SHIM: &str = include_str!("../packaging/opencode/agentguard-shim.mjs");
+
+/// kitty-code policy scaffold: a fully commented `[agentguard]` section. The
+/// engine itself is EMBEDDED VIA LIBRARY inside kitty-code (path dependency,
+/// plan decision #7), so this file is operator documentation + policy
+/// placeholder only — nothing of ours executes from it. Exact content
+/// equality against this constant is what makes install idempotent and undo
+/// safe (a user-customized policy.toml is never touched).
+pub const KITTY_SCAFFOLD: &str = concat!(
+    "# apohara-agentguard — kitty-code policy scaffold\n",
+    "#\n",
+    "# The agentguard engine is EMBEDDED VIA LIBRARY inside kitty-code (path\n",
+    "# dependency), not spawned as a subprocess. This file only holds your\n",
+    "# policy overrides. Uncomment to activate:\n",
+    "#\n",
+    "# [agentguard]\n",
+    "# enabled = true\n",
+);
+
+// Codex manifest constants are SINGLE-SOURCED in `adapters::codex` (the
+// adapters → init edge is forbidden; init → adapters is the correct
+// direction). The spawn args/timeout are the canonical subprocess-envelope
+// parameters shared by every JSON-hook host.
+use crate::adapters::codex::{
+    CODEX_DESCRIPTION, CODEX_PRE_TOOL_USE_MATCHER, HOOK_TIMEOUT, SPAWN_ARGS,
+};
 
 /// Event groups wired per host: `(event key, matcher)`. A `None` matcher is
-/// omitted (Claude Code's UserPromptSubmit takes no matcher). Codex stays
-/// minimal PreToolUse-only (no PostToolUse/UserPromptSubmit semantics).
+/// omitted (Claude Code's UserPromptSubmit takes no matcher).
 const CLAUDE_GROUPS: &[(&str, Option<&str>)] = &[
     (
         "PreToolUse",
@@ -59,8 +114,7 @@ const CLAUDE_GROUPS: &[(&str, Option<&str>)] = &[
     ("PostToolUse", Some("Bash")),
     ("UserPromptSubmit", None),
 ];
-const CODEX_GROUPS: &[(&str, Option<&str>)] =
-    &[("PreToolUse", Some("Bash|apply_patch|Edit|Write"))];
+const CODEX_GROUPS: &[(&str, Option<&str>)] = &[("PreToolUse", Some(CODEX_PRE_TOOL_USE_MATCHER))];
 
 /// What `init` should do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +143,8 @@ pub enum InitError {
 /// Per-host result of one `init` run.
 #[derive(Debug)]
 pub struct HostResult {
-    /// Host label used in CLI output (`claude-code` / `codex-code`).
+    /// Host label used in CLI output (`claude-code` / `codex-code` /
+    /// `opencode` / `kilo` / `kitty-code`).
     pub host: &'static str,
     /// Absolute path of the host config file.
     pub path: PathBuf,
@@ -115,16 +170,24 @@ pub enum Outcome {
     Unwired { removed: usize },
     /// Undo found nothing of ours (clean no-op success).
     NothingToUnwire,
+    /// kitty-code detection+scaffold: no `policy.toml` existed, so our inert
+    /// scaffold was (or would be) written. The engine is embedded via
+    /// library — this file is the only artifact.
+    Scaffolded { dir_created: bool },
+    /// kitty-code detection: a `policy.toml` already exists that is NOT our
+    /// exact scaffold — left untouched (detection only; user policy is never
+    /// clobbered by a scaffold writer).
+    DetectedExisting,
 }
 
-/// Run init across both hosts against `base_home`.
+/// Run init across all five hosts against `base_home`.
 ///
 /// `exe` is the absolute path of the binary to wire in (the CLI passes the
 /// canonicalized `std::env::current_exe()`). With `apply = false` this is a
 /// DRY-RUN: planned outcomes are computed and returned but nothing is
-/// written. Both hosts are parsed BEFORE either is written, so a corrupt
+/// written. EVERY host is planned BEFORE anything is written, so a corrupt
 /// config aborts with [`InitError::CorruptConfig`] and zero writes. That is
-/// where atomicity ends: an I/O failure during the phase-2 persistence loop
+/// where atomicity ends: an I/O failure during the phase-3 persistence loop
 /// can leave an EARLIER host already written — cross-host transactions are
 /// impossible without a journal, and none is attempted. Each individual
 /// file write IS atomic (sibling temp file + rename).
@@ -134,7 +197,11 @@ pub fn run(
     mode: Mode,
     apply: bool,
 ) -> Result<Vec<HostResult>, InitError> {
-    let specs = [
+    // Read ONCE so the library stays hermetic (tests control the env of the
+    // process under test; no env mutation happens inside this crate).
+    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+
+    let json_specs = [
         HostSpec {
             host: "claude-code",
             dir: base_home.join(CLAUDE_DIR),
@@ -151,16 +218,50 @@ pub fn run(
         },
     ];
 
-    // Phase 1 — parse + transform BOTH hosts. Any corrupt config errors out
-    // here, before a single byte is written anywhere.
-    let plans: Vec<HostPlan> = specs
+    // Phase 1 — parse + transform BOTH JSON-hook hosts. Any corrupt config
+    // errors out here, before a single byte is written anywhere.
+    let json_plans: Vec<HostPlan> = json_specs
         .iter()
         .map(|s| plan_host(s, exe, mode))
         .collect::<Result<_, _>>()?;
 
-    // Phase 2 — persist.
-    let mut results = Vec::with_capacity(specs.len());
-    for (spec, plan) in specs.iter().zip(plans) {
+    // Phase 2 — plan the drop-in hosts. Pure filesystem-shape planning: no
+    // host config is parsed or edited (plugin-dir drop-ins need none).
+    let kilo_guide = crate::adapters::kilo::veto_guide();
+    let opencode_plugins = plugins_dir(base_home, xdg_config_home.as_deref(), OPENCODE_APP);
+    let kilo_plugins = plugins_dir(base_home, xdg_config_home.as_deref(), KILO_APP);
+    let dropin_plans = [
+        plan_dropin_host(
+            "opencode",
+            &opencode_plugins,
+            &[DropInFile {
+                path: opencode_plugins.join(SHIM_FILE_NAME),
+                content: OPENCODE_SHIM,
+            }],
+            mode,
+        )?,
+        plan_dropin_host(
+            "kilo",
+            &kilo_plugins,
+            &[
+                DropInFile {
+                    path: kilo_plugins.join(SHIM_FILE_NAME),
+                    content: OPENCODE_SHIM,
+                },
+                DropInFile {
+                    path: xdg_config_dir(base_home, xdg_config_home.as_deref(), KILO_APP)
+                        .join(KILO_GUIDE_FILE_NAME),
+                    content: kilo_guide,
+                },
+            ],
+            mode,
+        )?,
+        plan_kitty_host(base_home, mode)?,
+    ];
+
+    // Phase 3 — persist, in host order.
+    let mut results = Vec::with_capacity(json_specs.len() + dropin_plans.len());
+    for (spec, plan) in json_specs.iter().zip(json_plans) {
         if let Some(new_value) = plan.new_value {
             if apply {
                 let path = spec.dir.join(spec.file_name);
@@ -170,6 +271,24 @@ pub fn run(
         results.push(HostResult {
             host: spec.host,
             path: spec.dir.join(spec.file_name),
+            outcome: plan.outcome,
+        });
+    }
+    for plan in dropin_plans {
+        if apply {
+            for file in &plan.writes {
+                atomic_write(&file.path, file.content.as_bytes())?;
+            }
+            for file in &plan.removes {
+                std::fs::remove_file(&file.path).map_err(|e| InitError::Io {
+                    path: file.path.clone(),
+                    source: e,
+                })?;
+            }
+        }
+        results.push(HostResult {
+            host: plan.host,
+            path: plan.report_path,
             outcome: plan.outcome,
         });
     }
@@ -188,6 +307,207 @@ struct HostPlan {
     /// The new document to write, if any (None = leave the file alone).
     new_value: Option<Value>,
     outcome: Outcome,
+}
+
+// --- Drop-in hosts (opencode / kilo / kitty-code) ---------------------------
+
+/// One reserved-name artifact we manage by exact content equality.
+struct DropInFile {
+    path: PathBuf,
+    content: &'static str,
+}
+
+/// The persistence plan for one drop-in host.
+struct DropInPlan {
+    host: &'static str,
+    /// Path reported in CLI output (the host's primary artifact).
+    report_path: PathBuf,
+    /// Artifacts to write (install; empty on AlreadyWired / uninstall).
+    writes: Vec<DropInFile>,
+    /// Exact-match artifacts to remove (uninstall only).
+    removes: Vec<DropInFile>,
+    outcome: Outcome,
+}
+
+/// `<config-root>/<app>/plugins` where `<config-root>` is `$XDG_CONFIG_HOME`
+/// when set (and non-empty), else `<home>/.config`.
+fn plugins_dir(base_home: &Path, xdg_config_home: Option<&std::ffi::OsStr>, app: &str) -> PathBuf {
+    xdg_config_dir(base_home, xdg_config_home, app).join(PLUGINS_SUBDIR)
+}
+
+/// `<config-root>/<app>` with `$XDG_CONFIG_HOME` respected.
+fn xdg_config_dir(
+    base_home: &Path,
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    app: &str,
+) -> PathBuf {
+    match xdg_config_home {
+        Some(x) if !x.is_empty() => PathBuf::from(x).join(app),
+        _ => base_home.join(".config").join(app),
+    }
+}
+
+/// Plan one multi-artifact drop-in host (`opencode`, `kilo`).
+///
+/// Install: a missing artifact is written; an artifact that exists with
+/// DIFFERENT content is our stale/divergent copy under OUR reserved filename
+/// and is self-healed in place (mirrors the JSON hosts' Refreshed semantics).
+/// Uninstall: ONLY exact-content artifacts are removed — a hand-edited
+/// artifact is never deleted.
+///
+/// Outcome aggregation across the host's files: all exact ⇒ AlreadyWired;
+/// anything missing ⇒ Wired (with `dir_created` from the plugins dir); else
+/// (all exist, ≥1 divergent) ⇒ Refreshed.
+fn plan_dropin_host(
+    host: &'static str,
+    anchor_dir: &Path,
+    files: &[DropInFile],
+    mode: Mode,
+) -> Result<DropInPlan, InitError> {
+    let report_path = files
+        .first()
+        .map(|f| f.path.clone())
+        .unwrap_or_else(|| anchor_dir.to_path_buf());
+
+    // One read per artifact; decisions derive from the recorded exactness.
+    let mut writes = Vec::new();
+    let mut removes = Vec::new();
+    let mut missing_any = false;
+    let mut divergent = 0usize;
+    let mut all_exact = true;
+
+    for file in files {
+        match read_exact(&file.path, file.content)? {
+            Exactness::Exact => {
+                if mode == Mode::Uninstall {
+                    removes.push(DropInFile {
+                        path: file.path.clone(),
+                        content: file.content,
+                    });
+                }
+            }
+            Exactness::Divergent => {
+                all_exact = false;
+                divergent += 1;
+                if mode == Mode::Install {
+                    // Our stale/divergent copy under OUR reserved filename:
+                    // self-heal in place.
+                    writes.push(DropInFile {
+                        path: file.path.clone(),
+                        content: file.content,
+                    });
+                } // uninstall: never delete a hand-edited artifact
+            }
+            Exactness::Missing => {
+                all_exact = false;
+                missing_any = true;
+                if mode == Mode::Install {
+                    writes.push(DropInFile {
+                        path: file.path.clone(),
+                        content: file.content,
+                    });
+                }
+            }
+        }
+    }
+
+    let outcome = match mode {
+        Mode::Install => {
+            if all_exact {
+                Outcome::AlreadyWired
+            } else if missing_any {
+                Outcome::Wired {
+                    dir_created: !anchor_dir.is_dir(),
+                }
+            } else {
+                Outcome::Refreshed { updated: divergent }
+            }
+        }
+        Mode::Uninstall if removes.is_empty() => Outcome::NothingToUnwire,
+        Mode::Uninstall => Outcome::Unwired {
+            removed: removes.len(),
+        },
+    };
+
+    Ok(DropInPlan {
+        host,
+        report_path,
+        writes,
+        removes,
+        outcome,
+    })
+}
+
+/// Plan the kitty-code host: DETECTION + SCAFFOLD only (the engine embeds via
+/// library there).
+///
+/// Install: write [`KITTY_SCAFFOLD`] ONLY when `policy.toml` is absent; an
+/// existing non-scaffold file is user policy and is reported as
+/// [`Outcome::DetectedExisting`] untouched. Uninstall: remove ONLY when the
+/// content equals our scaffold exactly.
+fn plan_kitty_host(base_home: &Path, mode: Mode) -> Result<DropInPlan, InitError> {
+    let dir = base_home.join(KITTY_DIR_NAME);
+    let path = dir.join(KITTY_POLICY_FILE_NAME);
+    let outcome = match mode {
+        Mode::Install => match read_exact(&path, KITTY_SCAFFOLD)? {
+            Exactness::Exact => Outcome::AlreadyWired,
+            Exactness::Divergent => Outcome::DetectedExisting,
+            Exactness::Missing => Outcome::Scaffolded {
+                dir_created: !dir.is_dir(),
+            },
+        },
+        Mode::Uninstall => {
+            if exact_match(&path, KITTY_SCAFFOLD)? {
+                Outcome::Unwired { removed: 1 }
+            } else {
+                Outcome::NothingToUnwire
+            }
+        }
+    };
+    let writes = if mode == Mode::Install && matches!(outcome, Outcome::Scaffolded { .. }) {
+        vec![DropInFile {
+            path: path.clone(),
+            content: KITTY_SCAFFOLD,
+        }]
+    } else {
+        Vec::new()
+    };
+    let removes = match &outcome {
+        Outcome::Unwired { .. } => vec![DropInFile {
+            path: path.clone(),
+            content: KITTY_SCAFFOLD,
+        }],
+        _ => Vec::new(),
+    };
+    Ok(DropInPlan {
+        host: "kitty-code",
+        report_path: path,
+        writes,
+        removes,
+        outcome,
+    })
+}
+
+enum Exactness {
+    Missing,
+    Exact,
+    Divergent,
+}
+
+fn read_exact(path: &Path, ours: &str) -> Result<Exactness, InitError> {
+    match std::fs::read(path) {
+        Ok(bytes) if bytes == ours.as_bytes() => Ok(Exactness::Exact),
+        Ok(_) => Ok(Exactness::Divergent),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Exactness::Missing),
+        Err(e) => Err(InitError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        }),
+    }
+}
+
+fn exact_match(path: &Path, ours: &str) -> Result<bool, InitError> {
+    Ok(matches!(read_exact(path, ours)?, Exactness::Exact))
 }
 
 fn plan_host(spec: &HostSpec, exe: &Path, mode: Mode) -> Result<HostPlan, InitError> {
@@ -413,7 +733,7 @@ fn hook_group(matcher: Option<&str>, exe: &str) -> Value {
         json!([{
             "type": "command",
             "command": exe,
-            "args": ["hook"],
+            "args": SPAWN_ARGS,
             "timeout": HOOK_TIMEOUT,
         }]),
     );
@@ -456,22 +776,29 @@ fn unwire_host(root: &mut Value) -> usize {
     removed
 }
 
-/// Pretty-print (2-space, trailing newline) and write ATOMICALLY, creating
-/// parent dirs: the payload goes to a unique sibling temp file in the SAME
-/// directory, then `fs::rename` over the destination (atomic on POSIX;
-/// replaces the destination on Windows). A crash mid-write can never leave
-/// a torn config behind. On any failure after temp creation the temp file
-/// is removed best-effort before returning.
+/// Pretty-print (2-space, trailing newline) and write ATOMICALLY via
+/// [`atomic_write`].
 fn write_config(path: &Path, value: &Value) -> Result<(), InitError> {
+    // serde_json serialization of a Value cannot fail.
+    let mut out = serde_json::to_string_pretty(value).expect("Value serialization is infallible");
+    out.push('\n');
+    atomic_write(path, out.as_bytes())
+}
+
+/// Write `payload` to `path` ATOMICALLY, creating parent dirs: the payload
+/// goes to a unique sibling temp file in the SAME directory, then
+/// `fs::rename` over the destination (atomic on POSIX; replaces the
+/// destination on Windows). A crash mid-write can never leave a torn file
+/// behind. On any failure after temp creation the temp file is removed
+/// best-effort before returning. Shared by the JSON-hook hosts and the
+/// drop-in hosts.
+fn atomic_write(path: &Path, payload: &[u8]) -> Result<(), InitError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| InitError::Io {
             path: parent.to_path_buf(),
             source: e,
         })?;
     }
-    // serde_json serialization of a Value cannot fail.
-    let mut out = serde_json::to_string_pretty(value).expect("Value serialization is infallible");
-    out.push('\n');
 
     let file_name = path.file_name().map_or_else(
         || CLAUDE_FILE.to_string(),
@@ -480,7 +807,7 @@ fn write_config(path: &Path, value: &Value) -> Result<(), InitError> {
     let tmp = path.with_file_name(format!("{file_name}.agentguard-tmp-{}", std::process::id()));
 
     let result = (|| {
-        std::fs::write(&tmp, out.as_bytes()).map_err(|e| InitError::Io {
+        std::fs::write(&tmp, payload).map_err(|e| InitError::Io {
             path: tmp.clone(),
             source: e,
         })?;

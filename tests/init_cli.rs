@@ -45,16 +45,29 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 /// Run the compiled `init` subcommand with HOME isolated to `home`.
 fn run_init(home: &Path, args: &[&str]) -> Output {
+    run_init_with_xdg(home, None, args)
+}
+
+/// Like [`run_init`], but optionally points `$XDG_CONFIG_HOME` at `xdg`
+/// (None removes the variable — the default-branch behavior).
+fn run_init_with_xdg(home: &Path, xdg: Option<&Path>, args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_apohara-agentguard"));
     cmd.args(args)
         .current_dir(home)
         .env("HOME", home)
         .env_remove("AGENTGUARD_DISABLE")
         .env_remove("AGENTGUARD_POLICY")
-        .env_remove("XDG_CONFIG_HOME")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    match xdg {
+        Some(x) => {
+            cmd.env("XDG_CONFIG_HOME", x);
+        }
+        None => {
+            cmd.env_remove("XDG_CONFIG_HOME");
+        }
+    }
     cmd.output().expect("run apohara-agentguard init")
 }
 
@@ -542,7 +555,13 @@ fn install_leaves_no_temp_files_behind() {
         "stderr={}",
         String::from_utf8_lossy(&out.stderr)
     );
-    for subdir in [".claude", ".codex"] {
+    for subdir in [
+        ".claude",
+        ".codex",
+        ".config/opencode/plugins",
+        ".config/kilo/plugins",
+        ".kitty-code",
+    ] {
         let entries = std::fs::read_dir(home.join(subdir))
             .unwrap_or_else(|e| panic!("read {subdir}: {e}"))
             .filter_map(|e| e.ok())
@@ -623,6 +642,265 @@ fn yes_and_undo_are_mutually_exclusive() {
     );
     assert!(!home.join(".claude").exists());
     assert!(!home.join(".codex").exists());
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+// ---------------------------------------------------------------------------
+// (h) Wave U2′.5+6+7: opencode / kilo / kitty-code drop-in hosts
+// ---------------------------------------------------------------------------
+
+/// The shim source `init` must copy verbatim (same file the lib embeds).
+const SHIM_SOURCE: &str = include_str!("../packaging/opencode/agentguard-shim.mjs");
+
+#[test]
+fn fresh_opencode_install_drops_plugin_shim_idempotent_and_undo_removes() {
+    let home = temp_dir("opencode-fresh");
+    let out = run_init(&home, &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("opencode: wired"), "{stdout}");
+    assert!(
+        stdout.contains("opencode.json was not modified"),
+        "the no-config-edit note must be printed: {stdout}"
+    );
+
+    let shim = home.join(".config/opencode/plugins/agentguard-shim.mjs");
+    assert_eq!(
+        std::fs::read_to_string(&shim).expect("shim written"),
+        SHIM_SOURCE,
+        "init must copy the embedded shim VERBATIM"
+    );
+
+    // Idempotent re-run: already wired, byte-identical.
+    let out2 = run_init(&home, &["init", "--yes"]);
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("opencode: already wired"),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+    assert_eq!(std::fs::read_to_string(&shim).unwrap(), SHIM_SOURCE);
+
+    // Undo removes OUR file (exact content), then is a clean no-op.
+    let out3 = run_init(&home, &["init", "--undo"]);
+    assert_eq!(out3.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out3.stdout).contains("opencode: unwired"),
+        "{}",
+        String::from_utf8_lossy(&out3.stdout)
+    );
+    assert!(!shim.exists(), "undo must remove our exact shim");
+    let out4 = run_init(&home, &["init", "--undo"]);
+    assert_eq!(out4.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out4.stdout).contains("opencode: nothing to undo"),
+        "{}",
+        String::from_utf8_lossy(&out4.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn opencode_respects_xdg_config_home() {
+    let home = temp_dir("opencode-xdg");
+    let xdg = home.join("xdg-config");
+    std::fs::create_dir_all(&xdg).expect("create xdg root");
+
+    let out = run_init_with_xdg(&home, Some(&xdg), &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let shim = xdg.join("opencode/plugins/agentguard-shim.mjs");
+    assert_eq!(
+        std::fs::read_to_string(&shim).expect("shim under $XDG_CONFIG_HOME"),
+        SHIM_SOURCE
+    );
+    assert!(
+        !home.join(".config/opencode").exists(),
+        "with XDG set, nothing may land under ~/.config"
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn fresh_kilo_install_writes_plugin_and_veto_guide_undo_removes_both() {
+    let home = temp_dir("kilo-fresh");
+    let out = run_init(&home, &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("kilo: wired"), "{stdout}");
+
+    let shim = home.join(".config/kilo/plugins/agentguard-shim.mjs");
+    let guide = home.join(".config/kilo/agentguard-veto-guide.md");
+    assert_eq!(
+        std::fs::read_to_string(&shim).expect("kilo shim written"),
+        SHIM_SOURCE
+    );
+    let guide_text = std::fs::read_to_string(&guide).expect("veto guide written");
+    assert!(
+        guide_text.contains("hardRuleset") && guide_text.contains("YOLO"),
+        "the veto guide must document the YOLO-immune hardRuleset channel"
+    );
+
+    // Idempotent re-run.
+    let out2 = run_init(&home, &["init", "--yes"]);
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("kilo: already wired"),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+
+    // Undo removes BOTH artifacts.
+    let out3 = run_init(&home, &["init", "--undo"]);
+    assert_eq!(out3.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out3.stdout).contains("kilo: unwired"),
+        "{}",
+        String::from_utf8_lossy(&out3.stdout)
+    );
+    assert!(!shim.exists(), "undo must remove the kilo shim");
+    assert!(!guide.exists(), "undo must remove the veto guide");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn kitty_scaffold_lifecycle_create_idempotent_and_exact_undo() {
+    let home = temp_dir("kitty-fresh");
+    let policy = home.join(".kitty-code/policy.toml");
+
+    // Fresh install: scaffold written with the reported message.
+    let out = run_init(&home, &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("kitty-code: scaffolded"), "{stdout}");
+    assert!(
+        stdout.contains("embedded via library — policy scaffold written"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&policy).expect("scaffold written"),
+        apohara_agentguard::init::KITTY_SCAFFOLD,
+        "scaffold must match the library constant exactly"
+    );
+
+    // Re-run: already wired (content equality), untouched.
+    let out2 = run_init(&home, &["init", "--yes"]);
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("kitty-code: already wired"),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+
+    // Undo removes ONLY the exact scaffold.
+    let out3 = run_init(&home, &["init", "--undo"]);
+    assert_eq!(out3.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out3.stdout).contains("kitty-code: unwired"),
+        "{}",
+        String::from_utf8_lossy(&out3.stdout)
+    );
+    assert!(!policy.exists());
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn kitty_pre_existing_user_policy_is_never_touched() {
+    let home = temp_dir("kitty-user-policy");
+    let dir = home.join(".kitty-code");
+    std::fs::create_dir_all(&dir).expect("create .kitty-code");
+    let policy = dir.join("policy.toml");
+    let user_policy = "# my own kitty-code policy\n[other]\nflag = true\n";
+    std::fs::write(&policy, user_policy).expect("write user policy");
+
+    // Install: detection only — user policy reported untouched.
+    let out = run_init(&home, &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("kitty-code: existing policy detected, untouched"),
+        "{stdout}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&policy).unwrap(),
+        user_policy,
+        "a pre-existing non-scaffold policy.toml must be byte-identical after install"
+    );
+
+    // Undo: not ours ⇒ clean no-op, still untouched.
+    let out2 = run_init(&home, &["init", "--undo"]);
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("kitty-code: nothing to undo"),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+    assert_eq!(std::fs::read_to_string(&policy).unwrap(), user_policy);
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn dry_run_lists_all_five_hosts_without_writing_anything() {
+    let home = temp_dir("dryrun-five-hosts");
+    let out = run_init(&home, &["init"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for host in [
+        "claude-code",
+        "codex-code",
+        "opencode",
+        "kilo",
+        "kitty-code",
+    ] {
+        assert!(stdout.contains(host), "dry-run must list {host}: {stdout}");
+    }
+    for artifact in [
+        ".claude",
+        ".codex",
+        ".config/opencode",
+        ".config/kilo",
+        ".kitty-code",
+    ] {
+        assert!(
+            !home.join(artifact).exists(),
+            "dry-run must not create {artifact}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&home);
 }
