@@ -229,6 +229,21 @@ apohara-agentguard/
 
 ---
 
+## Provider support
+
+Where the hook contract actually ships today, stated plainly:
+
+| Provider | Status | Notes |
+|---|---|---|
+| **Claude Code** | Supported today | Ships as a plugin: manifest + hook config wire `apohara-agentguard hook` to `PreToolUse` / `PostToolUse` / `UserPromptSubmit` ([packaging/plugin.json](packaging/plugin.json), [packaging/hooks.json](packaging/hooks.json)). |
+| **OpenAI Codex** | Hook contract supported | Codex's `PreToolUse` payload is snake_case and identical to what the hook already parses; camelCase field spellings are accepted as aliases. Bash-command protection works identically; Codex's `apply_patch` edit tool is **not** mapped to the path-guard yet, so treat Codex wiring as Bash protection today. |
+| **OpenCode · Kilo Code · Kitty-Code** | Planned (v0.4 / v0.5) | Thin per-host shims over the same engine. Not shipped — do not rely on them. |
+| **MCP gateway** | Planned (v0.4 / v0.5) | MCP-as-transport-proxy (default-deny tool gating between agent and server). The read-only MCP _tool form_ (`check_command` / `scan_prompt` via `apohara-agentguard mcp`) ships today; the gateway does not. |
+
+A minimal auto-wiring command (`agentguard init`) that detects Claude Code / Codex installs and appends the hook configuration is implemented on `main` — it ships in v0.4.0 (`agentguard init --yes` to apply, plain `init` dry-runs, `--undo` removes immediately — no confirmation prompt). Until then, wire the hook yourself ([Quick Start](#-quick-start)).
+
+---
+
 ## 🗺️ Roadmap
 
 **Why this order.** The 2026 field has converged on the bet this project started with: deterministic, system-enforced pre-action authorization + sandboxed execution is the load-bearing layer of agent safety (NIST/IEEE RFI Mar 2026, the "Before the Tool Call" paper, the canonical 4-layer alignment → pre-action → sandbox → post-hoc stack). But the niche has **also** gotten crowded — `ptuf` (Rust, v0.3.0) covers six hosts and ships ask/monitor/plugins/MCP-path gating; native platform sandboxing (Cursor, Claude Code) is absorbing the firewall. **The durable differentiator is the depth of the deterministic pre-action layer + a real seccomp/Landlock sandbox + a published honest scorecard** — not injection detection, which is commoditized and brittle. Items below are ordered by that thesis, not by feature parity.
