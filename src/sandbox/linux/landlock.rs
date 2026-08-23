@@ -7,6 +7,18 @@
 //!     everything outside is denied.
 //!   - DangerFullAccess: no ruleset (Landlock skipped entirely).
 //!
+//! Access matrix outside the workspace (both enforcing tiers):
+//!   - READ + EXECUTE over `SYSTEM_RX_PATHS` (FHS system dirs incl. `/opt`,
+//!     loader files, scoped /etc subtrees, /dev null-ish devices, /proc/self)
+//!     and over env-resolved toolchain roots (`RUSTUP_HOME`, `CARGO_HOME`,
+//!     `GOROOT`, `GOMODCACHE`, `GOPATH`). Execute is required for the tier
+//!     promise "the requested tool runs"; it is granted read-only so system
+//!     toolchains can be executed but never modified.
+//!   - WRITE (full) over `GOCACHE` (default `~/.cache/go-build`) at
+//!     WorkspaceWrite only.
+//!   - Everything else outside the workspace: DENIED (fail-closed), including
+//!     `/etc/passwd` and `$HOME/.ssh`.
+//!
 //! ABI is auto-detected via the `landlock` crate's `CompatLevel::BestEffort`,
 //! so we use the best feature set the running kernel supports while keeping the
 //! ruleset enforceable on older kernels.
@@ -55,7 +67,10 @@ const SYSTEM_RX_PATHS: &[&str] = &[
     "/bin",
     "/sbin",
     "/lib",
-    "/lib64",             // separate-/usr distros
+    "/lib64", // separate-/usr distros
+    "/opt",   // /opt-rooted toolchains: GitHub hostedtoolcache (/usr/bin/go is a
+    // symlink into /opt/hostedtoolcache/go/... on ubuntu-24.04 runners),
+    // /opt-installed SDKs. Read+execute only, so /opt stays untamperable.
     "/etc/ld.so.cache",   // dynamic loader cache (single file, not all of /etc)
     "/etc/ld.so.preload", // loader preload list (single file)
     "/etc/alternatives",  // Debian/Ubuntu binary alternatives

@@ -26,14 +26,33 @@ fn run(root: &Path, argv: &[&str]) -> SandboxResult {
         .expect("sandbox run should not fail at setup on this Linux box")
 }
 
+/// Resolve a tool binary the way the sandboxed child's execvpe would: scan
+/// $PATH first (runner layouts put rustup tools in $HOME/.cargo/bin and
+/// toolcache tools under /opt/hostedtoolcache/*/bin), then fall back to the
+/// classic FHS dirs so the test still works with an empty PATH.
+///
+/// PATH entries under the user's runtime dir ($XDG_RUNTIME_DIR, e.g.
+/// /run/user/1000/fnm_multishells/<session>/bin) are skipped: those are
+/// per-session version-manager SHIM dirs whose targets live elsewhere
+/// (~/.local/share/fnm, ~/.nvm, ...) — ephemeral indirection, not a stable
+/// tool root, and deliberately outside the engine's Landlock grant set.
 fn which(name: &str) -> Option<PathBuf> {
-    for dir in ["/usr/bin", "/bin", "/usr/local/bin"] {
-        let p = Path::new(dir).join(name);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
+    let runtime_dir = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(d) => Some(std::path::PathBuf::from(d)),
+        None => std::env::var("UID")
+            .ok()
+            .map(|uid| std::path::PathBuf::from(format!("/run/user/{uid}"))),
+    };
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| {
+            std::env::split_paths(&p)
+                .filter(|d| !d.as_os_str().is_empty())
+                .filter(|d| !runtime_dir.as_ref().is_some_and(|rd| d.starts_with(rd)))
+                .collect()
+        })
+        .unwrap_or_default();
+    dirs.extend(["/usr/bin", "/bin", "/usr/local/bin"].map(PathBuf::from));
+    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
 }
 
 #[test]
