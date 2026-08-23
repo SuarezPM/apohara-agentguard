@@ -1,0 +1,35 @@
+# Scoped AppArmor policy for the sandbox proof lane (Story T2).
+#
+# WHY THIS EXISTS
+# On hosts where kernel.apparmor_restrict_unprivileged_userns=1 (the Ubuntu
+# 24.04 default), an unprivileged process may only create a user namespace if
+# it is confined by an AppArmor profile carrying a `userns` rule:
+#   https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007
+#   https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces
+# The sandbox integration tests call unshare(CLONE_NEWUSER|CLONE_NEWNS|
+# CLONE_NEWPID) from src/sandbox/linux/namespace.rs, so on such hosts the test
+# binaries need exactly that one grant.
+#
+# MINIMAL-GRANT SHAPE
+# flags=(unconfined) leaves every other mediation off; the only explicit rule
+# is `userns,`. This is the scoped, per-binary pattern recommended by Ubuntu —
+# no host-wide sysctl change is involved.
+#
+# ATTACHMENT TARGETS
+# Cargo compiles integration-test binaries as hashed executables under
+# target/{debug,release}/deps/. The attachment glob below covers both local
+# checkouts and GitHub-hosted runner layouts
+# (/home/runner/work/<repo>/<repo>/target/...). Confinement is inherited across
+# fork(), so the sandboxed grandchildren created inside the tests carry the
+# same grant.
+#
+# USAGE
+#   Load:   sudo apparmor_parser -r .ci/apparmor/cargo-test-userns
+#   Unload: sudo apparmor_parser -R .ci/apparmor/cargo-test-userns
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile agentguard_cargo_test_userns /{home/*,root}/**/target/{debug,release}/deps/* flags=(unconfined) {
+  userns,
+}

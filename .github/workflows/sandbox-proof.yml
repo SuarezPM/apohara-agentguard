@@ -1,0 +1,142 @@
+# =============================================================================
+# sandbox-proof.yml — enforcement-proof lane for the seccomp+Landlock sandbox
+# (Story T2). Complements ci.yml; does NOT replace or weaken anything there.
+#
+# WHY THIS LANE EXISTS
+# In ci.yml the five kernel-capability suites (sandbox_seccomp,
+# sandbox_landlock, sandbox_build_e2e, sandbox_escape, sandbox_failclosed) run
+# continue-on-error because GitHub-hosted runners may lack userns/Landlock,
+# so a capability gap must not fail the required gate. This lane attempts a
+# SCOPED AppArmor profile attach (.ci/apparmor/cargo-test-userns) that grants
+# unprivileged user namespaces to the compiled test binaries ONLY — no
+# host-wide sysctl change — then runs the SAME five suites as a HARD gate
+# (nonzero exit on any test failure).
+#
+# RUN SEMANTICS
+# - PROFILE_OK          → proofs ran ENFORCED: userns creation was mediated by
+#                         AppArmor and granted via the scoped profile attached
+#                         to target/{debug,release}/deps/* binaries.
+# - PROFILE_UNAVAILABLE → runner lacks the feature (AppArmor absent from the
+#                         LSM list, parser missing, or policy rejected). The
+#                         run is marked UNPROVEN in the step summary; the
+#                         suites still run and their internal capability
+#                         probes decide pass/skip semantics exactly as in
+#                         main CI today. Real test failures fail this job in
+#                         both cases.
+#
+# COVERAGE-VISIBILITY DECISION (review requirement)
+# - src/sandbox/linux/** REMAINS EXCLUDED from the coverage gate (ci.yml
+#   `coverage` job: --ignore-filename-regex 'src/sandbox/linux', regions >= 92)
+#   until this proof lane graduates to enforced-on-hosted, i.e. PROFILE_OK is
+#   observed reliably across ubuntu-latest image updates. At graduation time,
+#   revisit BOTH the inclusion of src/sandbox/linux/** and the 92 threshold.
+# - Any helper code for profile attachment lives under .ci/apparmor/ (shell +
+#   AppArmor policy text). It is not Rust source: cargo-llvm-cov never sees it,
+#   so it is counted toward coverage NEITHER way (neither included nor
+#   excluded).
+#
+# HOSTED-RUNNER FACTS (checked 2026-08, actions/runner-images)
+# - Ubuntu 24.04 restricts unprivileged user namespaces via AppArmor:
+#   unprivileged processes may only create a userns when confined by a profile
+#   carrying a `userns` rule (or holding CAP_SYS_ADMIN).
+#   Refs: https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007
+#         https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces
+# - The restriction causes `unshare: Operation not permitted` failures on the
+#   ubuntu-24.04 runner image (actions/runner-images#10443); the common
+#   workaround is the host-wide sysctl
+#   kernel.apparmor_restrict_unprivileged_userns=0, which this lane
+#   deliberately avoids in favor of the scoped profile above.
+# - Runner-image maintainers declined to disable AppArmor on the images
+#   (actions/runner-images#10015), so the scoped-profile attach is expected to
+#   work on ubuntu-latest; the guard below still tolerates its absence.
+
+name: sandbox-proof
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'src/sandbox/**'
+      - 'tests/sandbox_*'
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    name: sandbox confinement proofs (enforced when runner allows)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      # Best-effort scoped attach. Never fails the job on unavailability —
+      # the guard records which world we are in and the summaries below make
+      # the distinction prominent.
+      - name: Attach scoped AppArmor profile (best-effort)
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=PROFILE_UNAVAILABLE
+          if sudo apparmor_parser -r .ci/apparmor/* 2>&1; then
+            echo PROFILE_OK
+            status=PROFILE_OK
+          else
+            echo PROFILE_UNAVAILABLE
+          fi
+          echo "PROFILE_STATUS=$status" >> "$GITHUB_ENV"
+
+          {
+            echo "## Sandbox confinement proofs"
+            if [ "$status" = PROFILE_OK ]; then
+              echo ""
+              echo "### ✅ ENFORCED — scoped AppArmor profile attached"
+              echo ""
+              echo "User-namespace creation by the test binaries was mediated by"
+              echo "AppArmor and granted via \`.ci/apparmor/cargo-test-userns\`."
+              echo "The five sandbox suites below ran under that confinement."
+            else
+              echo ""
+              echo "### ⚠️ UNPROVEN (runner lacks feature)"
+              echo ""
+              echo "The scoped AppArmor attach was unavailable on this runner."
+              echo "The five sandbox suites still run below; their internal"
+              echo "capability probes decide pass/skip semantics as in main CI."
+              echo "This run does NOT count as an enforced confinement proof."
+            fi
+            echo ""
+            echo "<details><summary>Attach diagnostics</summary>"
+            echo ""
+            echo '```'
+            echo "apparmor_restrict_unprivileged_userns: $(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || echo 'sysctl absent')"
+            echo "active LSMs: $(cat /sys/kernel/security/lsm 2>/dev/null || echo 'unknown')"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # HARD run: no continue-on-error here, ever. Exit nonzero on failure.
+      - name: Run five sandbox suites (hard gate in this lane)
+        shell: bash
+        run: |
+          cargo test --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e \
+                     --test sandbox_escape --test sandbox_failclosed -- --nocapture
+
+      - name: Verdict
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "---"
+            if [ "${PROFILE_STATUS:-PROFILE_UNAVAILABLE}" = PROFILE_OK ]; then
+              echo "**Lane verdict: ${job_status} — proofs ran ENFORCED.**"
+            else
+              echo "**Lane verdict: ${job_status} — unproven (runner lacks feature).**"
+              echo "Suites executed without the scoped grant; treat as smoke,"
+              echo "not as an enforced confinement proof."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          job_status: ${{ job.status }}
