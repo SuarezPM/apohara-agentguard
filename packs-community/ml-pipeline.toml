@@ -1,0 +1,50 @@
+# apohara-agentguard COMMUNITY pack — ML pipelines & dataset management
+#
+# Opt-in: enable with [community_packs] enabled = ["ml-pipeline"] and
+# community_packs.dir pointing at this directory (or the
+# AGENTGUARD_COMMUNITY_PACKS_DIR environment variable).
+# Patterns are substring or `*`-glob per leg (NOT regex); severity >= 8 blocks
+# under the default thresholds.
+
+schema_version = 1
+
+[pack]
+name = "ml-pipeline"
+version = "1.0.0"
+description = "Irreversible ML/dataset operations: HuggingFace repo deletion, ClearML dataset deletion, Databricks FS/workspace removal, W&B artifact removal, MLflow garbage collection."
+
+[[rules]]
+id = "ml-hfcli-delete"
+pattern = "huggingface-cli delete"
+severity = 8
+category = "ml"
+
+[[rules]]
+id = "ml-clearml-dataset-delete"
+pattern = "clearml-data delete"
+severity = 8
+category = "ml"
+
+[[rules]]
+id = "ml-databricks-fs-rm"
+pattern = "databricks fs rm"
+severity = 8
+category = "ml"
+
+[[rules]]
+id = "ml-databricks-workspace-delete"
+pattern = "databricks workspace delete"
+severity = 8
+category = "ml"
+
+[[rules]]
+id = "ml-wandb-artifact-rm"
+pattern = "wandb artifact rm"
+severity = 8
+category = "ml"
+
+[[rules]]
+id = "ml-mlflow-gc"
+pattern = "mlflow gc"
+severity = 8
+category = "ml"

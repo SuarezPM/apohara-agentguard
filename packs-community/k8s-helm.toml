@@ -1,0 +1,62 @@
+# apohara-agentguard COMMUNITY pack — Kubernetes & Helm
+#
+# Opt-in: enable with [community_packs] enabled = ["k8s-helm"] and
+# community_packs.dir pointing at this directory (or the
+# AGENTGUARD_COMMUNITY_PACKS_DIR environment variable).
+# Patterns are substring or `*`-glob per leg (NOT regex); severity >= 8 blocks
+# under the default thresholds.
+
+schema_version = 1
+
+[pack]
+name = "k8s-helm"
+version = "1.0.0"
+description = "Destructive Kubernetes/Helm operations: namespace deletion, --all sweeps, workload deletion, release uninstall, apply --prune, cluster teardown."
+
+[[rules]]
+id = "k8s-delete-namespace"
+pattern = "kubectl delete namespace"
+severity = 9
+category = "k8s"
+
+[[rules]]
+id = "k8s-delete-all"
+pattern = "kubectl delete *--all*"
+severity = 9
+category = "k8s"
+
+[[rules]]
+id = "k8s-delete-deployment"
+pattern = "kubectl delete deployment"
+severity = 8
+category = "k8s"
+
+[[rules]]
+id = "k8s-delete-statefulset"
+pattern = "kubectl delete statefulset"
+severity = 8
+category = "k8s"
+
+[[rules]]
+id = "helm-uninstall"
+pattern = "helm uninstall"
+severity = 8
+category = "k8s"
+
+[[rules]]
+id = "helm-delete-release"
+pattern = "helm delete"
+severity = 8
+category = "k8s"
+
+[[rules]]
+id = "k8s-apply-prune"
+pattern = "kubectl apply *--prune*"
+severity = 8
+category = "k8s"
+
+[[rules]]
+id = "minikube-delete"
+pattern = "minikube delete"
+severity = 8
+category = "k8s"

@@ -1,0 +1,36 @@
+# apohara-agentguard community pack `k8s-helm` corpus — BENIGN
+#
+# Read-only / non-destructive look-alikes the `k8s-helm` pack must NOT flag
+# (no Block), even with the pack ENABLED. One per line.
+# `#`-prefixed and blank lines ignored.
+
+# --- kubectl read / inspect ---
+kubectl get pods -A
+kubectl get events --sort-by=.lastTimestamp
+kubectl describe pod web-0
+kubectl logs -f deploy/api
+kubectl top nodes
+kubectl config current-context
+kubectl rollout status deploy/api
+
+# --- kubectl mutating but non-destructive ---
+kubectl apply -f k8s/
+kubectl scale deployment api --replicas=3
+kubectl set image deploy/api api=api:1.2.3
+kubectl annotate pod web-0 team=platform
+kubectl cordon node-1
+
+# --- helm install / upgrade / inspect ---
+helm list -A
+helm search repo nginx
+helm show values bitnami/nginx
+helm install api ./charts/api
+helm upgrade api ./charts/api --reuse-values
+helm rollback api 2
+helm template ./charts/api
+helm lint ./charts/api
+
+# --- minikube (non-delete) ---
+minikube status
+minikube dashboard
+minikube start --nodes 2

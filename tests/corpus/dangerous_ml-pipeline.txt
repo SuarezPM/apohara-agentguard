@@ -1,0 +1,23 @@
+# apohara-agentguard community pack `ml-pipeline` corpus — DANGEROUS
+#
+# Commands the OPT-IN `ml-pipeline` pack SHOULD catch (Block). One per line.
+# `#`-prefixed and blank lines are ignored. Only meaningful with the
+# ml-pipeline community pack ENABLED ([community_packs] enabled =
+# ["ml-pipeline"]); never part of the default benchmark.
+
+# --- huggingface hub deletion ---
+huggingface-cli delete my-org/dataset --dataset
+huggingface-cli delete my-org/model
+
+# --- clearml dataset deletion ---
+clearml-data delete --id 1234abcd
+
+# --- databricks removals (recursive FS wipe / workspace subtree) ---
+databricks fs rm -r dbfs:/mnt/legacy
+databricks workspace delete /Users/me/old-notebooks --recursive
+
+# --- wandb artifact removal ---
+wandb artifact rm my-project/artifact:v0
+
+# --- mlflow permanent garbage collection ---
+mlflow gc --backend-store-uri sqlite:///mlflow.db

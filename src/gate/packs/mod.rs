@@ -11,6 +11,10 @@ mod cloud;
 mod container;
 mod db;
 
+/// Runtime-loaded COMMUNITY packs (`*.toml` files in a user-configured
+/// directory) — see [`community`] for the file format and loader contract.
+pub(crate) mod community;
+
 use crate::gate::taxonomy::DestructiveRule;
 
 /// Resolve a pack NAME to its rule slice. Unknown names resolve to `None` and

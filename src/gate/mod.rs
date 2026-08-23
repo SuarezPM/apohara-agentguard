@@ -26,6 +26,7 @@ mod taxonomy;
 
 use crate::config::{Config, CustomBlock};
 use crate::verdict::{severity_to_tier, Tier, Verdict};
+use packs::community::CommunityRule;
 
 /// Cap on how deep the gate recurses into LIVE command-substitution bodies found
 /// inside a non-executing verb's double-quoted argument (`echo "$( … )"`). Bounds
@@ -64,6 +65,12 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     };
     let command: &str = &scan_command;
 
+    // Community pack rules (V5-A): resolved ONCE per evaluation and threaded
+    // through the leg scans. With `community_packs.enabled` empty (the
+    // default) this is an empty vec resolved WITHOUT env/fs access, so the
+    // default path stays byte-identical to the no-community-packs build.
+    let community_rules = packs::community::active_rules(&config.community_packs);
+
     let mut best: Option<Hit> = None;
 
     // Pre-split analysis: `curl … | sh` is a pipe relationship that vanishes
@@ -97,7 +104,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     // split, so decode the ORIGINAL command's pipe and rescan the payload.
     if let Some(decoded) = decode::decode_and_expand(command, 0) {
         for inner in compound::split_compound(&decoded) {
-            scan_leg(&inner, 1, config, &mut best);
+            scan_leg(&inner, 1, config, &mut best, &community_rules);
         }
     }
 
@@ -107,7 +114,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
 
     // 5. Match each (resolved/decoded) leg.
     for leg in &resolved {
-        scan_leg(leg, 0, config, &mut best);
+        scan_leg(leg, 0, config, &mut best, &community_rules);
     }
 
     // 5b. IFS re-split (gated): an `IFS=<char>` reassignment makes that char a
@@ -117,7 +124,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     //     surfaces a Block-tier hit, so a benign IFS-driven loop or read is
     //     never mangled into a false positive.
     if !extra_seps.is_empty() {
-        if let Some(hit) = ifs_resplit_block(command, &extra_seps, config) {
+        if let Some(hit) = ifs_resplit_block(command, &extra_seps, config, &community_rules) {
             consider(&mut best, hit);
         }
     }
@@ -137,7 +144,12 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
 /// e.g. `cmdXrmX-rfX~` -> `cmd rm -rf ~`), split, and scan. Returns a hit ONLY
 /// if the re-scan surfaces a Block-tier match — otherwise `None` (no-op), so a
 /// benign `IFS`-driven loop or `read` is never turned into a false positive.
-fn ifs_resplit_block(command: &str, extra_seps: &[char], config: &Config) -> Option<Hit> {
+fn ifs_resplit_block(
+    command: &str,
+    extra_seps: &[char],
+    config: &Config,
+    community: &[CommunityRule],
+) -> Option<Hit> {
     let legs = compound::split_compound(command);
     let mut rebuilt: Vec<String> = Vec::with_capacity(legs.len());
     let mut seen_ifs = false;
@@ -160,7 +172,7 @@ fn ifs_resplit_block(command: &str, extra_seps: &[char], config: &Config) -> Opt
     let resolved = resolve::resolve_assignments(&rebuilt);
     let mut ifs_best: Option<Hit> = None;
     for leg in &resolved {
-        scan_leg(leg, 0, config, &mut ifs_best);
+        scan_leg(leg, 0, config, &mut ifs_best, community);
     }
     match ifs_best {
         Some(hit) if severity_to_tier(hit.severity, &config.thresholds) == Tier::Block => Some(hit),
@@ -168,9 +180,15 @@ fn ifs_resplit_block(command: &str, extra_seps: &[char], config: &Config) -> Opt
     }
 }
 
-/// Scan a single leg: taxonomy rules, custom blocks, and (bounded) base64
-/// decode-and-rescan. Folds the worst hit into `best`.
-fn scan_leg(leg: &str, depth: u8, config: &Config, best: &mut Option<Hit>) {
+/// Scan a single leg: taxonomy rules, community pack rules, custom blocks, and
+/// (bounded) base64 decode-and-rescan. Folds the worst hit into `best`.
+fn scan_leg(
+    leg: &str,
+    depth: u8,
+    config: &Config,
+    best: &mut Option<Hit>,
+    community: &[CommunityRule],
+) {
     // Verb-aware match text: a destructive substring inside a quoted ARGUMENT to
     // a non-executing verb (`git commit -m`, `echo`, `printf`, `#` comment) is
     // DATA, not a command, so it is suppressed; an executing verb (`sh -c`,
@@ -196,6 +214,22 @@ fn scan_leg(leg: &str, depth: u8, config: &Config, best: &mut Option<Hit>) {
         }
     }
 
+    // Community pack rules (V5-A): data-driven substring/glob rules loaded
+    // from `*.toml` pack files, enabled via `[community_packs]`. Matched
+    // against the same verb-aware match text as every other per-leg rule.
+    for rule in community {
+        if rule.matches(&match_text) {
+            consider(
+                best,
+                Hit {
+                    severity: rule.severity,
+                    leg: leg.to_string(),
+                    label: format!("{} [{}]", rule.category, rule.id),
+                },
+            );
+        }
+    }
+
     // Live command substitutions inside a non-executing verb's DOUBLE-quoted
     // argument (`echo "$(rm -rf ~)"`, `git commit -m "$(rm -rf ~)"`). The body
     // is run by bash regardless of the outer verb, so scan it AS A COMMAND.
@@ -206,7 +240,7 @@ fn scan_leg(leg: &str, depth: u8, config: &Config, best: &mut Option<Hit>) {
     // with the normalize/decode caps).
     if depth < MAX_SUBST_DEPTH {
         for body in taxonomy::live_substitution_bodies(leg) {
-            scan_substitution_body(&body, depth + 1, config, best);
+            scan_substitution_body(&body, depth + 1, config, best, community);
         }
     }
 
@@ -228,7 +262,7 @@ fn scan_leg(leg: &str, depth: u8, config: &Config, best: &mut Option<Hit>) {
     if let Some(decoded) = decode::decode_and_expand(leg, depth) {
         // The decoded payload may itself be compound; re-split before rescan.
         for inner in compound::split_compound(&decoded) {
-            scan_leg(&inner, depth + 1, config, best);
+            scan_leg(&inner, depth + 1, config, best, community);
         }
     } else if depth + 1 >= decode::MAX_DECODE_DEPTH && has_unresolved_decode(leg) {
         // We hit the decode cap with a payload still present -> WARN, do not
@@ -257,7 +291,13 @@ fn scan_leg(leg: &str, depth: u8, config: &Config, best: &mut Option<Hit>) {
 ///     substitution nested in it (`$( echo "$(rm -rf ~)" )`).
 ///   - any other head (`rm -rf ~`, `sh -c …`, `eval …`): the body runs a real
 ///     command — scan it through the full pipeline (`$(rm -rf ~)` Blocks).
-fn scan_substitution_body(body: &str, depth: u8, config: &Config, best: &mut Option<Hit>) {
+fn scan_substitution_body(
+    body: &str,
+    depth: u8,
+    config: &Config,
+    best: &mut Option<Hit>,
+    community: &[CommunityRule],
+) {
     // The body is a full command, so run the same PRE-SPLIT structural analyses
     // `evaluate` runs on the top-level command — these relationships vanish once
     // split into legs: `curl … | sh` (pipe), a fork bomb's `;`/`|`/`&` signature,
@@ -286,7 +326,7 @@ fn scan_substitution_body(body: &str, depth: u8, config: &Config, best: &mut Opt
     if depth < decode::MAX_DECODE_DEPTH {
         if let Some(decoded) = decode::decode_and_expand(body, depth) {
             for inner in compound::split_compound(&decoded) {
-                scan_leg(&inner, depth + 1, config, best);
+                scan_leg(&inner, depth + 1, config, best, community);
             }
         }
     }
@@ -296,11 +336,11 @@ fn scan_substitution_body(body: &str, depth: u8, config: &Config, best: &mut Opt
             // Inert output: recurse only into its own nested live substitutions.
             if depth < MAX_SUBST_DEPTH {
                 for inner in taxonomy::live_substitution_bodies(&leg) {
-                    scan_substitution_body(&inner, depth + 1, config, best);
+                    scan_substitution_body(&inner, depth + 1, config, best, community);
                 }
             }
         } else {
-            scan_leg(&leg, depth, config, best);
+            scan_leg(&leg, depth, config, best, community);
         }
     }
 }
@@ -315,22 +355,11 @@ fn has_unresolved_decode(leg: &str) -> bool {
 }
 
 /// Match a custom block against a leg: `*`-glob if it contains `*`, else
-/// substring.
+/// substring. Delegates to the shared matcher also used by community pack
+/// rules (`packs::community::pattern_matches`) so both surfaces keep the exact
+/// same substring/glob semantics.
 fn custom_block_matches(cb: &CustomBlock, leg: &str) -> bool {
-    if cb.pattern.contains('*') {
-        // `*`-glob: every non-empty part must appear in order (contains-of-parts).
-        let parts: Vec<&str> = cb.pattern.split('*').filter(|p| !p.is_empty()).collect();
-        let mut cursor = 0usize;
-        for part in parts {
-            match leg[cursor..].find(part) {
-                Some(pos) => cursor += pos + part.len(),
-                None => return false,
-            }
-        }
-        true
-    } else {
-        leg.contains(&cb.pattern)
-    }
+    packs::community::pattern_matches(&cb.pattern, leg)
 }
 
 /// Keep the higher-severity hit.

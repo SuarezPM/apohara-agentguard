@@ -1,0 +1,56 @@
+# apohara-agentguard COMMUNITY pack — Infrastructure-as-Code (Terraform/OpenTofu/Pulumi)
+#
+# Opt-in: enable with [community_packs] enabled = ["iac-terraform"] and
+# community_packs.dir pointing at this directory (or the
+# AGENTGUARD_COMMUNITY_PACKS_DIR environment variable).
+# Patterns are substring or `*`-glob per leg (NOT regex); severity >= 8 blocks
+# under the default thresholds.
+
+schema_version = 1
+
+[pack]
+name = "iac-terraform"
+version = "1.0.0"
+description = "Destructive IAC teardown commands: terraform/tofu destroy, unattended apply, state manipulation, pulumi/terragrunt destroy."
+
+[[rules]]
+id = "tf-destroy"
+pattern = "terraform destroy"
+severity = 9
+category = "iac"
+
+[[rules]]
+id = "tofu-destroy"
+pattern = "tofu destroy"
+severity = 9
+category = "iac"
+
+[[rules]]
+id = "pulumi-destroy"
+pattern = "pulumi destroy"
+severity = 9
+category = "iac"
+
+[[rules]]
+id = "terragrunt-destroy"
+pattern = "terragrunt destroy"
+severity = 9
+category = "iac"
+
+[[rules]]
+id = "tf-apply-auto-approve"
+pattern = "terraform apply *-auto-approve*"
+severity = 8
+category = "iac"
+
+[[rules]]
+id = "tf-state-rm"
+pattern = "terraform state rm"
+severity = 8
+category = "iac"
+
+[[rules]]
+id = "tf-workspace-delete"
+pattern = "terraform workspace delete"
+severity = 8
+category = "iac"

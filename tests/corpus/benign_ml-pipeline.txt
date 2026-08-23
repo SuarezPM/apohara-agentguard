@@ -1,0 +1,35 @@
+# apohara-agentguard community pack `ml-pipeline` corpus — BENIGN
+#
+# Read-only / non-destructive look-alikes the `ml-pipeline` pack must NOT flag
+# (no Block), even with the pack ENABLED. One per line.
+# `#`-prefixed and blank lines ignored.
+
+# --- huggingface (non-delete) ---
+huggingface-cli download bert-base-uncased
+huggingface-cli login
+huggingface-cli scan-cache
+huggingface-cli upload my-org/my-model ./weights
+
+# --- clearml (non-delete) ---
+clearml-data create --name datasets-raw
+clearml-data add --files ./data/train.csv
+clearml-data close
+clearml-task --project pipelines --script train.py
+
+# --- databricks (non-destructive) ---
+databricks fs ls dbfs:/
+databricks fs cp ./model.tgz dbfs:/mnt/models/
+databricks workspace list
+databricks workspace export /Users/me/notebooks/train
+
+# --- wandb / mlflow (non-destructive) ---
+wandb login
+wandb sync ./runs
+wandb artifact put ./checkpoint.pt model/checkpoints
+mlflow ui --port 5000
+mlflow run . -P epochs=3
+mlflow models serve -m runs:/42/model
+
+# --- plain training entry points ---
+python train.py --data ./datasets/train.csv
+python -m pip install -r requirements.txt

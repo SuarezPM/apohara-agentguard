@@ -1,0 +1,34 @@
+# apohara-agentguard community pack `iac-terraform` corpus — BENIGN
+#
+# Read-only / non-destructive look-alikes the `iac-terraform` pack must NOT
+# flag (no Block), even with the pack ENABLED. One per line.
+# `#`-prefixed and blank lines ignored.
+
+# --- terraform read-only / plan ---
+terraform plan
+terraform plan -out=tfplan
+terraform init
+terraform validate
+terraform fmt -recursive
+terraform show tfplan
+terraform output -json
+terraform providers
+terraform state list
+terraform state show aws_instance.web
+
+# --- terraform normal apply (attended, no -auto-approve) ---
+terraform apply
+terraform apply tfplan
+
+# --- terraform workspace (non-destructive subcommands) ---
+terraform workspace list
+terraform workspace select prod
+terraform workspace new staging
+
+# --- opentofu / pulumi / terragrunt safe ops ---
+tofu init
+tofu plan
+pulumi preview
+pulumi up --yes
+terragrunt plan
+terragrunt apply

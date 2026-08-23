@@ -83,6 +83,34 @@ pub struct PolicyConfig {
     pub file: Option<PathBuf>,
 }
 
+/// `[community_packs]` configuration (V5-A): opt-in COMMUNITY rule packs
+/// loaded at runtime from `*.toml` pack files (see
+/// `crate::gate::packs::community` for the file format). Off by default: an
+/// empty/absent section enables nothing and the gate is byte-identical to the
+/// no-community-packs build.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommunityPacksConfig {
+    /// Names of community packs to enable (the `pack.name` declared in their
+    /// TOML files). Empty/absent ⇒ OFF. An enabled name that matches no loaded
+    /// pack file produces a one-time stderr warning, never an error.
+    ///
+    /// Layering note (Story D3): PROTECTION-ADDITIVE with UNION semantics —
+    /// the project layer may only ADD names; dropping a user-enabled name is
+    /// a loud error (see [`merge_tightening`]).
+    #[serde(default)]
+    pub enabled: Vec<String>,
+    /// Directory holding the `*.toml` community pack files. Resolution order:
+    /// `AGENTGUARD_COMMUNITY_PACKS_DIR` env > this key > none (nothing loads).
+    /// A missing directory is silent (opt-in surface).
+    ///
+    /// Layering note (Story D3): IMMUTABLE once set by the user layer (same
+    /// reasoning as `policy.file`) — swapping the directory swaps WHICH
+    /// rulesets are enforced.
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
+}
+
 /// User-facing configuration that overrides built-in defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -142,6 +170,14 @@ pub struct Config {
     /// file loaded). See [`PolicyConfig`].
     #[serde(default)]
     pub policy: PolicyConfig,
+    /// Community rule packs (`[community_packs]`, V5-A). Off by default
+    /// (empty enabled list, no directory). See [`CommunityPacksConfig`].
+    ///
+    /// Layering note (Story D3): `community_packs.enabled` is
+    /// protection-additive (the project layer may only ADD names);
+    /// `community_packs.dir` is immutable once the user layer sets it.
+    #[serde(default)]
+    pub community_packs: CommunityPacksConfig,
 }
 
 /// Default for [`Config::normalize`] — the pre-pass is on by default.
@@ -172,6 +208,8 @@ impl Default for Config {
             // Policy file evaluator off by default (no file loaded). The engine
             // is a no-op combine; empty-TOML / `Config::default()` agree.
             policy: PolicyConfig::default(),
+            // Community packs off by default (nothing enabled, no directory).
+            community_packs: CommunityPacksConfig::default(),
         }
     }
 }
@@ -498,6 +536,10 @@ struct TighteningPresence {
     // Protection-adjacent (M1): opt-in packs + enforced ruleset identity.
     packs: bool,
     policy: bool,
+    // Protection-adjacent (V5-A): opt-in community packs (union-additive
+    // enabled list; dir immutable once set).
+    community_packs_enabled: bool,
+    community_packs_dir: bool,
     // Non-protection fields (project wins last-match, no validation).
     audit: bool,
     canary: bool,
@@ -519,6 +561,8 @@ impl TighteningPresence {
         "level",
         "packs",
         "policy",
+        "community_packs.enabled",
+        "community_packs.dir",
         "audit",
         "canary",
     ];
@@ -527,6 +571,7 @@ impl TighteningPresence {
     fn from_toml(text: &str) -> Result<Self> {
         let tbl: toml::Table = toml::from_str(text)?;
         let thresholds = tbl.get("thresholds").and_then(toml::Value::as_table);
+        let community_packs = tbl.get("community_packs").and_then(toml::Value::as_table);
         Ok(Self {
             thresholds_block_at: thresholds.is_some_and(|t| t.contains_key("block_at")),
             thresholds_warn_at: thresholds.is_some_and(|t| t.contains_key("warn_at")),
@@ -539,6 +584,8 @@ impl TighteningPresence {
             level: tbl.contains_key("level"),
             packs: tbl.contains_key("packs"),
             policy: tbl.contains_key("policy"),
+            community_packs_enabled: community_packs.is_some_and(|t| t.contains_key("enabled")),
+            community_packs_dir: community_packs.is_some_and(|t| t.contains_key("dir")),
             audit: tbl.contains_key("audit"),
             canary: tbl.contains_key("canary"),
         })
@@ -562,6 +609,8 @@ const PROTECTION_CONFIG_FIELDS: &[&str] = &[
     "level",
     "packs",
     "policy",
+    "community_packs.enabled",
+    "community_packs.dir",
 ];
 
 /// Rank a [`Tier`] on the Allow < Warn < Ask < Block lattice. Local copy of
@@ -596,6 +645,8 @@ fn action_rank(t: Tier) -> u8 {
 /// | normalize      | turning OFF what the user has ON rejected                                     |
 /// | packs          | project must keep every user-opted-in pack (superset); new packs additive      |
 /// | policy.file    | IMMUTABLE once set by the user layer: never cleared or replaced (project may only SET it when the user layer has none — additive bootstrap) |
+/// | community_packs.enabled | UNION-additive: project must keep every user-enabled pack name; merged list = user names first, then project additions |
+/// | community_packs.dir     | IMMUTABLE once set by the user layer: never cleared or replaced (project may only SET it when the user layer has none) |
 ///
 /// Absent keys INHERIT the user layer's value (overlay semantics); presence
 /// is tracked by [`TighteningPresence`]. Detection/observability surfaces
@@ -797,6 +848,48 @@ fn merge_tightening(base: Config, overlay: Config, p: &TighteningPresence) -> Re
         merged.packs = overlay.packs;
     }
 
+    // --- community_packs: opt-in community packs are PROTECTION (V5-A) --------
+    // enabled: UNION-additive. The project list must keep every user-enabled
+    // name (dropping one would silently remove those rules from enforcement);
+    // additions are always fine. The merged list is the union with USER order
+    // first, then project-only names appended.
+    if p.community_packs_enabled {
+        for up in &base.community_packs.enabled {
+            if !overlay.community_packs.enabled.contains(up) {
+                anyhow::bail!(
+                    "community_packs.enabled is missing the user-opted-in pack {up:?} — \
+                     dropping a community pack would weaken the gate"
+                );
+            }
+        }
+        let mut enabled = base.community_packs.enabled.clone();
+        for name in overlay.community_packs.enabled {
+            if !enabled.contains(&name) {
+                enabled.push(name);
+            }
+        }
+        merged.community_packs.enabled = enabled;
+    }
+    // dir: IMMUTABLE once the user layer sets it (same reasoning as
+    // policy.file): swapping the directory swaps WHICH pack files are loaded,
+    // and an explicit-empty project section must not clear it.
+    if p.community_packs_dir {
+        match (&base.community_packs.dir, &overlay.community_packs.dir) {
+            (Some(user_dir), Some(proj_dir)) if proj_dir != user_dir => {
+                anyhow::bail!(
+                    "community_packs.dir {proj_dir:?} cannot replace the user layer's \
+                     community packs directory {user_dir:?} — swapping the loaded pack \
+                     directory would weaken the gate"
+                );
+            }
+            // User dir set: keep it verbatim (explicit-empty project included).
+            (Some(_), _) => {}
+            // No user dir: the project may bootstrap one.
+            (None, Some(proj_dir)) => merged.community_packs.dir = Some(proj_dir.clone()),
+            (None, None) => {}
+        }
+    }
+
     // --- audit / canary: detection & observability, accepted-by-design ---------
     // The project layer MAY disable these last-match-wins: they are
     // detection/observability surfaces, not pre-execution enforcement, and
@@ -913,6 +1006,12 @@ mod tests {
             // Non-default (default is None) so the round-trip exercises [policy].
             policy: PolicyConfig {
                 file: Some(PathBuf::from("/etc/agentguard/policy.toml")),
+            },
+            // Non-default (default is empty/off) so the round-trip exercises
+            // [community_packs].
+            community_packs: CommunityPacksConfig {
+                enabled: vec!["my-org-infra".to_string()],
+                dir: Some(PathBuf::from("/opt/agentguard/packs-community")),
             },
         }
     }
@@ -1046,6 +1145,10 @@ mod tests {
         // v0.3 [policy] field.
         assert_ne!(cfg.policy, Config::default().policy);
         assert!(cfg.policy.file.is_some());
+        // V5-A [community_packs] field.
+        assert_ne!(cfg.community_packs, Config::default().community_packs);
+        assert!(!cfg.community_packs.enabled.is_empty());
+        assert!(cfg.community_packs.dir.is_some());
     }
 
     #[test]
@@ -1717,6 +1820,156 @@ mod tests {
         );
     }
 
+    // ---- V5-A: [community_packs] schema + D3 union tightening --------------
+
+    #[test]
+    fn partial_toml_omitting_community_packs_is_default() {
+        let text = r#"
+            allow_list = ["git status"]
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parse partial");
+        assert_eq!(cfg.community_packs, CommunityPacksConfig::default());
+        assert!(cfg.community_packs.enabled.is_empty());
+        assert!(cfg.community_packs.dir.is_none());
+    }
+
+    #[test]
+    fn community_packs_section_round_trips() {
+        let text = r#"
+            [community_packs]
+            enabled = ["iac-terraform", "k8s-helm"]
+            dir = "/opt/agentguard/packs-community"
+        "#;
+        let cfg: Config = toml::from_str(text).expect("parse [community_packs]");
+        assert_eq!(
+            cfg.community_packs.enabled,
+            vec!["iac-terraform".to_string(), "k8s-helm".to_string()]
+        );
+        assert_eq!(
+            cfg.community_packs.dir,
+            Some(PathBuf::from("/opt/agentguard/packs-community"))
+        );
+        let serialized = toml::to_string(&cfg).expect("serialize [community_packs]");
+        let reparsed: Config = toml::from_str(&serialized).expect("re-parse [community_packs]");
+        assert_eq!(reparsed.community_packs, cfg.community_packs);
+    }
+
+    #[test]
+    fn unknown_key_in_community_packs_is_rejected() {
+        let text = "[community_packs]\nenabled = [\"x\"]\ntypo = true\n";
+        let err = toml::from_str::<Config>(text).expect_err("must reject");
+        assert!(
+            format!("{err:#}").contains("typo"),
+            "error must name the offending key: {err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_accepts_project_community_pack_addition_union() {
+        // Project ADDS a pack name: protection-additive, accepted. The merged
+        // list is the UNION with user order first.
+        let base = Config {
+            community_packs: CommunityPacksConfig {
+                enabled: vec!["user-pack".to_string()],
+                dir: Some(PathBuf::from("/user/packs")),
+            },
+            ..user_base()
+        };
+        let merged = merge_text(
+            base,
+            "[community_packs]\nenabled = [\"user-pack\", \"project-pack\"]\n",
+        )
+        .expect("adding a community pack is additive and fine");
+        assert_eq!(
+            merged.community_packs.enabled,
+            vec!["user-pack".to_string(), "project-pack".to_string()]
+        );
+        // Absent dir key inherits the user layer's value.
+        assert_eq!(
+            merged.community_packs.dir,
+            Some(PathBuf::from("/user/packs"))
+        );
+    }
+
+    #[test]
+    fn merge_rejects_project_community_pack_drop() {
+        let base = Config {
+            community_packs: CommunityPacksConfig {
+                enabled: vec!["user-pack".to_string()],
+                dir: None,
+            },
+            ..user_base()
+        };
+        let err = merge_text(base, "[community_packs]\nenabled = []\n")
+            .expect_err("dropping a user-enabled community pack must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("community_packs.enabled") && msg.contains("user-pack"),
+            "error must name the field and the dropped pack: {msg}"
+        );
+    }
+
+    #[test]
+    fn merge_project_enabled_only_does_not_lose_user_dir_and_vv() {
+        // Presence is tracked PER SUB-KEY: a project overlay setting only
+        // `enabled` inherits the user `dir`, and vice versa.
+        let base = Config {
+            community_packs: CommunityPacksConfig {
+                enabled: vec!["user-pack".to_string()],
+                dir: Some(PathBuf::from("/user/packs")),
+            },
+            ..user_base()
+        };
+        let merged = merge_text(
+            base.clone(),
+            "[community_packs]\nenabled = [\"user-pack\"]\ndir = \"/user/packs\"\n",
+        )
+        .expect("identical sub-keys are a no-op");
+        assert_eq!(merged.community_packs, base.community_packs);
+
+        // Only `dir` set in the project (bootstrap onto a user layer without
+        // one): enabled list untouched.
+        let base_no_dir = Config {
+            community_packs: CommunityPacksConfig {
+                enabled: vec!["user-pack".to_string()],
+                dir: None,
+            },
+            ..user_base()
+        };
+        let merged = merge_text(base_no_dir, "[community_packs]\ndir = \"/project/packs\"\n")
+            .expect("bootstrapping only the dir is additive");
+        assert_eq!(
+            merged.community_packs.enabled,
+            vec!["user-pack".to_string()],
+            "enabled list must inherit the user layer when the project omits it"
+        );
+        assert_eq!(
+            merged.community_packs.dir,
+            Some(PathBuf::from("/project/packs"))
+        );
+    }
+
+    #[test]
+    fn merge_rejects_replacing_user_community_packs_dir() {
+        let base = Config {
+            community_packs: CommunityPacksConfig {
+                enabled: vec!["p".to_string()],
+                dir: Some(PathBuf::from("/user/packs")),
+            },
+            ..user_base()
+        };
+        let err = merge_text(
+            base,
+            "[community_packs]\nenabled = [\"p\"]\ndir = \"/project/packs\"\n",
+        )
+        .expect_err("swapping the pack directory must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("community_packs.dir"),
+            "error must name the field: {msg}"
+        );
+    }
+
     // ---- N1: custom_blocks superset compares PATTERN only ------------------
 
     #[test]
@@ -1757,17 +2010,40 @@ mod tests {
 
     #[test]
     fn tightening_presence_tracks_every_protection_field() {
-        // Every protection field of Config MUST be tracked by
-        // TighteningPresence; a new protection field without a presence flag
-        // would be silently last-matched by the layered loader (weakening
-        // hole). See the MUST-BE-UPDATED note on TighteningPresence.
-        for field in PROTECTION_CONFIG_FIELDS {
-            assert!(
-                TighteningPresence::TRACKED_KEYS.contains(field),
-                "protection field `{field}` joined Config without a TighteningPresence flag \
-                 + merge rule — the layered loader would silently last-match it"
-            );
-        }
+        // The tracker's keys and the protection-field list must be EQUAL AS
+        // SETS once the deliberately NON-protection keys are carved out —
+        // checked BIDIRECTIONALLY: every protection field of Config MUST be
+        // tracked by TighteningPresence (a field without a presence flag
+        // would be silently last-matched by the layered loader — a weakening
+        // hole), and every tracked key MUST correspond to a protection-field
+        // entry or to a declared non-protection key (else the tracker drifts
+        // from the contract it documents). A one-directional subset check let
+        // a key join one list without the other and still pass green. Sorted
+        // comparison makes any missing or extra key visible directly in the
+        // assertion diff. See the MUST-BE-UPDATED note on
+        // TighteningPresence.
+        //
+        // Non-protection carve-out: `audit` / `canary` are detection/
+        // observability surfaces the project layer MAY disable
+        // last-match-wins — accepted by design (see the field docs on
+        // [`Config::audit`] / [`Config::canary`]), so they live ONLY in
+        // TRACKED_KEYS, never in PROTECTION_CONFIG_FIELDS.
+        const NON_PROTECTION_KEYS: &[&str] = &["audit", "canary"];
+        let mut protection: Vec<&str> = PROTECTION_CONFIG_FIELDS.to_vec();
+        let mut tracked_protection: Vec<&str> = TighteningPresence::TRACKED_KEYS
+            .iter()
+            .copied()
+            .filter(|key| !NON_PROTECTION_KEYS.contains(key))
+            .collect();
+        protection.sort_unstable();
+        tracked_protection.sort_unstable();
+        assert_eq!(
+            protection, tracked_protection,
+            "PROTECTION_CONFIG_FIELDS and TighteningPresence::TRACKED_KEYS drifted apart — \
+             a protection key was added to one list without the other (and is neither \
+             covered by the non-protection carve-out {NON_PROTECTION_KEYS:?}); \
+             the diff above shows exactly which keys are missing/extra"
+        );
         // And the tracker actually FLIPS for every tracked key when set.
         // NOTE: every TOP-LEVEL key must precede any table header — TOML
         // attaches bare keys after a header to that table.
@@ -1780,11 +2056,16 @@ mod tests {
             "[[tool_rules]]\ntool = \"t\"\narg = \"a\"\npattern = \"p\"\nseverity = 1\n",
             "[policy]\nfile = \"/p.toml\"\n[audit]\nenabled = true\n",
             "[canary]\nenabled = true\n",
+            "[community_packs]\nenabled = [\"cp\"]\ndir = \"/cp\"\n",
         );
         let presence = TighteningPresence::from_toml(text).expect("presence parses");
         assert!(presence.thresholds_block_at && presence.thresholds_warn_at);
         assert!(presence.allow_list && presence.custom_blocks && presence.tool_rules);
         assert!(presence.disable && presence.disabled && presence.normalize && presence.level);
         assert!(presence.packs && presence.policy && presence.audit && presence.canary);
+        assert!(
+            presence.community_packs_enabled && presence.community_packs_dir,
+            "community_packs sub-keys must be tracked individually"
+        );
     }
 }

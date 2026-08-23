@@ -1,0 +1,27 @@
+# apohara-agentguard community pack `iac-terraform` corpus — DANGEROUS
+#
+# Commands the OPT-IN `iac-terraform` pack SHOULD catch (Block). One per line.
+# `#`-prefixed and blank lines are ignored. Only meaningful with the
+# iac-terraform community pack ENABLED ([community_packs] enabled =
+# ["iac-terraform"]); never part of the default benchmark.
+
+# --- teardown of provisioned infrastructure ---
+terraform destroy
+terraform destroy -auto-approve
+terraform destroy -target=aws_instance.web
+
+# --- unattended apply (skips the human confirmation gate) ---
+terraform apply -auto-approve
+terraform apply -var-file=prod.tfvars -auto-approve
+
+# --- state manipulation (resources orphaned / forgotten) ---
+terraform state rm aws_instance.web
+terraform state rm module.vpc.aws_subnet.private
+
+# --- workspace deletion ---
+terraform workspace delete staging
+
+# --- tofu / pulumi / terragrunt teardown ---
+tofu destroy
+pulumi destroy --yes
+terragrunt destroy --all
