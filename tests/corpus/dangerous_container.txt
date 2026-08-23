@@ -18,6 +18,11 @@ docker rm -f $(docker ps -aq)
 docker rmi -f myimage
 docker container rm -f web
 
+# --- docker force-remove, GNU long form ---
+docker rm --force web
+docker rmi --force registry/prod:latest
+docker container rm --force api
+
 # --- kubectl delete --all ---
 kubectl delete pods --all
 kubectl delete --all deployments

@@ -25,8 +25,12 @@ fn m_drop_table(s: &str) -> bool {
 }
 
 fn m_drop_database(s: &str) -> bool {
-    // `DROP DATABASE` / `DROP SCHEMA` — both tear down a whole database.
+    // `DROP DATABASE` / `DROP SCHEMA` — both tear down a whole database — plus
+    // the CLI wrappers that do the same without SQL keywords: PostgreSQL's
+    // `dropdb <name>` and `mysqladmin … drop <name>`.
     re!(s, r"(?i)\bdrop\s+(database|schema)\b")
+        || re!(s, r"(?i)\bdropdb\b")
+        || re!(s, r"(?i)\bmysqladmin\b[^|;&\n]*\sdrop\s+\w")
 }
 
 fn m_truncate(s: &str) -> bool {

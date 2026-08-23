@@ -69,11 +69,18 @@ fn m_mkfs(s: &str) -> bool {
 }
 
 fn m_chmod_777(s: &str) -> bool {
+    // Octal 777 (optional leading zero) or its exact symbolic-mode equivalents
+    // (`a+rwx`, `a=rwx`, `ugo+rwx`, `ugo=rwx`) — every spelling that grants
+    // world write+execute. Narrower symbolic grants (`a+x`, `u+w`, `ugo+x`)
+    // stay unflagged on purpose: they are common benign usage.
     re!(s, r"(?i)\bchmod\b[^|;&\n]*\s0?777\b")
+        || re!(s, r"(?i)\bchmod\b[^|;&\n]*\s(ugo|a)\s*[+=]\s*rwx\b")
 }
 
 fn m_chmod_recursive(s: &str) -> bool {
-    re!(s, r"(?i)\bchmod\b[^|;&\n]*\s-[a-z]*R")
+    // Short-bundle `-R` (e.g. `-R`, `-rR`, combined `-vR`) or the GNU long
+    // form `--recursive`.
+    re!(s, r"(?i)\bchmod\b[^|;&\n]*\s(-[a-z]*R|--recursive\b)")
 }
 
 fn m_chown_recursive_root(s: &str) -> bool {
@@ -82,21 +89,54 @@ fn m_chown_recursive_root(s: &str) -> bool {
 }
 
 fn m_fork_bomb(s: &str) -> bool {
-    // Classic `:(){ :|:& };:` — tolerate whitespace variations.
+    // Classic `:(){ :|:& };:` and same-shape variants that merely rename the
+    // function (`fb(){ fb|fb& };fb`), tolerating whitespace variations AND
+    // multi-character function names. Matched on the whitespace-stripped text
+    // as the structural shape `X(){X|X&};X` with the SAME token X in all four
+    // slots, verified by [`fork_bomb_slots_same`] (the Rust regex crate has no
+    // backreferences, so slot sameness cannot be expressed as one regex).
     let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-    compact.contains(":(){:|:&};:")
+    fork_bomb_slots_same(&compact)
+}
+
+/// Verify the compacted fork-bomb shape `X(){X|X&};X` where all four slots
+/// carry the SAME token X (function name, pipe-left, pipe-right, relaunch).
+/// For each `(){` pivot, the delimiter-free run immediately before it is the
+/// candidate name X; a bomb requires the exact repetition `{X}|{X}&}};{X}`
+/// right after the pivot. Scanning every pivot keeps compound commands like
+/// `cat f; fb(){ fb|fb& };fb` covered.
+fn fork_bomb_slots_same(compact: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = compact[from..].find("(){") {
+        let p = from + rel;
+        from = p + 1;
+        // Candidate name X: the run of non-delimiter chars ending at the pivot.
+        let x_start = compact[..p]
+            .rfind(['(', ')', '{', '}', '|', '&', ';'])
+            .map_or(0, |i| i + 1);
+        let x = &compact[x_start..p];
+        if x.is_empty() {
+            continue;
+        }
+        if compact[p + 3..].starts_with(&format!("{x}|{x}&}};{x}")) {
+            return true;
+        }
+    }
+    false
 }
 
 fn m_chmod_recursive_777_root(s: &str) -> bool {
     // Recursive chmod 777 targeting `/` is catastrophic (unlike a local file).
-    // Requires the recursive flag, the 777 mode, AND a `/` (root) target in any
-    // order, so both `chmod 777 -R /` and `chmod -R 777 /` are caught.
+    // Requires the recursive flag (short `-R` bundle or GNU `--recursive`), the
+    // 777 mode, AND a `/` (root) target in any order, so `chmod 777 -R /`,
+    // `chmod -R 777 /`, `chmod --recursive 777 /` and `chmod 777 --recursive /`
+    // are all caught.
     re!(
         s,
-        r"(?i)\bchmod\b[^|;&\n]*\s-[a-z]*R[a-z]*\b[^|;&\n]*\s0?777\b[^|;&\n]*\s/(\s|$)"
+        r"(?i)\bchmod\b[^|;&\n]*\s(-[a-z]*R[a-z]*\b|--recursive\b)[^|;&\n]*\s0?777\b[^|;&\n]*\s/(\s|$)"
     ) || re!(
         s,
-        r"(?i)\bchmod\b[^|;&\n]*\s0?777\b[^|;&\n]*\s-[a-z]*R[a-z]*\b[^|;&\n]*\s/(\s|$)"
+        r"(?i)\bchmod\b[^|;&\n]*\s0?777\b[^|;&\n]*\s(-[a-z]*R[a-z]*\b|--recursive\b)[^|;&\n]*\s/(\s|$)"
     )
 }
 
@@ -412,6 +452,17 @@ mod tests {
         assert!(m_chmod_777("chmod 777 /etc"));
         assert!(m_chmod_777("chmod 0777 file"));
         assert!(m_chmod_recursive("chmod -R 755 ."));
+        // Exact symbolic equivalents of 777.
+        assert!(m_chmod_777("chmod a+rwx /var/www"));
+        assert!(m_chmod_777("chmod a=rwx /var/www"));
+        assert!(m_chmod_777("chmod ugo+rwx /tmp/share"));
+        // Narrower symbolic grants are NOT 777 (common benign usage).
+        assert!(!m_chmod_777("chmod a+x deploy.sh"));
+        assert!(!m_chmod_777("chmod ugo+x bin/tool"));
+        assert!(!m_chmod_777("chmod u+w notes.txt"));
+        // Recursive flag: short bundle and GNU long form.
+        assert!(m_chmod_recursive("chmod -R 755 ."));
+        assert!(m_chmod_recursive("chmod --recursive 755 /srv/data"));
     }
 
     #[test]
@@ -424,6 +475,23 @@ mod tests {
     fn fork_bomb_detected() {
         assert!(m_fork_bomb(":(){ :|:& };:"));
         assert!(m_fork_bomb(":(){:|:&};:"));
+        // Same-shape variants that only rename the function (body stays
+        // `c|c&`, mirroring the classic `:|:&`).
+        assert!(m_fork_bomb("_(){ _|_& };_"));
+        assert!(m_fork_bomb("z(){ z|z & };z"));
+        // Multi-character names: all four slots must carry the SAME token.
+        assert!(m_fork_bomb("fb(){ fb|fb& };fb"));
+        assert!(m_fork_bomb("foo(){ foo|foo& };foo"));
+        assert!(m_fork_bomb("bomb(){ bomb|bomb & };bomb"));
+        // Compound prefix: the pivot scan still finds the embedded bomb.
+        assert!(m_fork_bomb("cat f; fb(){ fb|fb& };fb"));
+        // Look-alikes without the bomb shape must not match.
+        assert!(!m_fork_bomb("g(){ cat file | grep x & }"));
+        // Near-misses: right shape, MISMATCHED slots (not self-referencing).
+        assert!(!m_fork_bomb("g(){ cat f | grep x & };g"));
+        assert!(!m_fork_bomb("fb(){ fb|other& };fb"));
+        assert!(!m_fork_bomb("fb(){ fb|fb& };other"));
+        assert!(!m_fork_bomb("echo hi"));
     }
 
     #[test]
@@ -438,12 +506,17 @@ mod tests {
     fn chmod_recursive_777_root_blocks_either_order() {
         assert!(m_chmod_recursive_777_root("chmod 777 -R /"));
         assert!(m_chmod_recursive_777_root("chmod -R 777 /"));
+        // GNU long form, both orders.
+        assert!(m_chmod_recursive_777_root("chmod --recursive 777 /"));
+        assert!(m_chmod_recursive_777_root("chmod 777 --recursive /"));
         // A local recursive 777 is NOT the catastrophic root case.
         assert!(!m_chmod_recursive_777_root("chmod -R 777 ./build"));
+        assert!(!m_chmod_recursive_777_root("chmod --recursive 777 ./build"));
         assert!(!m_chmod_recursive_777_root("chmod 777 file"));
         // This Block-tier rule pushes recursive-777-root into the Block band.
         assert!(max_sev("chmod -R 777 /") >= 8);
         assert!(max_sev("chmod 777 -R /") >= 8);
+        assert!(max_sev("chmod --recursive 777 /") >= 8);
     }
 
     #[test]

@@ -8,6 +8,10 @@
 aws s3 rb s3://my-bucket --force
 aws s3 rb --force s3://prod-data
 
+# --- aws s3 bulk object wipe (recursive rm of a whole prefix) ---
+aws s3 rm s3://prod-data --recursive
+aws s3 rm --recursive s3://prod-logs
+
 # --- aws delete-* / terminate API calls ---
 aws s3api delete-bucket --bucket my-bucket
 aws cloudformation delete-stack --stack-name prod

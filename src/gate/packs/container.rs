@@ -30,11 +30,11 @@ fn m_docker_system_prune(s: &str) -> bool {
 }
 
 fn m_docker_rm_force(s: &str) -> bool {
-    // `docker rm -f` / `docker rmi -f` force-removes a running container/image;
-    // also `docker container rm -f`.
+    // `docker rm -f/--force` / `docker rmi -f/--force` force-removes a running
+    // container/image; also `docker container rm -f`.
     re!(
         s,
-        r"(?i)\bdocker\b\s+(container\s+)?(rm|rmi)\b[^|;&\n]*\s-[a-z]*f"
+        r"(?i)\bdocker\b\s+(container\s+)?(rm|rmi)\b[^|;&\n]*\s(--force\b|-[a-z]*f)"
     )
 }
 

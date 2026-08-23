@@ -27,11 +27,14 @@ fn m_aws_s3_rb_force(s: &str) -> bool {
 
 fn m_aws_delete(s: &str) -> bool {
     // Any `aws <service> delete-*` API call (delete-bucket, delete-stack,
-    // delete-db-instance, delete-table, terminate-instances, …).
+    // delete-db-instance, delete-table, terminate-instances, …), plus the bulk
+    // object wipe `aws s3 rm s3://… --recursive` (the high-level s3 rm deletes
+    // whole prefixes with --recursive; a single-object `aws s3 rm` without
+    // --recursive stays unflagged, like a single-file `rm`).
     re!(
         s,
         r"(?i)\baws\b[^|;&\n]*\s(delete-\w+|terminate-instances)\b"
-    )
+    ) || re!(s, r"(?i)\baws\b\s+s3\s+rm\b[^|;&\n]*\s--recursive\b")
 }
 
 fn m_gcloud_delete(s: &str) -> bool {

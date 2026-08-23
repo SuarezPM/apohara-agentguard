@@ -14,6 +14,11 @@ DROP DATABASE production;
 DROP DATABASE IF EXISTS staging;
 DROP SCHEMA public CASCADE;
 
+# --- CLI wrappers that drop a database without SQL keywords ---
+dropdb production
+dropdb --if-exists staging
+mysqladmin -u root -p drop production
+
 # --- TRUNCATE ---
 TRUNCATE TABLE events;
 TRUNCATE users;
