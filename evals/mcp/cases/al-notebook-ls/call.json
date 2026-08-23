@@ -1,0 +1,9 @@
+{
+  "tool_name": "notebook-exec",
+  "arguments": {
+    "code": "subprocess.run(['ls', 'data'])"
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "plain notebook cell"
+}

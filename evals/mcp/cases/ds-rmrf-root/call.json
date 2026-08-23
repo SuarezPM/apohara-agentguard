@@ -1,0 +1,9 @@
+{
+  "tool_name": "shell-exec",
+  "arguments": {
+    "command": "rm -rf /"
+  },
+  "expect": "block",
+  "class": "dangerous-shell",
+  "notes": "recursive force delete of filesystem root"
+}

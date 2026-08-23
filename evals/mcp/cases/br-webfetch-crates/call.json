@@ -1,0 +1,9 @@
+{
+  "tool_name": "web-fetch",
+  "arguments": {
+    "url": "https://crates.io/api/v1/crates/serde",
+    "format": "json"
+  },
+  "expect": "allow",
+  "class": "benign-read"
+}

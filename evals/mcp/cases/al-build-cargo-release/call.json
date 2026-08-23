@@ -1,0 +1,9 @@
+{
+  "tool_name": "build-tool",
+  "arguments": {
+    "cmd": "cargo build --release"
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "standard build"
+}

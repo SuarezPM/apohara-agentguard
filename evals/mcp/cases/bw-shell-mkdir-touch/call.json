@@ -1,0 +1,8 @@
+{
+  "tool_name": "shell-exec",
+  "arguments": {
+    "command": "mkdir -p build/out && touch build/out/.keep"
+  },
+  "expect": "allow",
+  "class": "benign-write"
+}

@@ -1,0 +1,9 @@
+{
+  "tool_name": "fs-write",
+  "arguments": {
+    "path": "out/report.md",
+    "content": "# Report\n\nAll checks passed."
+  },
+  "expect": "allow",
+  "class": "benign-write"
+}

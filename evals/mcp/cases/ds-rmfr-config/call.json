@@ -1,0 +1,9 @@
+{
+  "tool_name": "script-runner",
+  "arguments": {
+    "script": "rm -fr \"$HOME/.config\""
+  },
+  "expect": "block",
+  "class": "dangerous-shell",
+  "notes": "-fr bundle variant targeting config"
+}

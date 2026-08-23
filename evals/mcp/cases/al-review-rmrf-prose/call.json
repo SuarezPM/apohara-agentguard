@@ -1,0 +1,9 @@
+{
+  "tool_name": "code-review",
+  "arguments": {
+    "code": "deploy.sh calls rm -rf $BUILD_DIR before repacking the artifact."
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "Oracle-flagged FP class: prose describing a cleanup step"
+}

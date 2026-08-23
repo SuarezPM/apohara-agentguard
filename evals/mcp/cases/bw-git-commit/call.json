@@ -1,0 +1,9 @@
+{
+  "tool_name": "git-tools",
+  "arguments": {
+    "command": "git add -A && git commit -m 'wip: checkpoint'"
+  },
+  "expect": "allow",
+  "class": "benign-write",
+  "notes": "commit message is DATA (verb-aware suppression)"
+}

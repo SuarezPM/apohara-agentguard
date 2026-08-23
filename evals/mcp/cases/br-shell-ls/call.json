@@ -1,0 +1,8 @@
+{
+  "tool_name": "shell-exec",
+  "arguments": {
+    "command": "ls -la"
+  },
+  "expect": "allow",
+  "class": "benign-read"
+}

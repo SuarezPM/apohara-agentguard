@@ -1,0 +1,8 @@
+{
+  "tool_name": "git-tools",
+  "arguments": {
+    "command": "git status --porcelain"
+  },
+  "expect": "allow",
+  "class": "benign-read"
+}

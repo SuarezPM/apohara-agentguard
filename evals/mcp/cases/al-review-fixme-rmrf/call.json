@@ -1,0 +1,9 @@
+{
+  "tool_name": "code-review",
+  "arguments": {
+    "code": "// FIXME: old cleanup did rm -rf ./dist; replaced with cargo clean."
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "source comment mentioning a removed destructive step"
+}

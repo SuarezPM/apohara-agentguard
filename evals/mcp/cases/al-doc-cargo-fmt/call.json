@@ -1,0 +1,9 @@
+{
+  "tool_name": "doc-writer",
+  "arguments": {
+    "code": "Run cargo fmt --all in CI before merging."
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "doc snippet"
+}

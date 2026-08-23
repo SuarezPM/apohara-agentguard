@@ -1,0 +1,9 @@
+{
+  "tool_name": "fs-read",
+  "arguments": {
+    "path": "/proc/cpuinfo",
+    "encoding": "utf-8"
+  },
+  "expect": "allow",
+  "class": "benign-read"
+}

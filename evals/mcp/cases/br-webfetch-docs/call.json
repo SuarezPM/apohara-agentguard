@@ -1,0 +1,8 @@
+{
+  "tool_name": "web-fetch",
+  "arguments": {
+    "url": "https://docs.rs/serde/latest/serde/"
+  },
+  "expect": "allow",
+  "class": "benign-read"
+}

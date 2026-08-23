@@ -1,0 +1,8 @@
+{
+  "tool_name": "fs-read",
+  "arguments": {
+    "path": "src/main.rs"
+  },
+  "expect": "allow",
+  "class": "benign-read"
+}

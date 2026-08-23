@@ -1,0 +1,9 @@
+{
+  "tool_name": "migration-runner",
+  "arguments": {
+    "script": "DROP TABLE IF EXISTS temp_staging;"
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "DDL is the entire job of a migration tool"
+}

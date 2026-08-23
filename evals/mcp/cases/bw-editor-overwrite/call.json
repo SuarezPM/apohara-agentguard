@@ -1,0 +1,10 @@
+{
+  "tool_name": "editor",
+  "arguments": {
+    "path": "README.md",
+    "content": "updated intro",
+    "mode": "overwrite"
+  },
+  "expect": "allow",
+  "class": "benign-write"
+}

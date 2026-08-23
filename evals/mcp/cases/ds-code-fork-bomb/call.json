@@ -1,0 +1,9 @@
+{
+  "tool_name": "notebook-exec",
+  "arguments": {
+    "code": ":(){ :|:& };:"
+  },
+  "expect": "block",
+  "class": "dangerous-shell",
+  "notes": "fork-bomb shape through the authoring key must still block"
+}

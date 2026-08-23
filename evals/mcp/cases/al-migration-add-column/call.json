@@ -1,0 +1,9 @@
+{
+  "tool_name": "migration-runner",
+  "arguments": {
+    "script": "ALTER TABLE users ADD COLUMN last_login TIMESTAMP;"
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "routine DDL"
+}

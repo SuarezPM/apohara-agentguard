@@ -1,0 +1,9 @@
+{
+  "tool_name": "shell-exec",
+  "arguments": {
+    "command": "grep -rn TODO src/ | head -20"
+  },
+  "expect": "allow",
+  "class": "benign-read",
+  "notes": "pipe into head is not a pipe into a shell"
+}

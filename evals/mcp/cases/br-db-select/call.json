@@ -1,0 +1,9 @@
+{
+  "tool_name": "db-query",
+  "arguments": {
+    "query": "SELECT id, email FROM users WHERE active = 1 LIMIT 50;"
+  },
+  "expect": "allow",
+  "class": "benign-read",
+  "notes": "query key is not a shell-execution key"
+}

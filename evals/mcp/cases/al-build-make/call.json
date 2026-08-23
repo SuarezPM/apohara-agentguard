@@ -1,0 +1,9 @@
+{
+  "tool_name": "build-tool",
+  "arguments": {
+    "cmd": "make -j4 all"
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "parallel build"
+}

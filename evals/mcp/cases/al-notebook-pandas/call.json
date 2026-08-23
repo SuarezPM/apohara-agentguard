@@ -1,0 +1,9 @@
+{
+  "tool_name": "notebook-exec",
+  "arguments": {
+    "code": "df = pd.read_csv('sales.csv')\nprint(df.head())"
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "multiline analysis cell"
+}

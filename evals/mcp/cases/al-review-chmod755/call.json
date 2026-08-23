@@ -1,0 +1,9 @@
+{
+  "tool_name": "code-review",
+  "arguments": {
+    "code": "This diff removes the chmod -R 755 workaround; permissions come from umask now."
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "Warn-band mention (severity 6) must never propagate as a proxy Block"
+}

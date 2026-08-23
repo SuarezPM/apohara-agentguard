@@ -1,0 +1,9 @@
+{
+  "tool_name": "fs-write",
+  "arguments": {
+    "path": "/tmp/notes.txt",
+    "content": "meeting notes"
+  },
+  "expect": "allow",
+  "class": "benign-write"
+}

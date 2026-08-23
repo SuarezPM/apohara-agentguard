@@ -1,0 +1,9 @@
+{
+  "tool_name": "build-tool",
+  "arguments": {
+    "cmd": "cargo clean"
+  },
+  "expect": "allow",
+  "class": "authoring-legit",
+  "notes": "standard build hygiene"
+}
