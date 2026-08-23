@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 /// confirmation (`Ask`) outranks `Warn` (so it is never silently
 /// downgraded to a caution) and is outranked by `Block` (a hard refusal
 /// still wins). `Allow` is the floor.
+// `kani::Arbitrary` (Story T8): lets the Kani proof harnesses treat a Tier as
+// a symbolic 4-valued choice. Inert in every normal build — the `kani` cfg and
+// crate exist only under the Kani verifier (`cargo kani`), which injects both.
+#[cfg_attr(kani, derive(kani::Arbitrary))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {

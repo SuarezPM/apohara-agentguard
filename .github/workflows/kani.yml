@@ -1,0 +1,35 @@
+name: kani-proofs (nightly)
+
+# Story T8: formal proofs for the severity lattice. The harnesses live under
+# `#[cfg(kani)]` in src/hook/dispatch.rs and src/policy/engine.rs and are
+# inert in every normal build; this workflow is the only place they run.
+# Nightly (not per-PR) because the Kani toolchain download dominates runtime.
+
+on:
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  kani:
+    name: Kani severity-lattice proofs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # cargo-kani bundles its own pinned nightly toolchain (`cargo kani setup`
+      # installs it), so the repo's stable rust-toolchain.toml pin does not
+      # constrain which rustc verifies the harnesses.
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+
+      - name: Run proof harnesses
+        run: cargo kani --output-format terse

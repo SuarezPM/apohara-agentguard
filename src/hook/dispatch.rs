@@ -692,4 +692,126 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---- Severity-lattice exhaustive check (Story T8) ----------------------
+
+    /// Build a minimal verdict per tier (fixed reason; only the tier matters
+    /// for the lattice properties).
+    fn verdict_of(tier: Tier) -> Verdict {
+        match tier {
+            Tier::Allow => Verdict::allow(),
+            Tier::Warn => Verdict::warn("w"),
+            Tier::Ask => Verdict::ask("a"),
+            Tier::Block => Verdict::block("b"),
+        }
+    }
+
+    /// Concrete, exhaustive verification of the severity lattice over ALL 16
+    /// tier pairs: reflexivity, commutativity (at tier level), and
+    /// Block-absorption. This is the always-on counterpart of the
+    /// `#[cfg(kani)]` proofs below: the same properties hold symbolically
+    /// under Kani and concretely here.
+    #[test]
+    fn severity_lattice_holds_for_all_16_tier_pairs() {
+        let tiers = [Tier::Allow, Tier::Warn, Tier::Ask, Tier::Block];
+        for a in tiers {
+            // Reflexivity: max_verdict(v, v) == v.
+            assert_eq!(max_verdict(verdict_of(a), verdict_of(a)).tier, a);
+            for b in tiers {
+                let ab = max_verdict(verdict_of(a), verdict_of(b));
+                let ba = max_verdict(verdict_of(b), verdict_of(a));
+                // Commutativity at tier level (ties keep the left REASON, so
+                // only the tier must agree in both orders).
+                assert_eq!(ab.tier, ba.tier, "({a:?}, {b:?}) not commutative");
+                // Deny absorption: any pair containing Block yields Block.
+                if matches!(a, Tier::Block) || matches!(b, Tier::Block) {
+                    assert_eq!(ab.tier, Tier::Block, "Block absorbed by ({a:?}, {b:?})");
+                }
+            }
+        }
+    }
+}
+
+// ---- Kani formal proofs for the severity lattice (Story T8) ----------------
+//
+// These harnesses verify `max_verdict`/`tier_rank` SYMBOLICALLY over the whole
+// 4-value `Tier` enum (`kani::any()` + the `kani::Arbitrary` derive on `Tier`
+// in src/verdict.rs). They are compiled ONLY when the Kani verifier drives the
+// build (`cargo kani`, which passes `--cfg kani` and injects the `kani` crate);
+// every normal build strips this module, so there is zero effect on compile
+// time, dependencies, or the purity guard.
+//
+// RUNNER STATUS: harness-ready. The local stable rustc (1.98.0, released days
+// before this story) is newer than the nightly Kani bundles; `cargo install
+// --locked kani-verifier && cargo kani setup` must be run on a toolchain Kani
+// supports (see https://github.com/model-checking/kani releases for the pinned
+// nightly). Until then the exhaustive `severity_lattice_holds_for_all_16_tier_pairs`
+// test above verifies the same properties concretely on every CI run.
+#[cfg(kani)]
+mod proofs {
+    use super::{max_verdict, tier_rank};
+    use crate::verdict::{Tier, Verdict};
+
+    fn verdict_of(tier: Tier) -> Verdict {
+        match tier {
+            Tier::Allow => Verdict::allow(),
+            Tier::Warn => Verdict::warn("w"),
+            Tier::Ask => Verdict::ask("a"),
+            Tier::Block => Verdict::block("b"),
+        }
+    }
+
+    /// Reflexivity: combining a verdict with itself is the identity.
+    #[kani::proof]
+    fn proof_max_verdict_reflexive() {
+        let t: Tier = kani::any();
+        let v = verdict_of(t);
+        assert_eq!(max_verdict(v.clone(), v).tier, t);
+    }
+
+    /// Commutativity at tier level: argument order never changes the winning
+    /// tier (the documented tie rule keeps the left REASON, not the tier).
+    #[kani::proof]
+    fn proof_max_verdict_commutative_at_tier_level() {
+        let a: Tier = kani::any();
+        let b: Tier = kani::any();
+        let ab = max_verdict(verdict_of(a), verdict_of(b));
+        let ba = max_verdict(verdict_of(b), verdict_of(a));
+        assert_eq!(ab.tier, ba.tier);
+    }
+
+    /// Deny absorption: a Block on either side is never softened.
+    #[kani::proof]
+    fn proof_block_absorbs_any_verdict() {
+        let x: Tier = kani::any();
+        assert_eq!(
+            max_verdict(verdict_of(Tier::Block), verdict_of(x)).tier,
+            Tier::Block
+        );
+        assert_eq!(
+            max_verdict(verdict_of(x), verdict_of(Tier::Block)).tier,
+            Tier::Block
+        );
+    }
+
+    /// Total-order consistency: the winner is exactly the side with the higher
+    /// `tier_rank`, ranks are totally ordered, and the pinned order
+    /// Block > Ask > Warn > Allow holds.
+    #[kani::proof]
+    fn proof_tier_rank_total_order_consistent() {
+        let a: Tier = kani::any();
+        let b: Tier = kani::any();
+        // Totality: any two ranks are comparable.
+        assert!(tier_rank(a) <= tier_rank(b) || tier_rank(b) <= tier_rank(a));
+        // The combine agrees with the rank order exactly (ties keep `a`).
+        if tier_rank(a) >= tier_rank(b) {
+            assert_eq!(max_verdict(verdict_of(a), verdict_of(b)).tier, a);
+        } else {
+            assert_eq!(max_verdict(verdict_of(a), verdict_of(b)).tier, b);
+        }
+        // Pinned order anchor.
+        assert!(tier_rank(Tier::Block) > tier_rank(Tier::Ask));
+        assert!(tier_rank(Tier::Ask) > tier_rank(Tier::Warn));
+        assert!(tier_rank(Tier::Warn) > tier_rank(Tier::Allow));
+    }
 }

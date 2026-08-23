@@ -339,6 +339,35 @@ fn clamp_to_warn(v: Verdict) -> Verdict {
     }
 }
 
+// ---- Corpus-overfit detector support (Story T9, TEST-ONLY) -----------------
+//
+// The DJL/OWASP/two-stage tables are `pub(crate)` behind private modules, so
+// the integration-test layer cannot enumerate them. This helper is compiled
+// only under `cfg(test)` and exposes the minimum the detector in `src/lib.rs`
+// needs: every registered pattern id plus its exact match predicate.
+
+/// Every registered firewall pattern as `(id, predicate)` pairs: all 78 DJL
+/// rules (the three two-stage lookaround rules routed through their exact
+/// post-validators, exactly as [`scan_content`] does) plus all 24 OWASP ASI
+/// patterns.
+#[cfg(test)]
+pub(crate) fn overfit_detector_patterns() -> Vec<(&'static str, crate::OverfitMatcher)> {
+    let mut out: Vec<(&'static str, crate::OverfitMatcher)> = Vec::new();
+    for r in djl::rules() {
+        if r.two_stage {
+            let id = r.id;
+            out.push((id, Box::new(move |text: &str| two_stage::matches(id, text))));
+        } else if let Some(re) = r.regex {
+            out.push((r.id, Box::new(move |text: &str| re.is_match(text))));
+        }
+    }
+    for p in owasp::patterns() {
+        let re = p.regex;
+        out.push((p.name, Box::new(move |text: &str| re.is_match(text))));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

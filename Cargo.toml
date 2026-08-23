@@ -37,6 +37,12 @@ landlock = "0.4"
 [dev-dependencies]
 proptest = "1"
 
+# Story T8: the Kani proof harnesses are gated on `cfg(kani)`, which only the
+# Kani verifier (`cargo kani`) sets. Register it here so `unexpected_cfgs`
+# stays quiet under `-D warnings` in every normal build.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 # ReDoS guard runs as a plain binary (no libtest harness) so it executes under
 # both `cargo test` and `cargo bench`.
 [[bench]]

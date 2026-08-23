@@ -341,6 +341,47 @@ fn consider(best: &mut Option<Hit>, candidate: Hit) {
     }
 }
 
+// ---- Corpus-overfit detector support (Story T9, TEST-ONLY) -----------------
+//
+// The rule tables below are `pub(crate)` behind private modules, so the
+// integration-test layer cannot enumerate them. These helpers are compiled
+// only under `cfg(test)` and expose the minimum the detector in `src/lib.rs`
+// needs: every built-in rule id (taxonomy + ALL packs, including the
+// off-by-default packs) plus the exact fire-predicate used by the gate.
+
+/// Every built-in gate rule as `(id, matcher)` pairs: [`taxonomy::rules`]
+/// UNIONED with every domain pack (cloud, container, db — including packs that
+/// are OFF by default; the detector audits what is REGISTERED, not what is
+/// enabled).
+#[cfg(test)]
+pub(crate) fn overfit_detector_rules() -> Vec<(&'static str, crate::OverfitMatcher)> {
+    let mut out: Vec<(&'static str, crate::OverfitMatcher)> = taxonomy::rules()
+        .iter()
+        .map(|r| (r.id, Box::new(r.matcher) as crate::OverfitMatcher))
+        .collect();
+    let all_packs = vec![
+        "cloud".to_string(),
+        "container".to_string(),
+        "db".to_string(),
+    ];
+    out.extend(
+        packs::enabled_rules(&all_packs)
+            .map(|r| (r.id, Box::new(r.matcher) as crate::OverfitMatcher)),
+    );
+    out
+}
+
+/// True iff a gate rule fires anywhere on a corpus entry: on the RAW text or
+/// on any compound leg (the pipe/`;`/`&` split is where per-leg rules do their
+/// matching, so a rule that only matches post-split must still count).
+#[cfg(test)]
+pub(crate) fn overfit_rule_fires(matcher: &dyn Fn(&str) -> bool, entry: &str) -> bool {
+    matcher(entry)
+        || compound::split_compound(entry)
+            .iter()
+            .any(|leg| matcher(leg))
+}
+
 /// Build the final verdict from the worst hit and its tier.
 fn build_verdict(tier: Tier, hit: &Hit) -> Verdict {
     // `tier` here is always the output of `severity_to_tier`, which returns
