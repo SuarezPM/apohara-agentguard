@@ -305,3 +305,10 @@ from the **hook process's environment**, not the inspected command's — so a
 malicious Bash command that sets `AGENTGUARD_DISABLE=1` runs in a *different*
 process and cannot self-disarm the gate. Treat the kill-switch as a break-glass
 control: with it set, apohara-agentguard provides **no** protection.
+
+A **granular** form also ships for partial de-escalation without going
+all-or-nothing: `AGENTGUARD_DISABLE=gate,firewall,pathguard,canary` disables
+only the named components, and the config-side equivalents are `disable = true`
+(all) or `disabled = ["gate", …]` (per-component). The env list and the config
+list form a union — either source can disable a component; neither can
+re-enable one the other disabled.
