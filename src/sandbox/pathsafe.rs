@@ -126,8 +126,16 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     fn tmp() -> PathBuf {
+        // Process-unique AND call-unique: tests run in parallel threads sharing
+        // this binary, and coarse clock resolution on some platforms (macOS)
+        // can hand two calls the same nanosecond — without the sequence
+        // counter they would share one directory and each other's cleanup
+        // would delete a live tree mid-walk (ENOENT flakes).
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let base = std::env::temp_dir().join(format!(
-            "agentguard-pathsafe-{}-{}",
+            "agentguard-pathsafe-{}-{}-{seq}",
             std::process::id(),
             // monotonic-ish unique suffix
             std::time::SystemTime::now()
