@@ -308,6 +308,9 @@ jobs:
           # Collect every binary + its per-file .sha256 into one manifest.
           find artifacts -type f -name 'apohara-agentguard-*' ! -name '*.sha256' -exec cp {} release/ \;
           cp -f artifacts/THIRD-PARTY-LICENSES/THIRD-PARTY-LICENSES release/ || true
+          # Plugin manifests ride with the bundle so installs can register
+          # hooks without a second fetch (checkout provides them).
+          cp -f packaging/plugin.json packaging/hooks.json release/
           cd release
           : > SHA256SUMS
           for f in apohara-agentguard-*; do
@@ -322,5 +325,5 @@ jobs:
       - name: Upload release bundle (for maintainer review — NOT auto-published)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: apohara-agentguard-v0.1.1-release
+          name: apohara-agentguard-v0.3.0-release
           path: release/*

@@ -170,7 +170,13 @@ fn tools_call(params: &Value, config: &Config) -> Result<Value, (i64, String)> {
             let text = string_arg(&arguments, "text")?;
             firewall::scan_content(&text, &Thresholds::default())
         }
-        other => return Err((INVALID_PARAMS, format!("unknown tool: {other}"))),
+        other => {
+            // Request-derived strings reach agent context through error
+            // responses too — apply the same display-layer neutralization.
+            let raw = format!("unknown tool: {other}");
+            let msg = crate::neutralize::neutralize(&raw);
+            return Err((INVALID_PARAMS, msg.into_owned()));
+        }
     };
 
     // Display-layer neutralization at the MCP response boundary: verdict
@@ -195,6 +201,8 @@ fn tools_call(params: &Value, config: &Config) -> Result<Value, (i64, String)> {
 
 /// Extract a required string argument from a tool-call `arguments` object.
 fn string_arg(arguments: &Value, key: &str) -> Result<String, (i64, String)> {
+    // `key` is a call-site literal (never request-derived), so the error text
+    // here carries no untrusted content — no neutralization needed.
     arguments
         .get(key)
         .and_then(Value::as_str)
