@@ -149,16 +149,25 @@ pub(crate) fn run_linux(req: &SandboxRequest) -> Result<SandboxResult> {
             drop(stderr_r);
             drop(exec_err_r);
 
-            if let Err(e) = enter_isolated_namespaces() {
-                report_setup_error(&exec_err_w, &format!("namespace: {e}"));
-                // SAFETY: fail-closed teardown of the middle child after a
-                // failed namespace entry. `_exit` is async-signal-safe and
-                // skips Drop glue, atexit handlers, and stdio flushing — all
-                // of which must not run on this forked image. The error is
-                // already durably reported via the exec-error pipe, and the
-                // child must terminate here rather than continue into
-                // parent-only control flow.
-                unsafe { libc::_exit(70) };
+            // Namespace isolation is confinement too (PID/IPC visibility),
+            // and DangerFullAccess promises zero confinement of any kind —
+            // attempting it on kernels that restrict unprivileged userns
+            // (Ubuntu 24.04+ via apparmor_restrict_unprivileged_userns)
+            // would refuse to run a command the user explicitly un-confined.
+            // Landlock and seccomp are already skipped downstream for this
+            // tier; skip namespace entry here for the same reason.
+            if req.tier != crate::sandbox::permission::PermissionTier::DangerFullAccess {
+                if let Err(e) = enter_isolated_namespaces() {
+                    report_setup_error(&exec_err_w, &format!("namespace: {e}"));
+                    // SAFETY: fail-closed teardown of the middle child after a
+                    // failed namespace entry. `_exit` is async-signal-safe and
+                    // skips Drop glue, atexit handlers, and stdio flushing — all
+                    // of which must not run on this forked image. The error is
+                    // already durably reported via the exec-error pipe, and the
+                    // child must terminate here rather than continue into
+                    // parent-only control flow.
+                    unsafe { libc::_exit(70) };
+                }
             }
 
             // SAFETY: same single-threaded invariant as the outer fork: this
