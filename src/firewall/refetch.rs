@@ -411,4 +411,146 @@ mod tests {
         // localhost resolves to loopback -> refused (resolve-then-check).
         assert!(ssrf_check("localhost").is_err());
     }
+
+    // -----------------------------------------------------------------------
+    // Real-network integration tests (hermetic: servers bind 127.0.0.1:0).
+    //
+    // These exercise the actual ureq fetch path (`UreqSource` -> `fetch_url`)
+    // against hand-rolled one-shot HTTP servers on ephemeral loopback ports.
+    //
+    // Layout note: the SSRF resolver refuses EVERY address in the deny matrix,
+    // and 127.0.0.0/8 is in it, so a guarded fetch can never succeed against a
+    // loopback server BY DESIGN. The refusal therefore always fires at
+    // resolution of the first hop, before any TCP connection is opened. The
+    // tests below pin exactly that:
+    //   * the guarded test asserts `FetchError::Ssrf` AND that its primed
+    //     listener was never contacted;
+    //   * the positive control runs the same ureq build with the STOCK
+    //     resolver to prove the localhost HTTP + redirect-following machinery
+    //     itself works — so the guarded refusal is attributable solely to the
+    //     resolved-IP policy, not to redirects or HTTP mechanics.
+    // -----------------------------------------------------------------------
+
+    use std::io::Write as _;
+    use std::net::TcpListener;
+
+    /// Build a minimal HTTP/1.1 response with an exact Content-Length.
+    fn http_response(head: &str, body: &str) -> String {
+        format!(
+            "{head}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    /// Accept exactly one connection, drain its request head, write `response`,
+    /// then close. Draining first prevents a close-with-unread-request RST from
+    /// racing the response into the client.
+    fn serve_one(listener: &TcpListener, response: &str) {
+        let (mut stream, _) = listener.accept().expect("accept one connection");
+        let mut seen = Vec::new();
+        let mut buf = [0u8; 1024];
+        while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => seen.extend_from_slice(&buf[..n]),
+            }
+        }
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
+        stream.flush().expect("flush response");
+    }
+
+    #[test]
+    fn guarded_fetch_to_metadata_redirector_refuses_at_resolve_time() {
+        // Listener primed with the cloud-metadata redirect shape: had any
+        // client connected, it would serve a 302 whose Location points at
+        // http://169.254.169.254/latest/meta-data/ (the classic internal
+        // metadata endpoint). The guarded fetch must refuse BEFORE this
+        // payload is ever requested.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        listener.set_nonblocking(true).expect("set nonblocking");
+        let port = listener.local_addr().unwrap().port();
+
+        let src = UreqSource::new();
+        let result = src.fetch(&FetchTarget::Url(format!(
+            "http://127.0.0.1:{port}/latest/meta-data/"
+        )));
+
+        // The guarded resolver encodes refusals behind the `agentguard-ssrf:`
+        // sentinel; `classify_transport` recovers them into FetchError::Ssrf
+        // with the fixed reason "resolved IP is internal
+        // (RFC1918/loopback/link-local/ULA/metadata)".
+        match result {
+            Err(FetchError::Ssrf(rej)) => {
+                assert!(
+                    rej.reason.contains("internal"),
+                    "unexpected refusal reason: {}",
+                    rej.reason
+                );
+            }
+            other => panic!("expected FetchError::Ssrf, got {other:?}"),
+        }
+
+        // Resolve-then-check means the FIRST hop (a loopback literal) is
+        // refused inside ureq's custom resolver, so no TCP connection is ever
+        // opened: accept must still report "nothing pending".
+        match listener.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("guard must refuse pre-connect; unexpected accept: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stock_resolver_control_follows_localhost_redirect_chain() {
+        const MARKER: &str = "AGENTGUARD_BENIGN_MARKER";
+
+        // Hop 2: serves HTTP/1.1 200 with a small benign body.
+        let hop2 = TcpListener::bind("127.0.0.1:0").expect("bind hop2 listener");
+        let port2 = hop2.local_addr().unwrap().port();
+        let body = format!("{MARKER} benign document body\n");
+        let t2 = {
+            let response = http_response("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n", &body);
+            std::thread::spawn(move || serve_one(&hop2, &response))
+        };
+
+        // Hop 1: serves HTTP/1.1 302 redirecting to hop 2.
+        let hop1 = TcpListener::bind("127.0.0.1:0").expect("bind hop1 listener");
+        let port1 = hop1.local_addr().unwrap().port();
+        let t1 = {
+            let response = http_response(
+                &format!("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port2}/benign\r\n"),
+                "",
+            );
+            std::thread::spawn(move || serve_one(&hop1, &response))
+        };
+
+        // Control agent: same timeouts as production, but the STOCK resolver
+        // (no SSRF guard). This is the only way a fetch may succeed against
+        // loopback, and that is the point of the control.
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(CONNECT_TIMEOUT)
+            .timeout_read(READ_TIMEOUT)
+            .build();
+
+        let resp = agent
+            .get(&format!("http://127.0.0.1:{port1}/start"))
+            .call()
+            .expect("control fetch must follow the 302 chain");
+        let final_url = resp.get_url().to_string();
+        let mut fetched = String::new();
+        resp.into_reader()
+            .take(MAX_FETCH_BYTES as u64)
+            .read_to_string(&mut fetched)
+            .expect("read control body");
+
+        t1.join().expect("hop1 server thread");
+        t2.join().expect("hop2 server thread");
+
+        assert_eq!(final_url, format!("http://127.0.0.1:{port2}/benign"));
+        assert!(
+            fetched.contains(MARKER),
+            "control body must carry the marker end-to-end; got {fetched:?}"
+        );
+    }
 }
