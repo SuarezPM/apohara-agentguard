@@ -68,7 +68,7 @@ live, no-network decision paths:
 | ------------------------- | -------------------- | -------- | ----------- | ----------- | ---------- | ----------- |
 | Benign Bash (`ls -la`)    | gate::evaluate       | Allow    | **1.823 µs** | **2.255 µs** | 1.372 µs   | 983.891 µs  |
 | Blocked Bash (`rm -rf ~`) | gate::evaluate       | Block    | **1.994 µs** | **2.445 µs** | 1.943 µs   | 50.436 µs   |
-| Injection prompt          | firewall (UserPrompt)| Warn     | **841 ns** | **1.352 µs** | 791 ns   | 7.614 µs    |
+| Injection prompt          | firewall (UserPrompt)| Warn     | **891 ns** | **1.433 µs** | 841 ns   | 7.614 µs    |
 
 The Bash gate (allow + block) costs ~1–2 µs per call — negligible against tool
 execution. The firewall content scan over the full rule set runs a single-pass

@@ -54,6 +54,10 @@ name: sandbox-proof
 
 on:
   workflow_dispatch:
+  # Scheduled runs accumulate PROFILE_OK evidence autonomously — the Sec7
+  # atomic-exec revisit decision depends on this signal existing.
+  schedule:
+    - cron: "23 4 * * *"
   pull_request:
     paths:
       - 'src/sandbox/**'

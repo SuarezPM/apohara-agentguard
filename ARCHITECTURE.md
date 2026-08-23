@@ -212,3 +212,9 @@ path resolver). The project is
 dual-licensed **MIT OR Apache-2.0** (`LICENSE-MIT` + `LICENSE-APACHE`, no single
 `LICENSE`); third-party dependency licenses are enumerated in
 `THIRD-PARTY-LICENSES` and gated by `cargo deny check licenses`.
+
+**Policy loading is deliberately single-shot.** `PolicySet::load` runs once per
+process at dispatch setup and is never cached across loads: hook processes are
+per-event by design, so an in-process cache would have zero multi-load callers.
+Budget counters share this process lifetime — their per-session scope is
+documented in `SECURITY.md`.
