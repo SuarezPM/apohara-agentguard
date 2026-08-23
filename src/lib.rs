@@ -13,6 +13,7 @@ pub mod init;
 pub mod mcp;
 mod neutralize;
 pub mod policy;
+pub mod proxy;
 pub mod sandbox;
 pub mod verdict;
 

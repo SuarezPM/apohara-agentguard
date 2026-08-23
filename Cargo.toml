@@ -15,6 +15,12 @@ path = "src/lib.rs"
 name = "apohara-agentguard"
 path = "src/main.rs"
 
+# V4-B MCP transport proxy: transparent stdio wrapper the client spawns as its
+# MCP server command; the real server runs as a piped child behind it.
+[[bin]]
+name = "agentguard-proxy"
+path = "src/bin/agentguard-proxy.rs"
+
 [dependencies]
 anyhow = "1"
 thiserror = "2"
