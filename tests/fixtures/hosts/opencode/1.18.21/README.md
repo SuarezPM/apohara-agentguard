@@ -1,0 +1,1 @@
+Versioned fixture directory for **opencode 1.18.21** — the plan-verified pin (`tool.execute.before` pre-permission throw, YOLO-immune; convention: `tests/fixtures/hosts/<host>/<version>/`; real captured payloads land in Wave U2′ — PLAN-V05-UNIVERSAL §1.4/§6.7).

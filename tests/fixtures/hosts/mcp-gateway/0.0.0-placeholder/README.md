@@ -1,0 +1,1 @@
+Versioned-fixture placeholder for **mcp-gateway** (convention: `tests/fixtures/hosts/<host>/<version>/`, one directory per host-release; real NDJSON proxy transcripts land in Wave U2′ with V4-B — PLAN-V05-UNIVERSAL §1.4).

@@ -2,6 +2,7 @@
 //!
 //! Public module surface for the CLI binary and integration tests.
 
+pub mod adapters;
 pub mod audit;
 pub mod config;
 pub mod contract;
@@ -14,6 +15,11 @@ mod neutralize;
 pub mod policy;
 pub mod sandbox;
 pub mod verdict;
+
+/// Narrow public seam for the bin crate: route operator-facing verdict
+/// reasons through the lib-private display-layer neutralization (the same
+/// transform the MCP surface applies). See [`neutralize`].
+pub use neutralize::neutralize_reason;
 
 // ---- Corpus-overfit detector (Story T9, TEST-ONLY, informational) ----------
 //

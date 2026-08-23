@@ -1,0 +1,1 @@
+Versioned-fixture placeholder for **codex** (convention: `tests/fixtures/hosts/<host>/<version>/`, one directory per host-release; real captured payloads + per-release real-smoke checklist land in Wave U2′ — PLAN-V05-UNIVERSAL §1.4).

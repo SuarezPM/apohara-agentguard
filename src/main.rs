@@ -169,6 +169,17 @@ fn run_hook(cli_policy: Option<&std::path::Path>) -> ExitCode {
     ExitCode::from(code as u8)
 }
 
+/// Render an operator-facing verdict reason for the terminal.
+///
+/// Routes through the lib's display-layer neutralization — the SAME
+/// transform the MCP surface applies to `verdict.reason` — so hostile-shaped
+/// content (hidden control characters, chat-role impersonation, pseudo-tags,
+/// markdown fence runs) embedded in a reason never reaches the terminal raw.
+/// Format-neutral: callers keep their `warn: ` / `block: ` / `ask: ` prefixes.
+fn display_reason(reason: &str) -> String {
+    apohara_agentguard::neutralize_reason(reason)
+}
+
 /// Scan stdin content through the input firewall (manual / debugging use).
 ///
 /// Surface-agnostic: scans the raw text with default thresholds and prints the
@@ -194,11 +205,11 @@ fn run_scan(cli_policy: Option<&std::path::Path>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Tier::Warn => {
-            println!("warn: {}", verdict.reason);
+            println!("warn: {}", display_reason(&verdict.reason));
             ExitCode::SUCCESS
         }
         Tier::Block => {
-            eprintln!("block: {}", verdict.reason);
+            eprintln!("block: {}", display_reason(&verdict.reason));
             ExitCode::from(2)
         }
         Tier::Ask => unreachable!("scan does not invoke the policy engine"),
@@ -226,11 +237,11 @@ fn run_check(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode 
             ExitCode::SUCCESS
         }
         Tier::Warn => {
-            println!("warn: {}", verdict.reason);
+            println!("warn: {}", display_reason(&verdict.reason));
             ExitCode::SUCCESS
         }
         Tier::Block => {
-            eprintln!("block: {}", verdict.reason);
+            eprintln!("block: {}", display_reason(&verdict.reason));
             ExitCode::from(2)
         }
         Tier::Ask => unreachable!("check does not invoke the policy engine"),
@@ -301,16 +312,16 @@ fn run_ask(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Tier::Warn => {
-            println!("warn: {}", verdict.reason);
+            println!("warn: {}", display_reason(&verdict.reason));
             ExitCode::SUCCESS
         }
         Tier::Block => {
-            eprintln!("block: {}", verdict.reason);
+            eprintln!("block: {}", display_reason(&verdict.reason));
             ExitCode::from(2)
         }
         Tier::Ask => {
             // Ask is a UI prompt (not an error); exit 0.
-            println!("ask: {}", verdict.reason);
+            println!("ask: {}", display_reason(&verdict.reason));
             ExitCode::SUCCESS
         }
     }

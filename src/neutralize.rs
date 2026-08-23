@@ -96,6 +96,16 @@ pub(crate) fn neutralize(text: &str) -> Cow<'_, str> {
     Cow::Owned(s.into_owned())
 }
 
+/// Public seam for the binary crate: neutralize one operator-facing verdict
+/// reason before it reaches the terminal.
+///
+/// Applies exactly the transform the MCP surface applies to
+/// [`crate::verdict::Verdict::reason`] ([`neutralize`], always-owned result).
+/// Everything else in this module stays private to the lib.
+pub fn neutralize_reason(text: &str) -> String {
+    neutralize(text).into_owned()
+}
+
 /// Cheap negative gate: whether `text` contains ANY construct the rules act
 /// on. Must have no false negatives (a missed trigger would skip rewriting);
 /// false positives are harmless (the full pipeline still decides correctly).

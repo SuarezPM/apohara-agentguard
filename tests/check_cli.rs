@@ -186,3 +186,77 @@ max_invocations = 0
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ============================================================================
+// Reason neutralization on the CLI surface (Wave U1 — CLI-reasons)
+// ============================================================================
+
+/// Run `check '<cmd>'` with an `agentguard.toml` written into the fresh
+/// temp cwd (the highest-priority default config location), so the gate
+/// sees deterministic custom_blocks. The config dies with the cwd.
+fn run_check_with_config(command: &str, config_toml: &str) -> std::process::Output {
+    let cwd = temp_cwd();
+    std::fs::write(cwd.join("agentguard.toml"), config_toml).expect("write agentguard.toml");
+    let out = Command::new(env!("CARGO_BIN_EXE_apohara-agentguard"))
+        .args(["check", command])
+        .current_dir(&cwd)
+        .env_remove("AGENTGUARD_DISABLE")
+        .env_remove("AGENTGUARD_POLICY")
+        .output()
+        .expect("run apohara-agentguard check");
+    let _ = std::fs::remove_dir_all(&cwd);
+    out
+}
+
+#[test]
+fn check_cli_neutralizes_hostile_shaped_content_in_reason() {
+    // A custom_blocks category carrying a chat-role pseudo-tag flows
+    // verbatim into the printed reason (`custom-block [<category>]`).
+    // The CLI must render the NEUTRALIZED form (single guillemets) — the
+    // same display-layer transform the MCP surface applies to
+    // verdict.reason — never the raw tag.
+    let config = r#"
+[[custom_blocks]]
+pattern = "deploy-prod"
+severity = 9
+category = "exfil <system>"
+"#;
+    let out = run_check_with_config("echo deploy-prod", config);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "severity 9 >= default block_at 8 must exit 2; stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("block: "),
+        "Block must keep the `block: ` prefix; got {stderr:?}"
+    );
+    assert!(
+        stderr.contains('\u{2039}') && stderr.contains("system\u{203a}"),
+        "reason must carry the masked pseudo-tag form; got {stderr:?}"
+    );
+    assert!(
+        !stderr.contains("<system>"),
+        "raw pseudo-tag must never reach the terminal; got {stderr:?}"
+    );
+}
+
+#[test]
+fn check_cli_identity_ordinary_reason_passes_through_unchanged() {
+    // Identity guarantee: an ordinary destructive-command reason contains
+    // nothing the neutralizer acts on, so it reaches the terminal with its
+    // content unchanged (same prose the pre-neutralization CLI printed).
+    let out = run_check("rm -rf ~");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr.starts_with("block: blocked dangerous leg"),
+        "prefix + reason prose must be unchanged; got {stderr:?}"
+    );
+    assert!(
+        stderr.contains("`rm -rf ~`") && stderr.contains("(destructive [rm-rf])"),
+        "ordinary reason must pass through semantically unchanged; got {stderr:?}"
+    );
+}
