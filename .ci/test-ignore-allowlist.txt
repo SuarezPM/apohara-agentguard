@@ -1,0 +1,13 @@
+# Allowlist for #[ignore] attributes in Rust sources (silent-skip prevention).
+#
+# Format: one entry per line:  <path-prefix>|<justification>
+#   * <path-prefix>   — path prefix matched against the file portion of each
+#                       grep hit (e.g. tests/foo.rs or src/net/)
+#   * <justification> — why that test is allowed to be skipped in CI
+# Blank lines and lines starting with '#' are ignored.
+#
+# Every #[ignore] occurrence found by the "Assert no silent test skips" CI
+# step must match one entry's path prefix, or the build fails.
+#
+# Current entries: ZERO. Every test must run; add an entry only with a
+# written justification reviewed in the PR.

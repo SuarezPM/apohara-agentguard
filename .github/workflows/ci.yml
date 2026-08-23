@@ -138,7 +138,7 @@ jobs:
           echo "Cargo.toml restored cleanly."
 
   structure:
-    name: module dependency invariants
+    name: structure invariants (modules + test wiring)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -166,6 +166,72 @@ jobs:
             exit 1
           fi
           echo "Module dependency invariants hold."
+
+      # Silent-skip prevention (Story T6): a test that silently doesn't run is
+      # a hole in the safety net. Every #[ignore] attribute must either be
+      # removed or carry a justified entry in .ci/test-ignore-allowlist.txt.
+      # Coverage percentage reporting lives in the coverage job; this step
+      # guarantees nothing is silently skipped.
+      - name: Assert no silent test skips
+        run: |
+          set -euo pipefail
+          ALLOWLIST=.ci/test-ignore-allowlist.txt
+          grep -rn "#\[ignore" src/ tests/ benches/ fuzz/fuzz_targets/ --include='*.rs' > /tmp/ignores.txt || true
+          # Doc comments may mention the attribute in prose (e.g. "NOT
+          # #[ignore]d on purpose"); only attribute-position occurrences are
+          # real skips. Same comment-stripping pattern as the layering step.
+          grep -vE ':[0-9]+:[[:space:]]*(//|///|//!)' /tmp/ignores.txt > /tmp/ignores-real.txt || true
+          status=0
+          while IFS= read -r hit; do
+            if [ -z "$hit" ]; then continue; fi
+            file="${hit%%:*}"
+            matched=""
+            while IFS='|' read -r prefix reason; do
+              if [ -z "${prefix:-}" ]; then continue; fi
+              case "$prefix" in '#'*) continue ;; esac
+              case "$file" in "$prefix"*) matched="1"; break ;; esac
+            done < "$ALLOWLIST"
+            if [ -z "$matched" ]; then
+              echo "::error::#[ignore] without allowlist entry: $hit"
+              status=1
+            else
+              echo "::notice file=${file},line=$(echo "$hit" | cut -d: -f2)::ignored test is allowlisted: $reason"
+            fi
+          done < /tmp/ignores-real.txt
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Every #[ignore] must be removed or justified in $ALLOWLIST (format: path-prefix|reason)."
+            exit 1
+          fi
+          echo "No silent test skips: $(wc -l < /tmp/ignores-real.txt) active #[ignore] occurrence(s), all allowlisted."
+
+      # Suite-completeness invariant (Story T6): every integration test file in
+      # tests/*.rs must be wired into this workflow, so adding a test file but
+      # forgetting CI is impossible. Exempt only the kernel-capability sandbox
+      # suites, which run in the dedicated non-blocking Linux step of the test
+      # job; sandbox_offlinux runs off-Linux but is still referenced in this
+      # file, so the grep below covers it too.
+      - name: Assert test suite completeness
+        run: |
+          set -euo pipefail
+          EXEMPT="sandbox_seccomp sandbox_landlock sandbox_build_e2e sandbox_escape sandbox_failclosed"
+          missing=0
+          for f in tests/*.rs; do
+            name="$(basename "$f" .rs)"
+            exempt=""
+            for e in $EXEMPT; do
+              if [ "$name" = "$e" ]; then exempt="1"; break; fi
+            done
+            if [ -n "$exempt" ]; then continue; fi
+            if ! grep -qE -- "--test ${name}($|[^A-Za-z0-9_])" .github/workflows/ci.yml; then
+              echo "::error::Test suite '$name' (tests/$name.rs) has no '--test $name' reference in .github/workflows/ci.yml"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Every tests/*.rs suite except kernel-capability ones must appear in the CI workflow."
+            exit 1
+          fi
+          echo "Suite completeness holds: all non-kernel-capability tests/*.rs suites are wired into CI."
 
   test:
     name: test (${{ matrix.os }})
@@ -197,7 +263,7 @@ jobs:
                      --test gate_evasions --test gate_normalize --test danger_warning \
                      --test codex_hook --test audit --test check_cli \
                      --test example_config_parses --test hook_config --test readme_sync \
-                     --test config_failclosed --test eval_harness
+                     --test config_failclosed --test eval_harness --test mcp_stdio
           # sandbox_offlinux only exists (and matters) off Linux.
           if [ "${{ runner.os }}" != "Linux" ]; then
             cargo test --test sandbox_offlinux
@@ -267,6 +333,6 @@ jobs:
             --test gate_evasions --test gate_normalize --test danger_warning \
             --test codex_hook --test audit --test check_cli \
             --test example_config_parses --test hook_config --test readme_sync \
-            --test config_failclosed --test eval_harness \
+            --test config_failclosed --test eval_harness --test mcp_stdio \
             | tee coverage-summary.txt
           cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
