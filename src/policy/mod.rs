@@ -13,6 +13,10 @@
 //!   the gate's `custom_block_matches` and the hook's `tool_rule_verdict`
 //!   use — re-exported `pub(crate)` so the hook and the policy engine
 //!   share a SINGLE source of truth (no drift).
+//! - [`spans`]: typed source spans ([`spans::TextPosition`],
+//!   [`spans::TextRange`], [`spans::ErrorLocation`]) plus the hand-rolled
+//!   code-frame renderer that every [`PolicyError`] Display carries (Story
+//!   D2; zero deps — miette/ariadne deliberately rejected).
 //! - [`engine`]: the [`PolicySet`] type. Loads, evaluates, and tracks
 //!   in-memory per-session budget counters.
 //!
@@ -45,3 +49,4 @@
 pub mod engine;
 mod matcher;
 pub mod schema;
+pub mod spans;

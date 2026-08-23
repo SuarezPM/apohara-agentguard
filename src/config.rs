@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 
 pub use crate::audit::AuditConfig;
 pub use crate::verdict::Thresholds;
+use crate::verdict::{severity_to_tier, Tier};
 
 /// A user-added block pattern with its severity and category.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +107,12 @@ pub struct Config {
     pub normalize: bool,
     /// Local audit-log settings (`[audit]`). Off by default; metadata-only
     /// unless `include_command` is set. See [`AuditConfig`].
+    ///
+    /// Layering note (Story D3): the project layer MAY disable auditing
+    /// last-match-wins. Accepted BY DESIGN: audit is a detection/
+    /// observability surface, not pre-execution enforcement, so it sits
+    /// outside the monotonic-tightening contract (unlike gate/policy fields,
+    /// a project cannot use it to let a dangerous command through).
     #[serde(default)]
     pub audit: AuditConfig,
     /// Names of enabled domain packs (consumed later by US-C). Default empty.
@@ -123,6 +130,12 @@ pub struct Config {
     #[serde(default)]
     pub level: Option<String>,
     /// Canary toggle (`[canary]`). Off by default. See [`CanaryConfig`].
+    ///
+    /// Layering note (Story D3): the project layer MAY disable the canary
+    /// last-match-wins. Accepted BY DESIGN: the canary is a detection/
+    /// observability surface (it detects exfiltration of planted secrets), not
+    /// pre-execution enforcement, so it sits outside the monotonic-tightening
+    /// contract.
     #[serde(default)]
     pub canary: CanaryConfig,
     /// Policy file evaluator settings (`[policy]`). Off by default (no policy
@@ -190,27 +203,69 @@ impl Config {
         }
     }
 
-    /// Load from the first existing default location, else built-in defaults.
+    /// Load from the default locations, LAYERED (Story D3).
+    ///
+    /// Layers:
+    /// 1. **User layer** — `$XDG_CONFIG_HOME/agentguard/config.toml`
+    ///    (falling back to `~/.config/agentguard/config.toml`). The BASE.
+    /// 2. **Project layer** — `./agentguard.toml`. An OVERLAY validated
+    ///    tightening-only on top of the user layer.
+    ///
+    /// Monotonic-tightening contract (applied ONLY when BOTH layers exist):
+    /// the project file may TIGHTEN protection fields but never loosen them
+    /// (see [`merge_tightening`] for the per-field rules). Any violation is
+    /// a loud error naming the offending field ⇒ callers fail closed with
+    /// exit 2.
+    ///
+    /// Single-layer behavior is byte-identical to the pre-D3 loader:
+    /// - Only the project file exists ⇒ load it alone (old first-match-wins).
+    /// - Only the user file exists ⇒ load it alone.
+    /// - Neither exists ⇒ silent [`Config::default`] (the empty-config
+    ///   byte-identical invariant).
     ///
     /// Missing-vs-malformed split (fail-closed contract):
-    /// - NO config file found in any default location ⇒ `Ok(Config::default())`
-    ///   silently (the empty-config byte-identical invariant).
-    /// - A file EXISTS but fails to read/parse/deserialize ⇒ `Err` with the
-    ///   file path in the context and the offending key/field name in the
-    ///   underlying error. Callers must surface it (see `main.rs`: loud
-    ///   stderr diagnostic + exit 2), never discard a malformed config.
-    ///
-    /// Lookup order:
-    /// 1. `./agentguard.toml` (project-local, highest priority)
-    /// 2. `$XDG_CONFIG_HOME/agentguard/config.toml`
-    ///    (falling back to `~/.config/agentguard/config.toml`)
+    /// - NO config file found ⇒ `Ok(Config::default())` silently.
+    /// - A file EXISTS but fails to read/parse/deserialize/validate ⇒ `Err`
+    ///   with the file path in the context and the offending key/field name
+    ///   in the underlying error. Callers must surface it (see `main.rs`:
+    ///   loud stderr diagnostic + exit 2), never discard a malformed config.
     pub fn load_default_locations() -> Result<Config> {
-        for candidate in default_config_paths() {
-            if candidate.exists() {
-                return Config::load(Some(&candidate));
-            }
+        let paths = default_config_paths();
+        // paths[0] is the project-local candidate; the rest are user-level
+        // candidates (XDG first, then $HOME/.config).
+        let project = paths.first().filter(|p| p.exists());
+        let user = paths.iter().skip(1).find(|p| p.exists());
+        match (project, user) {
+            (None, None) => Ok(Config::default()),
+            (Some(p), None) => Self::load(Some(p)),
+            (None, Some(u)) => Self::load(Some(u)),
+            (Some(p), Some(u)) => Self::load_layered(u, p),
         }
-        Ok(Config::default())
+    }
+
+    /// Layered load: the user config is the BASE, the project config an
+    /// OVERLAY validated tightening-only on top of it (Story D3).
+    fn load_layered(user_path: &Path, project_path: &Path) -> Result<Config> {
+        let base = Self::load(Some(user_path))?;
+        let text = fs::read_to_string(project_path)
+            .with_context(|| format!("reading config file {}", project_path.display()))?;
+        let overlay: Config = toml::from_str(&text)
+            .with_context(|| format!("parsing config file {}", project_path.display()))?;
+        let presence = TighteningPresence::from_toml(&text)
+            .with_context(|| format!("parsing config file {}", project_path.display()))?;
+        let merged = merge_tightening(base, overlay, &presence).with_context(|| {
+            format!(
+                "project config {} may only TIGHTEN the user config {}",
+                project_path.display(),
+                user_path.display()
+            )
+        })?;
+        // The merged result must satisfy the same cross-field invariants as
+        // any single-layer load (e.g. warn_at <= block_at after merging).
+        merged
+            .validate()
+            .with_context(|| format!("invalid configuration in {}", project_path.display()))?;
+        Ok(merged)
     }
 
     /// Whether `command` matches the allow-list (substring or `*`-glob).
@@ -404,6 +459,380 @@ fn default_config_paths() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+// ---- Story D3: monotonic tightening (layered user + project configs) -------
+
+/// Which top-level keys an overlay config file EXPLICITLY sets (Story D3).
+///
+/// Overlay semantics need presence tracking: a key ABSENT from the project
+/// file means "inherit the user layer's value", not "reset to the built-in
+/// default". Serde alone cannot distinguish those two (every field carries
+/// `#[serde(default)]`), so the raw TOML table is inspected alongside the
+/// typed parse.
+///
+/// # MUST-BE-UPDATED (drift tripwire, m15)
+///
+/// When a PROTECTION field joins [`Config`], you MUST also:
+/// 1. add its flag here and populate it in [`TighteningPresence::from_toml`],
+/// 2. list its key in [`TighteningPresence::TRACKED_KEYS`],
+/// 3. give it a monotonicity rule in [`merge_tightening`] (and a row in that
+///    function's doc table).
+///
+/// Skipping any step makes the layered loader silently last-match the new
+/// field — a weakening hole. The test
+/// `tightening_presence_tracks_every_protection_field` pins this contract
+/// against [`PROTECTION_CONFIG_FIELDS`].
+#[derive(Debug, Default)]
+struct TighteningPresence {
+    // Protection fields.
+    thresholds_block_at: bool,
+    thresholds_warn_at: bool,
+    allow_list: bool,
+    custom_blocks: bool,
+    tool_rules: bool,
+    disable: bool,
+    disabled: bool,
+    normalize: bool,
+    level: bool,
+    // Protection-adjacent (M1): opt-in packs + enforced ruleset identity.
+    packs: bool,
+    policy: bool,
+    // Non-protection fields (project wins last-match, no validation).
+    audit: bool,
+    canary: bool,
+}
+
+impl TighteningPresence {
+    /// Every key this tracker inspects. Kept as data so the drift-tripwire
+    /// test can assert that each protection field of [`Config`] is covered.
+    #[cfg(test)]
+    const TRACKED_KEYS: &'static [&'static str] = &[
+        "thresholds.block_at",
+        "thresholds.warn_at",
+        "allow_list",
+        "custom_blocks",
+        "tool_rules",
+        "disable",
+        "disabled",
+        "normalize",
+        "level",
+        "packs",
+        "policy",
+        "audit",
+        "canary",
+    ];
+
+    /// Inspect the raw TOML text of an overlay file for explicitly-set keys.
+    fn from_toml(text: &str) -> Result<Self> {
+        let tbl: toml::Table = toml::from_str(text)?;
+        let thresholds = tbl.get("thresholds").and_then(toml::Value::as_table);
+        Ok(Self {
+            thresholds_block_at: thresholds.is_some_and(|t| t.contains_key("block_at")),
+            thresholds_warn_at: thresholds.is_some_and(|t| t.contains_key("warn_at")),
+            allow_list: tbl.contains_key("allow_list"),
+            custom_blocks: tbl.contains_key("custom_blocks"),
+            tool_rules: tbl.contains_key("tool_rules"),
+            disable: tbl.contains_key("disable"),
+            disabled: tbl.contains_key("disabled"),
+            normalize: tbl.contains_key("normalize"),
+            level: tbl.contains_key("level"),
+            packs: tbl.contains_key("packs"),
+            policy: tbl.contains_key("policy"),
+            audit: tbl.contains_key("audit"),
+            canary: tbl.contains_key("canary"),
+        })
+    }
+}
+
+/// The protection fields of [`Config`] (incl. M1's packs/policy) that MUST be
+/// covered by a [`TighteningPresence`] flag + a monotonicity rule in
+/// [`merge_tightening`]. Test-only drift-tripwire list — see
+/// `tightening_presence_tracks_every_protection_field`.
+#[cfg(test)]
+const PROTECTION_CONFIG_FIELDS: &[&str] = &[
+    "thresholds.block_at",
+    "thresholds.warn_at",
+    "allow_list",
+    "custom_blocks",
+    "tool_rules",
+    "disable",
+    "disabled",
+    "normalize",
+    "level",
+    "packs",
+    "policy",
+];
+
+/// Rank a [`Tier`] on the Allow < Warn < Ask < Block lattice. Local copy of
+/// `crate::hook::tier_rank` so `config` does not grow a dependency on `hook`
+/// (mirrors it exactly; Ask is unreachable from [`severity_to_tier`] but the
+/// arm keeps the match exhaustive).
+fn action_rank(t: Tier) -> u8 {
+    match t {
+        Tier::Allow => 0,
+        Tier::Warn => 1,
+        Tier::Ask => 2,
+        Tier::Block => 3,
+    }
+}
+
+/// Merge a parsed project OVERLAY onto a validated user BASE under the
+/// monotonic-tightening contract (Story D3). Returns the merged config; any
+/// loosening attempt is a loud error naming the offending field (callers fail
+/// closed with exit 2).
+///
+/// Per-field rules — protection fields ONLY; every other key is project-wins
+/// last-match with no validation:
+///
+/// | field          | rule (project vs user)                                                        |
+/// |----------------|-------------------------------------------------------------------------------|
+/// | thresholds     | resolved block/warn cutoffs must be <= the user's (lower = tighter); `level` presets resolve to concrete values FIRST, then the same rule applies |
+/// | allow_list     | every project entry must exist in the user list (subset ⇒ intersection semantics via validation) |
+/// | custom_blocks  | project must carry every USER PATTERN (matched by pattern only, so the project may raise a block's severity); new patterns additive |
+/// | tool_rules     | per rule identity `(tool, arg, pattern)`: the mapped action rank Allow<Warn<Ask<Block must not decrease; new identities are additive and always fine |
+/// | disable        | user `false` → project `true` rejected (`true`→`false` fine)                  |
+/// | disabled       | ADDING a component rejected; removing fine                                    |
+/// | normalize      | turning OFF what the user has ON rejected                                     |
+/// | packs          | project must keep every user-opted-in pack (superset); new packs additive      |
+/// | policy.file    | IMMUTABLE once set by the user layer: never cleared or replaced (project may only SET it when the user layer has none — additive bootstrap) |
+///
+/// Absent keys INHERIT the user layer's value (overlay semantics); presence
+/// is tracked by [`TighteningPresence`]. Detection/observability surfaces
+/// (`audit`, `canary`) are deliberately OUTSIDE this table: the project layer
+/// may disable them last-match-wins — accepted by design (see the field docs
+/// on [`Config::audit`] / [`Config::canary`]).
+fn merge_tightening(base: Config, overlay: Config, p: &TighteningPresence) -> Result<Config> {
+    let mut merged = base.clone();
+    let user_eff = base.effective_thresholds();
+
+    // --- thresholds + level presets (resolve FIRST, then compare) ------------
+    if p.level {
+        // The preset resolves to concrete cutoffs; the tightening rule
+        // applies to the RESOLVED values.
+        let proj_eff = overlay.effective_thresholds();
+        if proj_eff.block_at > user_eff.block_at {
+            anyhow::bail!(
+                "thresholds.block_at: project preset resolves to {} which raises the user cutoff {}",
+                proj_eff.block_at,
+                user_eff.block_at
+            );
+        }
+        if proj_eff.warn_at > user_eff.warn_at {
+            anyhow::bail!(
+                "thresholds.warn_at: project preset resolves to {} which raises the user cutoff {}",
+                proj_eff.warn_at,
+                user_eff.warn_at
+            );
+        }
+        merged.level = overlay.level.clone();
+        merged.thresholds = proj_eff;
+    } else if p.thresholds_block_at || p.thresholds_warn_at {
+        // Partial override: unspecified cutoffs inherit the USER's effective
+        // values (not the built-in defaults).
+        let mut t = user_eff;
+        if p.thresholds_block_at {
+            t.block_at = overlay.thresholds.block_at;
+        }
+        if p.thresholds_warn_at {
+            t.warn_at = overlay.thresholds.warn_at;
+        }
+        if t.block_at > user_eff.block_at {
+            anyhow::bail!(
+                "thresholds.block_at ({}) raises the user cutoff ({})",
+                t.block_at,
+                user_eff.block_at
+            );
+        }
+        if t.warn_at > user_eff.warn_at {
+            anyhow::bail!(
+                "thresholds.warn_at ({}) raises the user cutoff ({})",
+                t.warn_at,
+                user_eff.warn_at
+            );
+        }
+        // The user preset has been resolved into concrete values; carrying
+        // `level` over would re-apply the unresolved preset on top of the
+        // merged cutoffs.
+        merged.level = None;
+        merged.thresholds = t;
+    } // else: inherit the user layer's thresholds/level wholesale.
+
+    // --- allow_list: subset-only ----------------------------------------------
+    if p.allow_list {
+        for entry in &overlay.allow_list {
+            if !base.allow_list.contains(entry) {
+                anyhow::bail!(
+                    "allow_list entry {entry:?} is not present in the user config allow_list \
+                     (adding an allowance would weaken the gate)"
+                );
+            }
+        }
+        merged.allow_list = overlay.allow_list.clone();
+    }
+
+    // --- custom_blocks: superset by PATTERN only -------------------------------
+    // (N1) Matching on the pattern alone lets the project RAISE the severity
+    // of a user block (a tightening) without rejection; dropping a user
+    // pattern entirely is still a weakening and rejected.
+    if p.custom_blocks {
+        for ub in &base.custom_blocks {
+            if !overlay
+                .custom_blocks
+                .iter()
+                .any(|pb| pb.pattern == ub.pattern)
+            {
+                anyhow::bail!(
+                    "custom_blocks is missing the user pattern {:?} — dropping a block would \
+                     weaken the gate",
+                    ub.pattern
+                );
+            }
+        }
+        merged.custom_blocks = overlay.custom_blocks.clone();
+    }
+
+    // --- tool_rules: per-identity rank monotonicity; additions fine ------------
+    if p.tool_rules {
+        let eff = merged.effective_thresholds();
+        for pr in &overlay.tool_rules {
+            if let Some(ur) = base
+                .tool_rules
+                .iter()
+                .find(|ur| ur.tool == pr.tool && ur.arg == pr.arg && ur.pattern == pr.pattern)
+            {
+                let user_rank = action_rank(severity_to_tier(ur.severity, &eff));
+                let proj_rank = action_rank(severity_to_tier(pr.severity, &eff));
+                if proj_rank < user_rank {
+                    anyhow::bail!(
+                        "tool_rules[tool={:?}, arg={:?}, pattern={:?}]: severity {} maps to a \
+                         weaker action than the user's severity {} for the same rule",
+                        pr.tool,
+                        pr.arg,
+                        pr.pattern,
+                        pr.severity,
+                        ur.severity
+                    );
+                }
+            }
+            // New rule identity: additive tightening, always fine.
+        }
+        // Union semantics: user rules survive unless the project overrides
+        // their exact identity; project additions are appended.
+        let mut rules = base.tool_rules.clone();
+        for pr in overlay.tool_rules {
+            match rules
+                .iter_mut()
+                .find(|ur| ur.tool == pr.tool && ur.arg == pr.arg && ur.pattern == pr.pattern)
+            {
+                Some(slot) => *slot = pr,
+                None => rules.push(pr),
+            }
+        }
+        merged.tool_rules = rules;
+    }
+
+    // --- disable: the global kill-switch may only be turned ON by the user -----
+    if p.disable {
+        if !base.disable && overlay.disable {
+            anyhow::bail!("disable = true would turn OFF the whole gate the user config leaves on");
+        }
+        merged.disable = overlay.disable;
+    }
+
+    // --- disabled: component kill-list is subset-only ---------------------------
+    if p.disabled {
+        for c in &overlay.disabled {
+            let known = base
+                .disabled
+                .iter()
+                .any(|u| u.trim().eq_ignore_ascii_case(c.trim()));
+            if !known {
+                anyhow::bail!(
+                    "disabled component {c:?} is not disabled in the user config — disabling \
+                     another component would weaken the gate"
+                );
+            }
+        }
+        // (N4) Carry the USER layer's canonical casing for inherited entries:
+        // validation just proved every overlay entry case-insensitively
+        // matches a user entry, so the lookup below always succeeds.
+        merged.disabled = overlay
+            .disabled
+            .iter()
+            .map(|c| {
+                base.disabled
+                    .iter()
+                    .find(|u| u.trim().eq_ignore_ascii_case(c.trim()))
+                    .expect("validated above: every overlay entry exists in the user list")
+                    .clone()
+            })
+            .collect();
+    }
+
+    // --- normalize: the pre-pass may not be switched off by the project --------
+    if p.normalize {
+        if base.normalize && !overlay.normalize {
+            anyhow::bail!(
+                "normalize = false would turn OFF the normalization pre-pass the user config \
+                 leaves on"
+            );
+        }
+        merged.normalize = overlay.normalize;
+    }
+
+    // --- packs: opt-in rule packs are PROTECTION (superset-only) ---------------
+    // (M1b) A plain last-match replace would let `packs = []` in the project
+    // layer silently drop the user's opted-in pack rules from enforcement.
+    // The project list must keep every user pack; new packs are additive.
+    if p.packs {
+        for up in &base.packs {
+            if !overlay.packs.contains(up) {
+                anyhow::bail!(
+                    "packs is missing the user-opted-in pack {up:?} — dropping a rule pack \
+                     would weaken the gate"
+                );
+            }
+        }
+        merged.packs = overlay.packs;
+    }
+
+    // --- audit / canary: detection & observability, accepted-by-design ---------
+    // The project layer MAY disable these last-match-wins: they are
+    // detection/observability surfaces, not pre-execution enforcement, and
+    // are deliberately outside the monotonic-tightening contract (see the
+    // field docs on Config::audit / Config::canary).
+    if p.audit {
+        merged.audit = overlay.audit;
+    }
+    if p.canary {
+        merged.canary = overlay.canary;
+    }
+
+    // --- policy.file: IMMUTABLE once the user layer sets it ---------------------
+    // (M1a) `[policy].file` decides WHICH ruleset the engine enforces. A
+    // plain replace would let the project swap the user's ruleset for its
+    // own; an explicit empty `[policy]` would clear it and silently turn the
+    // engine into a no-op (a default-deny user policy gone). So: never
+    // cleared, never replaced — the project may only SET the file when the
+    // user layer has none (additive bootstrap).
+    if p.policy {
+        match (&base.policy.file, &overlay.policy.file) {
+            (Some(user_file), Some(proj_file)) if proj_file != user_file => {
+                anyhow::bail!(
+                    "policy.file {proj_file:?} cannot replace the user layer's policy file \
+                     {user_file:?} — swapping the enforced ruleset would weaken the gate"
+                );
+            }
+            // User file set: keep it verbatim (explicit-empty project included).
+            (Some(_), _) => {}
+            // No user file: the project may bootstrap one.
+            (None, Some(proj_file)) => merged.policy.file = Some(proj_file.clone()),
+            (None, None) => {}
+        }
+    }
+
+    Ok(merged)
 }
 
 /// Minimal glob match: `*` is a wildcard over any run of characters; a pattern
@@ -979,5 +1408,383 @@ mod tests {
             "error must carry the file context and the invariant: {msg}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- Story D3: monotonic tightening (merge_tightening unit tests) ----
+
+    /// Parse an overlay TOML text and merge it onto `base`, for tests.
+    fn merge_text(base: Config, overlay_text: &str) -> Result<Config> {
+        let overlay: Config = toml::from_str(overlay_text).expect("overlay parses");
+        let presence = TighteningPresence::from_toml(overlay_text).expect("presence");
+        merge_tightening(base, overlay, &presence)
+    }
+
+    fn user_base() -> Config {
+        Config {
+            allow_list: vec!["ls *".to_string(), "git *".to_string()],
+            custom_blocks: vec![CustomBlock {
+                pattern: "shutdown".to_string(),
+                severity: 9,
+                category: "system".to_string(),
+            }],
+            thresholds: Thresholds {
+                block_at: 7,
+                warn_at: 4,
+            },
+            disabled: vec!["canary".to_string()],
+            ..Config::default()
+        }
+    }
+
+    #[test]
+    fn merge_rejects_allow_list_addition() {
+        let err = merge_text(user_base(), "allow_list = [\"ls *\", \"docker *\"]")
+            .expect_err("adding an allowance must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("allow_list") && msg.contains("docker *"),
+            "error must name the field and the offending entry: {msg}"
+        );
+    }
+
+    #[test]
+    fn merge_accepts_narrowed_allow_list() {
+        let merged = merge_text(user_base(), "allow_list = [\"ls *\"]").expect("subset is fine");
+        assert_eq!(merged.allow_list, vec!["ls *".to_string()]);
+    }
+
+    #[test]
+    fn merge_absent_protection_keys_inherit_user_values() {
+        // The overlay only narrows allow_list; thresholds/custom_blocks/
+        // disabled must come from the USER layer, not the built-in defaults.
+        let merged = merge_text(user_base(), "allow_list = [\"ls *\"]").expect("merge");
+        assert_eq!(
+            merged.thresholds,
+            Thresholds {
+                block_at: 7,
+                warn_at: 4
+            }
+        );
+        assert_eq!(merged.custom_blocks.len(), 1);
+        assert_eq!(merged.disabled, vec!["canary".to_string()]);
+    }
+
+    #[test]
+    fn merge_rejects_raised_threshold_cutoffs() {
+        // NOTE: the schema requires BOTH cutoffs inside [thresholds] (no
+        // per-field serde defaults), so a partial table fails at PARSE time;
+        // these tests exercise the tightening rule on complete tables.
+        let err = merge_text(user_base(), "[thresholds]\nblock_at = 9\nwarn_at = 4\n")
+            .expect_err("raising block_at must be rejected");
+        assert!(
+            format!("{err:#}").contains("block_at"),
+            "error must name the offending cutoff: {err:#}"
+        );
+        // Raising warn_at is equally rejected.
+        let err = merge_text(user_base(), "[thresholds]\nblock_at = 7\nwarn_at = 5\n")
+            .expect_err("raising warn_at must be rejected");
+        assert!(format!("{err:#}").contains("warn_at"), "{err:#}");
+    }
+
+    #[test]
+    fn merge_accepts_lowered_threshold_cutoffs() {
+        // Lowering block_at tightens legitimately; warn_at kept equal to the
+        // user's. The merged config carries concrete values with no preset.
+        let merged = merge_text(user_base(), "[thresholds]\nblock_at = 6\nwarn_at = 4\n")
+            .expect("tightening cutoffs is fine");
+        assert_eq!(
+            merged.thresholds,
+            Thresholds {
+                block_at: 6,
+                warn_at: 4
+            }
+        );
+        assert!(merged.level.is_none());
+    }
+
+    #[test]
+    fn merge_resolves_level_presets_before_comparing() {
+        // critical (5/2) is tighter than the user's 7/4: accepted, and the
+        // preset survives on the merged config.
+        let merged = merge_text(user_base(), "level = \"critical\"").expect("tighter preset ok");
+        assert_eq!(merged.level.as_deref(), Some("critical"));
+        assert_eq!(merged.effective_thresholds().block_at, 5);
+        // strict (7/4) equals the user's effective cutoffs: allowed boundary.
+        merge_text(user_base(), "level = \"strict\"").expect("equal preset ok");
+        // A preset LOOSER than the user's effective values: rejected.
+        let base = Config {
+            thresholds: Thresholds {
+                block_at: 5,
+                warn_at: 2,
+            },
+            ..Config::default()
+        };
+        let err =
+            merge_text(base, "level = \"strict\"").expect_err("looser preset must be rejected");
+        assert!(
+            format!("{err:#}").contains("thresholds.block_at"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_rejects_custom_blocks_missing_user_entry() {
+        let err = merge_text(
+            user_base(),
+            "[[custom_blocks]]\npattern = \"kubectl delete\"\nseverity = 9\ncategory = \"k8s\"\n",
+        )
+        .expect_err("dropping a user block must be rejected");
+        assert!(format!("{err:#}").contains("custom_blocks"), "{err:#}");
+    }
+
+    #[test]
+    fn merge_accepts_custom_blocks_superset() {
+        let merged = merge_text(
+            user_base(),
+            "[[custom_blocks]]\npattern = \"shutdown\"\nseverity = 9\ncategory = \"system\"\n\
+             [[custom_blocks]]\npattern = \"kubectl delete\"\nseverity = 9\ncategory = \"k8s\"\n",
+        )
+        .expect("superset of user blocks is fine");
+        assert_eq!(merged.custom_blocks.len(), 2);
+    }
+
+    #[test]
+    fn merge_tool_rules_weakening_rejected_tightening_and_additions_fine() {
+        let base = Config {
+            tool_rules: vec![ToolRule {
+                tool: "web_fetch".to_string(),
+                arg: "url".to_string(),
+                pattern: "*169.254.169.254*".to_string(),
+                severity: 5,
+            }],
+            ..Config::default()
+        };
+        // Same identity with a LOWER severity (Warn -> Allow under defaults):
+        // rejected.
+        let err = merge_text(
+            base.clone(),
+            "[[tool_rules]]\ntool = \"web_fetch\"\narg = \"url\"\npattern = \"*169.254.169.254*\"\nseverity = 2\n",
+        )
+        .expect_err("weakening a rule must be rejected");
+        assert!(
+            format!("{err:#}").contains("tool_rules"),
+            "error must name the field: {err:#}"
+        );
+        // Same identity, HIGHER severity: fine.
+        merge_text(
+            base.clone(),
+            "[[tool_rules]]\ntool = \"web_fetch\"\narg = \"url\"\npattern = \"*169.254.169.254*\"\nseverity = 9\n",
+        )
+        .expect("tightening a rule is fine");
+        // New identity: additive, fine — AND the user rule survives (union).
+        let merged = merge_text(
+            base,
+            "[[tool_rules]]\ntool = \"web_fetch\"\narg = \"url\"\npattern = \"*metadata.google*\"\nseverity = 9\n",
+        )
+        .expect("additive rules are fine");
+        assert_eq!(merged.tool_rules.len(), 2, "union keeps the user rule");
+    }
+
+    #[test]
+    fn merge_rejects_disable_true_from_project() {
+        let err = merge_text(Config::default(), "disable = true")
+            .expect_err("the project may not turn the gate off");
+        assert!(
+            format!("{err:#}").contains("disable"),
+            "error must name the field: {err:#}"
+        );
+        // true -> false is a TIGHTENING (the gate comes back on): fine.
+        let base = Config {
+            disable: true,
+            ..Config::default()
+        };
+        let merged = merge_text(base, "disable = false").expect("re-enabling is fine");
+        assert!(!merged.disable);
+    }
+
+    #[test]
+    fn merge_disabled_list_is_subset_only() {
+        // Adding a component the user did not disable: rejected.
+        let err = merge_text(user_base(), "disabled = [\"canary\", \"firewall\"]")
+            .expect_err("disabling another component must be rejected");
+        assert!(
+            format!("{err:#}").contains("disabled") && format!("{err:#}").contains("firewall"),
+            "{err:#}"
+        );
+        // Removing (subset): fine.
+        let merged = merge_text(user_base(), "disabled = []").expect("removal is fine");
+        assert!(merged.disabled.is_empty());
+    }
+
+    #[test]
+    fn merge_rejects_normalize_off() {
+        let err = merge_text(Config::default(), "normalize = false")
+            .expect_err("the project may not switch the pre-pass off");
+        assert!(
+            format!("{err:#}").contains("normalize"),
+            "error must name the field: {err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_non_protection_keys_are_project_wins() {
+        // Only audit/canary remain project-wins (M1 moved packs/policy under
+        // the tightening contract). The project may disable detection/
+        // observability last-match — accepted by design.
+        let base = Config {
+            canary: CanaryConfig { enabled: true },
+            ..user_base()
+        };
+        let merged = merge_text(base, "[canary]\nenabled = false\n")
+            .expect("detection surfaces are project-wins by design");
+        assert!(!merged.canary.enabled);
+        // Absent non-protection keys inherit the user layer.
+        assert!(!merged.audit.enabled);
+    }
+
+    // ---- M1: packs + policy.file are protection, not project-wins ----------
+
+    #[test]
+    fn merge_rejects_project_packs_dropping_user_pack() {
+        let base = Config {
+            packs: vec!["aws".to_string()],
+            ..user_base()
+        };
+        let err = merge_text(base, "packs = []").expect_err("dropping a pack must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("packs") && msg.contains("aws"),
+            "error must name the field and the dropped pack: {msg}"
+        );
+    }
+
+    #[test]
+    fn merge_accepts_project_packs_superset_union_active() {
+        let base = Config {
+            packs: vec!["aws".to_string()],
+            ..user_base()
+        };
+        let merged = merge_text(base, "packs = [\"aws\", \"k8s\"]")
+            .expect("adding a pack is additive and fine");
+        assert_eq!(merged.packs, vec!["aws".to_string(), "k8s".to_string()]);
+    }
+
+    #[test]
+    fn merge_project_empty_policy_section_keeps_user_policy_file() {
+        // An explicit EMPTY [policy] table in the project layer must NOT
+        // clear the user's policy file (that would silently no-op the engine,
+        // dropping e.g. a default-deny user policy).
+        let base = Config {
+            policy: PolicyConfig {
+                file: Some(PathBuf::from("/user/policy.toml")),
+            },
+            ..user_base()
+        };
+        let merged = merge_text(base, "[policy]\n").expect("empty [policy] inherits the user file");
+        assert_eq!(
+            merged.policy.file,
+            Some(PathBuf::from("/user/policy.toml")),
+            "user policy file is immutable once set"
+        );
+    }
+
+    #[test]
+    fn merge_rejects_replacing_user_policy_file() {
+        let base = Config {
+            policy: PolicyConfig {
+                file: Some(PathBuf::from("/user/policy.toml")),
+            },
+            ..user_base()
+        };
+        let err = merge_text(base, "[policy]\nfile = \"/project/policy.toml\"\n")
+            .expect_err("swapping the enforced ruleset must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("policy.file"),
+            "error must name the field: {msg}"
+        );
+    }
+
+    #[test]
+    fn merge_allows_policy_file_bootstrap_when_user_has_none() {
+        // Additive bootstrap: with NO user-layer policy file, the project may
+        // set one (that can only add enforcement).
+        let merged = merge_text(user_base(), "[policy]\nfile = \"/project/policy.toml\"\n")
+            .expect("bootstrapping a policy file is additive");
+        assert_eq!(
+            merged.policy.file,
+            Some(PathBuf::from("/project/policy.toml"))
+        );
+    }
+
+    // ---- N1: custom_blocks superset compares PATTERN only ------------------
+
+    #[test]
+    fn merge_custom_blocks_severity_raise_accepted() {
+        // Same pattern, HIGHER severity in the project layer: a tightening,
+        // accepted — and the merged config carries the raised severity.
+        let merged = merge_text(
+            user_base(),
+            "[[custom_blocks]]\npattern = \"shutdown\"\nseverity = 9\ncategory = \"system\"\n",
+        )
+        .expect("raising severity over the same pattern is fine");
+        assert_eq!(merged.custom_blocks.len(), 1);
+        assert_eq!(merged.custom_blocks[0].pattern, "shutdown");
+        assert_eq!(
+            merged.custom_blocks[0].severity, 9,
+            "project's raised severity wins"
+        );
+    }
+
+    // ---- N4: disabled list keeps the USER layer's canonical casing ---------
+
+    #[test]
+    fn merge_disabled_preserves_user_casing() {
+        let base = Config {
+            disabled: vec!["CANARY".to_string()],
+            ..user_base()
+        };
+        let merged = merge_text(base, "disabled = [\"canary\"]")
+            .expect("case-insensitive subset match is fine");
+        assert_eq!(
+            merged.disabled,
+            vec!["CANARY".to_string()],
+            "inherited entries keep the user layer's canonical casing"
+        );
+    }
+
+    // ---- N2: TighteningPresence drift tripwire ------------------------------
+
+    #[test]
+    fn tightening_presence_tracks_every_protection_field() {
+        // Every protection field of Config MUST be tracked by
+        // TighteningPresence; a new protection field without a presence flag
+        // would be silently last-matched by the layered loader (weakening
+        // hole). See the MUST-BE-UPDATED note on TighteningPresence.
+        for field in PROTECTION_CONFIG_FIELDS {
+            assert!(
+                TighteningPresence::TRACKED_KEYS.contains(field),
+                "protection field `{field}` joined Config without a TighteningPresence flag \
+                 + merge rule — the layered loader would silently last-match it"
+            );
+        }
+        // And the tracker actually FLIPS for every tracked key when set.
+        // NOTE: every TOP-LEVEL key must precede any table header — TOML
+        // attaches bare keys after a header to that table.
+        let text = concat!(
+            "allow_list = [\"x\"]\n",
+            "disable = true\ndisabled = [\"gate\"]\nnormalize = true\nlevel = \"strict\"\n",
+            "packs = [\"aws\"]\n",
+            "[thresholds]\nblock_at = 1\nwarn_at = 1\n",
+            "[[custom_blocks]]\npattern = \"p\"\nseverity = 1\ncategory = \"c\"\n",
+            "[[tool_rules]]\ntool = \"t\"\narg = \"a\"\npattern = \"p\"\nseverity = 1\n",
+            "[policy]\nfile = \"/p.toml\"\n[audit]\nenabled = true\n",
+            "[canary]\nenabled = true\n",
+        );
+        let presence = TighteningPresence::from_toml(text).expect("presence parses");
+        assert!(presence.thresholds_block_at && presence.thresholds_warn_at);
+        assert!(presence.allow_list && presence.custom_blocks && presence.tool_rules);
+        assert!(presence.disable && presence.disabled && presence.normalize && presence.level);
+        assert!(presence.packs && presence.policy && presence.audit && presence.canary);
     }
 }

@@ -310,3 +310,130 @@ fn engine_load_missing_path_is_error_not_panic() {
     let res = PolicySet::load(Some(&bogus));
     assert!(res.is_err(), "missing path must be an error, not a panic");
 }
+
+// ---- Story D2: every policy-load error carries a visual span ----------------
+
+/// Write `text` to a unique temp policy file and return its path.
+fn write_policy(text: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!(
+        "agentguard-policy-spans-{pid}-{n}",
+        pid = std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("policy.toml");
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn parse_error_display_carries_location_and_caret_frame() {
+    // Malformed TOML ⇒ the error Display must contain the rustc-style
+    // location header (`--> <path>:LINE:COL`) AND a caret frame line.
+    let path = write_policy("schema_version = 1\n[[tools\nname = \"Bash\"\n");
+    let err = PolicySet::load(Some(&path)).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains(&format!("--> {}", path.display())),
+        "error must carry the `--> path` header: {msg}"
+    );
+    assert!(
+        msg.contains("--> ") && msg.contains(":1:") || msg.contains(":2:") || msg.contains(":3:"),
+        "header must carry LINE:COL: {msg}"
+    );
+    assert!(
+        msg.lines().any(|l| l.contains('^')),
+        "error must carry a caret frame line: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn any_tool_name_loads_and_arbitrary_names_fire() {
+    // Schema-version-1 posture: ANY `[[tools]]` name is ACCEPTED. The
+    // evaluator matches the RAW `input.tool_name` and the dispatch runs the
+    // policy engine unconditionally, so names beyond the built-in dispatch —
+    // `Task`, `mcp__github__create_issue`, … — DO fire today (documented
+    // unrestricted-names semantics). Restricted-name validation returns in
+    // Wave U2′ when adapters route canonical tools.
+    let path = write_policy(
+        r#"
+schema_version = 1
+
+[[tools]]
+name = "Task"
+rules = [
+  { arg = "prompt", pattern = "*danger*", severity = 9, reason = "task blocked" },
+]
+
+[[tools]]
+name = "mcp__github__create_issue"
+rules = [
+  { arg = "command", pattern = "*rm -rf*", severity = 9, reason = "mcp rm blocked" },
+]
+"#,
+    );
+    let set = PolicySet::load(Some(&path)).expect("any tool name must load at schema_version=1");
+
+    // A PreToolUse event naming the arbitrary tool hits its rule.
+    let task_input = HookInput {
+        hook_event_name: "PreToolUse".to_string(),
+        session_id: Some("bench".to_string()),
+        tool_name: Some("Task".to_string()),
+        tool_input: json!({ "prompt": "something danger here" }),
+        prompt: None,
+        tool_response: serde_json::Value::Null,
+    };
+    let v = set.evaluate(&task_input, &Config::default());
+    assert_eq!(v.tier, Tier::Block, "arbitrary-name rules must fire");
+    assert!(v.reason.contains("task blocked"), "{:?}", v.reason);
+
+    // And an MCP-style name fires the same way.
+    let mcp_input = HookInput {
+        hook_event_name: "PreToolUse".to_string(),
+        session_id: Some("bench".to_string()),
+        tool_name: Some("mcp__github__create_issue".to_string()),
+        tool_input: json!({ "command": "rm -rf /tmp/x" }),
+        prompt: None,
+        tool_response: serde_json::Value::Null,
+    };
+    let v = set.evaluate(&mcp_input, &Config::default());
+    assert_eq!(v.tier, Tier::Block, "mcp__-style names must fire");
+    assert!(v.reason.contains("mcp rm blocked"), "{:?}", v.reason);
+
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn schema_version_error_carries_location() {
+    let path = write_policy("schema_version = 999\n[defaults]\ndefault_action = \"allow\"\n");
+    let err = PolicySet::load(Some(&path)).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("schema_version 999 is not supported"), "{msg}");
+    assert!(
+        msg.contains(&format!("--> {}", path.display())) && msg.contains(":1:"),
+        "schema_version error must point at line 1: {msg}"
+    );
+    assert!(
+        msg.lines().any(|l| l.contains('^')),
+        "schema_version error must carry a caret frame: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn unknown_key_parse_error_points_at_the_key_line() {
+    // deny_unknown_fields errors (unknown key) are serde-level parse errors:
+    // their span must land on the offending key's line, not degrade to 1:1.
+    let path = write_policy("schema_version = 1\ntypo_key = true\n");
+    let err = PolicySet::load(Some(&path)).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("typo_key"), "{msg}");
+    assert!(
+        msg.contains(":2:"),
+        "unknown-key error must point at line 2: {msg}"
+    );
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}

@@ -50,21 +50,85 @@ use crate::verdict::{severity_to_tier, Tier, Verdict};
 
 use super::matcher::pattern_matches;
 use super::schema::{Budgets, DefaultAction, PolicyFile, SessionBudget, CURRENT_SCHEMA_VERSION};
+use super::spans::{render_code_frame, ErrorLocation, TextRange};
 
 /// All the ways a policy file can fail to load. The dispatcher maps every
 /// variant to [`Verdict::block`] (fail-closed).
+///
+/// Story D2: EVERY variant carries an [`ErrorLocation`] and a pre-rendered
+/// code frame (see [`super::spans::render_code_frame`]) so the Display of any
+/// policy-load error points at the offending bytes in the file:
+///
+/// ```text
+/// policy parse error: expected `.`, `=`
+///   --> policy.toml:2:8
+///    |
+/// 2 | [[tools
+///    |        ^
+/// ```
 #[derive(Debug, Error)]
 pub enum PolicyError {
     /// The file path is set but the file does not exist (or is not
-    /// readable).
-    #[error("policy load error: {0}")]
-    Load(#[from] std::io::Error),
-    /// The TOML is malformed, or a required field is missing.
-    #[error("policy parse error: {0}")]
-    Parse(#[from] toml::de::Error),
-    /// `schema_version` is not [`CURRENT_SCHEMA_VERSION`].
-    #[error("policy schema_version {0} is not supported (this build supports {1})")]
-    SchemaVersion(u32, u32),
+    /// readable). No source text exists to frame, so the location degrades
+    /// to the file head (`1:1`) with a skeleton frame.
+    #[error("policy load error: {source}\n{frame}")]
+    Load {
+        /// Where the failed read was pointed (the policy path as loaded).
+        location: ErrorLocation,
+        /// The underlying IO error.
+        source: std::io::Error,
+        /// Pre-rendered code frame (skeleton — no source text available).
+        frame: String,
+    },
+    /// The TOML is malformed, or a required field is missing / a key or
+    /// value is invalid (`deny_unknown_fields`, bad enum value). The span
+    /// comes from `toml::de::Error::span()` when the parser reports one;
+    /// otherwise it degrades to the file head. The TOML error is boxed to
+    /// keep the variant small (errors here are terminal fail-closed values
+    /// that are only formatted, never hot-path).
+    #[error("policy parse error: {source}\n{frame}")]
+    Parse {
+        /// Byte range of the syntax/deserialize error.
+        location: ErrorLocation,
+        /// The underlying TOML error.
+        source: Box<toml::de::Error>,
+        /// Pre-rendered code frame under the offending bytes.
+        frame: String,
+    },
+    /// `schema_version` is not [`CURRENT_SCHEMA_VERSION`]. Located
+    /// best-effort by finding the `schema_version` key in the raw text.
+    #[error(
+        "policy schema_version {found} is not supported (this build supports {supported})\n{frame}"
+    )]
+    SchemaVersion {
+        /// Byte range of the `schema_version` key.
+        location: ErrorLocation,
+        /// The unsupported version found on disk.
+        found: u32,
+        /// The only version this build accepts.
+        supported: u32,
+        /// Pre-rendered code frame under the `schema_version` key.
+        frame: String,
+    },
+    /// A semantic error raised AFTER a successful parse: the file parses as
+    /// TOML and satisfies the serde schema, but is meaningless at runtime.
+    ///
+    /// RESERVED — never produced at schema_version=1 (ANY `[[tools]]` name
+    /// loads and fires today; see the semantic-validation hook in
+    /// [`PolicySet::load`]). Wave U2′ emits this when canonical-tool routing
+    /// lands. Spans are located best-effort by searching the raw TOML text
+    /// for the offending token (documented limitation: comments or escaped
+    /// formatting can hide the token, in which case the span degrades to the
+    /// file head).
+    #[error("policy semantic error: {message}\n{frame}")]
+    Semantic {
+        /// Best-effort byte range of the offending token.
+        location: ErrorLocation,
+        /// What is wrong (e.g. a future `unknown tool "…"` message).
+        message: String,
+        /// Pre-rendered code frame under the offending token.
+        frame: String,
+    },
 }
 
 /// Per-session budget counters. Keyed by `session_id` on the
@@ -130,21 +194,62 @@ impl Default for PolicySet {
 impl PolicySet {
     /// Load a policy from `path`. `None` (no path configured) yields the
     /// default no-op set; `Some(p)` where `p` does not exist is
-    /// [`PolicyError::Load`]. On success the set carries the SHA-256
-    /// fingerprint of the canonical policy representation (see
+    /// [`PolicyError::Load`]. Every error variant carries a located,
+    /// rendered code frame (Story D2). On success the set carries the
+    /// SHA-256 fingerprint of the canonical policy representation (see
     /// [`canonical_fingerprint`]).
     pub fn load(path: Option<&Path>) -> Result<Self, PolicyError> {
         let Some(path) = path else {
             return Ok(Self::default());
         };
-        let text = std::fs::read_to_string(path)?;
-        let file: PolicyFile = toml::from_str(&text)?;
+        let text = std::fs::read_to_string(path).map_err(|source| {
+            // Nothing was read, so there is no source to frame: degrade to a
+            // skeleton frame at the file head.
+            let location = ErrorLocation::new(path, TextRange::point(0));
+            let frame = render_code_frame("", &location);
+            PolicyError::Load {
+                location,
+                source,
+                frame,
+            }
+        })?;
+        let file: PolicyFile = toml::from_str(&text).map_err(|source| {
+            // toml reports byte offsets for syntax + deserialize errors via
+            // `span()`; fall back to a best-effort search for the offending
+            // backticked token in the message, then to the file head.
+            let range = match source.span().and_then(|s| TextRange::new(s.start, s.end)) {
+                Some(range) => range,
+                None => match first_backticked(source.message()) {
+                    Some(token) => locate_token(&text, token),
+                    None => TextRange::point(0),
+                },
+            };
+            let location = ErrorLocation::new(path, range);
+            let frame = render_code_frame(&text, &location);
+            PolicyError::Parse {
+                location,
+                source: Box::new(source),
+                frame,
+            }
+        })?;
         if file.schema_version != CURRENT_SCHEMA_VERSION {
-            return Err(PolicyError::SchemaVersion(
-                file.schema_version,
-                CURRENT_SCHEMA_VERSION,
-            ));
+            let location = ErrorLocation::new(path, locate_token(&text, "schema_version"));
+            let frame = render_code_frame(&text, &location);
+            return Err(PolicyError::SchemaVersion {
+                location,
+                found: file.schema_version,
+                supported: CURRENT_SCHEMA_VERSION,
+                frame,
+            });
         }
+        // SEMANTIC-VALIDATION HOOK (U2′ TODO): at schema_version=1 ANY
+        // `[[tools]]` name is ACCEPTED — `PolicySet::evaluate` matches the
+        // raw `input.tool_name` and the dispatch runs the policy engine
+        // unconditionally, so names like `Task` or `mcp__github__create_issue`
+        // fire today. Name restriction becomes meaningful only when the
+        // adapters layer routes canonical tools (Wave U2′, see
+        // `crate::adapters::ir::CanonicalTool`); emit the reserved
+        // [`PolicyError::Semantic`] from here then.
         Ok(Self {
             fingerprint: Some(canonical_fingerprint(&file, &text)),
             file,
@@ -315,6 +420,38 @@ impl PolicySet {
         }
         None
     }
+}
+
+// Semantic validation posture (Story D2 / Gate-2 remediation M2): at schema
+// version 1, ANY `[[tools]]` name is ACCEPTED. The evaluator matches the RAW
+// `input.tool_name` ([`PolicySet::evaluate`]) and the hook dispatch runs the
+// policy engine unconditionally, so names beyond the built-in dispatch —
+// `Task`, `mcp__github__create_issue`, … — DO fire today; rejecting them would
+// break live configs (and the documented unrestricted-names semantics).
+// Restricted-name validation becomes meaningful only in Wave U2′, when the
+// adapters layer routes canonical tools
+// ([`crate::adapters::ir::CanonicalTool`]); revisit it (and the reserved
+// [`PolicyError::Semantic`] variant) then.
+
+/// Best-effort byte range of `token`'s first occurrence in the raw TOML text;
+/// the file head (`0..0`) when the token cannot be found (e.g. exotic string
+/// escaping). Never panics, never mis-points past the end.
+fn locate_token(text: &str, token: &str) -> TextRange {
+    match text.find(token) {
+        Some(at) => TextRange::new(at, at + token.len()).unwrap_or_else(|| TextRange::point(0)),
+        None => TextRange::point(0),
+    }
+}
+
+/// Extract the first backtick-quoted token from a TOML error message (e.g.
+/// ``unknown field `bogus_key` `` → `bogus_key`), for best-effort span
+/// location when the parser reports no span of its own. `None` when the
+/// message carries no backticked token.
+fn first_backticked(message: &str) -> Option<&str> {
+    let start = message.find('`')? + 1;
+    let rest = &message[start..];
+    let end = rest.find('`')?;
+    (!rest[..end].is_empty()).then_some(&rest[..end])
 }
 
 /// Compute the SHA-256 hex fingerprint of a loaded policy.
@@ -496,7 +633,7 @@ mod tests {
         let bogus = std::env::temp_dir().join("agentguard-definitely-not-here-12345.toml");
         let _ = std::fs::remove_file(&bogus);
         let err = PolicySet::load(Some(&bogus)).unwrap_err();
-        assert!(matches!(err, PolicyError::Load(_)), "got {err:?}");
+        assert!(matches!(err, PolicyError::Load { .. }), "got {err:?}");
     }
 
     #[test]
@@ -511,7 +648,7 @@ mod tests {
         // Missing closing bracket — guaranteed parse error.
         std::fs::write(&path, "schema_version = 1\n[[tools\nname = \"Bash\"\n").unwrap();
         let err = PolicySet::load(Some(&path)).unwrap_err();
-        assert!(matches!(err, PolicyError::Parse(_)), "got {err:?}");
+        assert!(matches!(err, PolicyError::Parse { .. }), "got {err:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -530,7 +667,7 @@ mod tests {
         .unwrap();
         let err = PolicySet::load(Some(&path)).unwrap_err();
         assert!(
-            matches!(err, PolicyError::SchemaVersion(999, _)),
+            matches!(err, PolicyError::SchemaVersion { found: 999, .. }),
             "got {err:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
