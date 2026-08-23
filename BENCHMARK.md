@@ -115,3 +115,53 @@ Catching them needs *semantics*, not patterns — which is exactly why a
 **semantic-classifier tier is the documented v0.3 direction**. Publishing 94.8%
 FN against an external human corpus is the point: it bounds the firewall honestly
 and quantifies the gap the v0.3 tier must close.
+
+## Mirror paraphrase benchmark (external-style #2)
+
+Source: `cargo test --test mirror_benchmark -- --nocapture`. Corpus:
+`evals/mirror/` — 30 prompt-injection attacks that keep the semantic intent of
+canonical attack families (the ones the DJL/OWASP tables and
+`evals/firewall/cases/` already cover) but are lexically rewritten — synonyms,
+restructuring, indirect framing, translation-flavored phrasing, encoding-lite
+tricks (letter spacing, punctuation substitution, leetspeak, hyphen chaining) —
+plus 15 matched benign controls that mirror each class's structure while being
+unambiguously safe. Author-written from public patterns; method and schema in
+`evals/mirror/README.md`. Scanned with the production entry point
+`firewall::scan_content`, default thresholds. Accounting identical to external
+#1: an attack counts as missed iff the verdict is not `Block` (a Warn passes
+content through); a control counts as flagged iff it is `Warn` or `Block`.
+
+Measured **2026-08-23**:
+
+| Attack class (`evals/mirror/attacks.jsonl`) | N | Blocked | Missed (FN) | FN rate |
+|---|---:|---:|---:|---:|
+| instruction-override | 5 | 0 | 5 | 100% |
+| exfiltration | 5 | 0 | 5 | 100% |
+| role-hijack | 5 | 0 | 5 | 100% |
+| prompt-extraction | 5 | 0 | 5 | 100% |
+| guardrail-bypass | 5 | 0 | 5 | 100% |
+| obfuscation-lite | 5 | 0 | 5 | 100% |
+| **All attacks** | **30** | **0** | **30** | **100%** |
+
+| Benign controls (`benign.jsonl`) | N | Allowed | Flagged (FP) | FP rate |
+|---|---:|---:|---:|---:|
+| All controls | 15 | 15 | 0 | **0%** |
+
+**Interpretation.** A 100% FN on purpose-built paraphrases is the expected
+worst case of the signature ceiling already documented against external #1
+(94.8% FN on human attacks): every rule in the firewall keys on surface forms —
+literal verb phrases ("ignore previous instructions", "send … to https://"),
+fixed tokens (`jailbreak`, `sudo mode`), or structural signatures. Rewriting
+the surface while preserving intent defeats exactly that keying, even before
+resorting to real encoding. Two honest caveats cut both ways. First, this
+corpus was authored *by consulting the rule tables*, so it demonstrates the
+mechanism of failure rather than sampling an unbiased attack distribution —
+it bounds the ceiling from below, it does not claim real attackers hit 100%.
+Second, the 0% FP on matched controls shows the current rules stay quiet on
+near-miss benign phrasing ("ignore the typo", "this is a test of the hook",
+"new rules for the potluck") — precision is intact; recall on paraphrase-class
+attacks is simply absent by design. Together with external #1 this completes
+the documented case for the opt-in semantic tier: deterministic signatures
+catch structure, not meaning, and no amount of pattern-tuning closes a
+paraphrase gap without either exploding FP or moving to semantics.
+
