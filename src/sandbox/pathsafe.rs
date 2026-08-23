@@ -18,6 +18,9 @@ use std::path::{Component, Path, PathBuf};
 /// An owned path segment in the work list. Owning the segments (rather than
 /// borrowing `Component<'a>` from a temporary `PathBuf`) lets us splice a
 /// followed symlink's target into the pending list without lifetime trouble.
+// Off-Linux the sandbox refuses before path validation runs, so these helpers
+// are legitimately unreferenced there; on Linux the runner depends on them.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 enum Seg {
     Root,
     Parent,
@@ -25,6 +28,7 @@ enum Seg {
 }
 
 /// Convert a path's components into owned [`Seg`]s, dropping `.` segments.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn to_segs(path: &Path) -> Vec<Seg> {
     path.components()
         .filter_map(|c| match c {
@@ -39,6 +43,7 @@ fn to_segs(path: &Path) -> Vec<Seg> {
 /// Maximum number of symlinks resolved while canonicalizing a single path.
 /// Linux's own `MAXSYMLINKS` is 40; we mirror that so behavior matches the
 /// kernel's ELOOP threshold.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) const MAX_SYMLINK_HOPS: usize = 40;
 
 /// Canonicalize `path` to an absolute, symlink-free [`PathBuf`].
@@ -49,6 +54,7 @@ pub(crate) const MAX_SYMLINK_HOPS: usize = 40;
 /// [`io::ErrorKind::FilesystemLoop`]-style `ELOOP`. Every component must exist;
 /// a missing component surfaces as `ENOENT`, distinguishing a broken path from
 /// a genuine escape attempt.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn canonicalize_recursive(path: &Path) -> io::Result<PathBuf> {
     let mut hops = 0usize;
     let mut resolved = if path.is_absolute() {
@@ -102,6 +108,7 @@ pub(crate) fn canonicalize_recursive(path: &Path) -> io::Result<PathBuf> {
 /// Both arguments are expected to be already canonicalized; this helper does no
 /// I/O and only compares path components, so a `..` segment can never be used to
 /// climb above `root` after the fact.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn is_strict_descendant(child: &Path, root: &Path) -> bool {
     if child == root {
         return false;
