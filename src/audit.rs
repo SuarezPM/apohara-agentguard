@@ -16,13 +16,39 @@
 //! Records are written one JSON object per line with `O_APPEND` (atomic for
 //! writes < `PIPE_BUF` = 4096 bytes on a local filesystem); command text is
 //! truncated AFTER redaction to stay well within that bound.
+//!
+//! ## Hash chain (v2 records, V4-D reduced-honest)
+//!
+//! Every newly appended record carries three chain fields:
+//!
+//! - `seq` — monotonic per log file, starting at 1;
+//! - `prev` — lowercase hex SHA-256 of the previous record's `hash`
+//!   (all-zeros hex for the first record — the genesis link);
+//! - `hash` — SHA-256 over a canonical serialization of `{seq, prev}` plus
+//!   the entire record content excluding `hash` itself (see
+//!   [`ChainHashInput`]; the struct's field order IS the canonical order and
+//!   is load-bearing).
+//!
+//! This is deliberately reduced-honest (frozen plan §3): a plain hash chain
+//! buys tampering/truncation detection without key management. Ed25519
+//! signatures and rotation are DEFERRED by design. Redaction happens BEFORE
+//! hashing, so the chain covers the redacted form — raw secrets are neither
+//! written to disk nor hashed. Because pure chaining cannot see a missing
+//! LAST line, a sidecar state file `<audit-path>.state`
+//! (`{"version":1,"last_seq":N,"head_hash":"<64hex>"}`) is rewritten
+//! atomically (sibling temp file + fsync + rename) after every successful
+//! append; [`verify_chain`] cross-checks it against the file tail. If the
+//! sidecar is lost, the next append self-heals by rebuilding state from the
+//! log tail. All of this stays best-effort: any chain/state failure is a
+//! one-line stderr warning and NEVER changes a verdict or exit code.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Hard cap on the redacted command text written to the log. Kept well under
 /// `PIPE_BUF` (4096) so an `O_APPEND` line write stays atomic on a local fs.
@@ -120,7 +146,10 @@ fn now_millis() -> u64 {
 ///   changes a verdict or exit code).
 ///
 /// The record is serialized through a borrowed view ([`RecordLine`]) with the
-/// command policy applied — the caller's record is never cloned.
+/// command policy applied — the caller's record is never cloned. The written
+/// record is v2-chained: chain fields are computed from the current sidecar
+/// state (read state → build record → append line → atomically update state),
+/// covering the REDACTED form of the content.
 pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
     if !cfg.enabled {
         return;
@@ -131,11 +160,21 @@ pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
 
     // Apply the command policy: drop entirely unless opted in; otherwise
     // redact secrets THEN truncate (so a secret can never survive a cut).
+    // This happens BEFORE hashing: the chain covers the redacted form.
     let command = match (cfg.include_command, rec.command.as_deref()) {
         (true, Some(cmd)) => Some(truncate_bytes(&redact_secrets(cmd), MAX_COMMAND_BYTES)),
         _ => None,
     };
-    let line_rec = RecordLine {
+
+    // Current chain position: sidecar state, self-healed from the log tail
+    // when the sidecar is missing/unusable.
+    let state = load_chain_state(path);
+    let seq = state.last_seq.wrapping_add(1);
+    let prev = state.head_hash.clone();
+
+    let hash_input = ChainHashInput {
+        seq,
+        prev: &prev,
         timestamp: rec.timestamp,
         event: &rec.event,
         decision: &rec.decision,
@@ -144,6 +183,21 @@ pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
         surface: &rec.surface,
         command: command.as_deref(),
         policy_fingerprint: &rec.policy_fingerprint,
+    };
+    let hash = chain_hash(&hash_input);
+
+    let line_rec = RecordLine {
+        seq,
+        prev: &prev,
+        timestamp: rec.timestamp,
+        event: &rec.event,
+        decision: &rec.decision,
+        rule_id: &rec.rule_id,
+        category: &rec.category,
+        surface: &rec.surface,
+        command: command.as_deref(),
+        policy_fingerprint: &rec.policy_fingerprint,
+        hash: &hash,
     };
 
     let mut line = match serde_json::to_string(&line_rec) {
@@ -160,15 +214,34 @@ pub fn record(cfg: &AuditConfig, rec: &AuditRecord) {
             "apohara-agentguard audit: write to {} failed: {e}",
             path.display()
         );
+        return;
+    }
+
+    // Persist the new head atomically so the next append continues the chain
+    // and `verify_chain` can detect tail truncation. Failure here is warned
+    // and left for verify/self-heal to surface — never fatal.
+    let new_state = ChainState {
+        version: CHAIN_STATE_VERSION,
+        last_seq: seq,
+        head_hash: hash,
+    };
+    if let Err(e) = write_state_atomic(&state_path(path), &new_state) {
+        eprintln!(
+            "apohara-agentguard audit: failed to update chain state {}: {e}",
+            state_path(path).display()
+        );
     }
 }
 
 /// Borrowed serialization view of an [`AuditRecord`] with the command policy
-/// already applied. Field order MUST mirror [`AuditRecord`]'s declaration
-/// order so the JSONL bytes stay deterministic and identical to the pre-borrow
-/// implementation (serde emits fields in declaration order).
+/// already applied, plus the v2 chain fields. The content fields keep
+/// [`AuditRecord`]'s declaration order (serde emits fields in declaration
+/// order, so the JSONL bytes stay deterministic); `seq`/`prev` lead and
+/// `hash` is declared LAST — mirroring [`ChainHashInput`] minus `hash`.
 #[derive(Serialize)]
 struct RecordLine<'a> {
+    seq: u64,
+    prev: &'a str,
     timestamp: u64,
     event: &'a str,
     decision: &'a str,
@@ -180,10 +253,437 @@ struct RecordLine<'a> {
     surface: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<&'a str>,
-    /// Declared LAST, mirroring [`AuditRecord`], so the JSONL field order is
-    /// unchanged and no-policy lines (field skipped) stay byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     policy_fingerprint: &'a Option<String>,
+    /// Declared LAST: the chain digest over [`ChainHashInput`], which
+    /// excludes this field.
+    hash: &'a str,
+}
+
+// ---- V4-D: SHA-256 hash chain (v2 records) --------------------------------
+
+/// Genesis `prev` link: 64 ASCII zeros (the SHA-256 lowercase-hex width).
+const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+/// Sidecar chain-state schema (`<audit-path>.state`). Written atomically
+/// after every successful append; what makes TAIL truncation detectable
+/// (pure chaining cannot see a missing last line).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ChainState {
+    /// Schema version (bump on incompatible changes).
+    version: u32,
+    /// Sequence number of the last chained record (0 = fresh/genesis).
+    last_seq: u64,
+    /// Recorded `hash` of the last chained record (genesis hex when
+    /// `last_seq == 0`).
+    head_hash: String,
+}
+
+/// Current sidecar schema version.
+const CHAIN_STATE_VERSION: u32 = 1;
+
+/// Sidecar path for a log at `log`: `<audit-path>.state`.
+fn state_path(log: &Path) -> PathBuf {
+    let mut s = log.as_os_str().to_os_string();
+    s.push(".state");
+    PathBuf::from(s)
+}
+
+/// Canonical hash-input serialization for one v2 record: `{seq, prev}` plus
+/// the entire record content EXCLUDING `hash`.
+///
+/// # Load-bearing field order
+///
+/// The canonical bytes are `serde_json::to_string` of THIS struct — serde
+/// emits fields in declaration order, so this declaration order IS the
+/// canonical order. Reordering these fields changes every recorded hash and
+/// invalidates existing logs. Both hashing sites (append in [`record`] and
+/// re-verification in [`verify_chain`]) construct this same struct, which is
+/// what keeps the two sides byte-identical. Optional fields are NOT skipped:
+/// an absent value serializes as JSON `null` on both sides alike.
+#[derive(Serialize)]
+struct ChainHashInput<'a> {
+    seq: u64,
+    prev: &'a str,
+    timestamp: u64,
+    event: &'a str,
+    decision: &'a str,
+    rule_id: &'a Option<String>,
+    category: &'a Option<String>,
+    surface: &'a Option<String>,
+    command: Option<&'a str>,
+    policy_fingerprint: &'a Option<String>,
+}
+
+/// Lowercase hex SHA-256 of `bytes` (manual hex helper — no hex crate).
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// The chain digest for one record: SHA-256 over the canonical serialization
+/// ([`ChainHashInput`]). Serialization of plain strings/u64s cannot fail.
+fn chain_hash(input: &ChainHashInput<'_>) -> String {
+    let canonical =
+        serde_json::to_vec(input).expect("canonical hash-input serialization is infallible");
+    sha256_hex(&canonical)
+}
+
+/// Whether `s` is exactly 64 ASCII hex digits (a SHA-256 hex digest).
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Read the current chain state for the log at `log`.
+///
+/// Trusts the sidecar when present and well-formed. When it is missing or
+/// unusable but the log already carries v2 records, SELF-HEALS by rebuilding
+/// the state from the log tail (one stderr notice per heal episode); a fresh
+/// or legacy-only log yields the genesis state silently.
+fn load_chain_state(log: &Path) -> ChainState {
+    let sp = state_path(log);
+    if let Ok(text) = std::fs::read_to_string(&sp) {
+        if let Ok(s) = serde_json::from_str::<ChainState>(&text) {
+            if s.version == CHAIN_STATE_VERSION && is_hex64(&s.head_hash) {
+                return s;
+            }
+        }
+    }
+    rebuild_chain_state(log, &sp)
+}
+
+/// Rebuild chain state from the LAST well-formed v2 record in the log.
+/// Best-effort: malformed lines are skipped; a log with no v2 records yields
+/// the genesis state. Logs one stderr notice per heal episode (silent only
+/// for a not-yet-existing log file).
+fn rebuild_chain_state(log: &Path, sp: &Path) -> ChainState {
+    let mut tail: Option<(u64, String)> = None;
+    let mut file_exists = false;
+    if let Ok(body) = std::fs::read_to_string(log) {
+        file_exists = !body.is_empty();
+        for line in body.lines() {
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(seq) = v.get("seq").and_then(serde_json::Value::as_u64) else {
+                continue;
+            };
+            let Some(hash) = v.get("hash").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if !is_hex64(hash) {
+                continue;
+            }
+            tail = Some((seq, hash.to_string()));
+        }
+    }
+    let state = match tail {
+        Some((last_seq, head_hash)) => ChainState {
+            version: CHAIN_STATE_VERSION,
+            last_seq,
+            head_hash,
+        },
+        None => ChainState {
+            version: CHAIN_STATE_VERSION,
+            last_seq: 0,
+            head_hash: GENESIS_HASH.to_string(),
+        },
+    };
+    if file_exists {
+        eprintln!(
+            "apohara-agentguard audit: chain state {} missing/unreadable — rebuilt from log tail (last_seq={})",
+            sp.display(),
+            state.last_seq
+        );
+    }
+    state
+}
+
+/// Write the sidecar state ATOMICALLY: sibling temp file (0600 on unix),
+/// fsync'd before an in-directory `fs::rename` over the destination — the
+/// repo's established pattern (cf. `proxy/pinning.rs::store`). A crash can
+/// never leave a torn state file behind.
+fn write_state_atomic(sp: &Path, state: &ChainState) -> std::io::Result<()> {
+    use std::io::Write as _;
+
+    let dir = match sp.parent() {
+        Some(d) => d.to_path_buf(),
+        None => PathBuf::from("."),
+    };
+    std::fs::create_dir_all(&dir)?;
+    let text = serde_json::to_string(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    let name = sp.file_name().map_or_else(
+        || "audit.state".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let tmp = dir.join(format!(
+        "{name}.tmp-{}-{}",
+        std::process::id(),
+        now_millis()
+    ));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&tmp, text.as_bytes())?;
+    }
+
+    match std::fs::rename(&tmp, sp) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp); // best-effort cleanup
+            Err(e)
+        }
+    }
+}
+
+// ---- V4-D: chain verification (`agentguard audit verify`) ------------------
+
+/// Deserialized view of one JSONL audit line for verification. Every field
+/// defaults so classification (legacy vs v2 vs malformed) happens in code,
+/// not at the serde boundary.
+#[derive(Deserialize)]
+struct ParsedRecord {
+    #[serde(default)]
+    seq: Option<u64>,
+    #[serde(default)]
+    prev: Option<String>,
+    #[serde(default)]
+    timestamp: u64,
+    #[serde(default)]
+    event: String,
+    #[serde(default)]
+    decision: String,
+    #[serde(default)]
+    rule_id: Option<String>,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    surface: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    policy_fingerprint: Option<String>,
+    #[serde(default)]
+    hash: Option<String>,
+}
+
+/// Outcome of [`verify_chain`].
+#[derive(Debug, Default, Clone)]
+pub struct ChainVerifyReport {
+    /// Number of v2-chained records examined.
+    pub chained: usize,
+    /// Number of legacy (v1, unchained) records — tolerated, never verified.
+    pub legacy_unverified: usize,
+    /// One human-readable line per defect (chain/tampering/truncation).
+    pub defects: Vec<String>,
+    /// Non-fatal observations (e.g. missing sidecar ⇒ tail truncation
+    /// undetectable).
+    pub warnings: Vec<String>,
+}
+
+impl ChainVerifyReport {
+    /// True when no defects were found (warnings do not count).
+    pub fn is_clean(&self) -> bool {
+        self.defects.is_empty()
+    }
+}
+
+/// Warning for a legacy-only log with no usable sidecar: a fully stripped
+/// v2 region is indistinguishable from a never-chained log.
+const FULL_STRIP_WARNING: &str =
+    "all records legacy-unverified with no sidecar — full-strip cannot be ruled out";
+
+/// Verify the SHA-256 hash chain of the audit log at `log`, cross-checking
+/// the `<audit-path>.state` sidecar for tail truncation / post-hoc extension.
+///
+/// - Legacy v1 records (no chain fields) parse fine, are counted as
+///   `legacy_unverified`, and NEVER fail the run.
+/// - Defect classes: seq gap/duplicate · prev-link mismatch · hash mismatch
+///   (content tampering) · sidecar head/seq mismatch vs the file tail
+///   (truncation OR post-hoc extension) · malformed JSON line in a chained
+///   region.
+/// - Damage is LOCALIZED: link checks compare against each record's RECORDED
+///   hash, so one tampered middle record yields exactly one hash-mismatch
+///   defect instead of cascading through every later record.
+///
+/// Returns an error only for internal I/O problems (unreadable log).
+pub fn verify_chain(log: &Path) -> std::io::Result<ChainVerifyReport> {
+    let body = std::fs::read_to_string(log)?;
+
+    let mut report = ChainVerifyReport::default();
+    // Next sequence number we expect to see.
+    let mut expected_seq: u64 = 1;
+    // Previous record's RECORDED hash (localized-damage discipline, see doc).
+    let mut prev_hash: String = GENESIS_HASH.to_string();
+    let mut seen_v2 = false;
+    let mut leading_unparseable = 0usize;
+    // Last well-formed chained record: (seq, recorded hash).
+    let mut tail: Option<(u64, String)> = None;
+
+    for (i, line) in body.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let lineno = i + 1;
+        let Ok(rec) = serde_json::from_str::<ParsedRecord>(line) else {
+            if seen_v2 {
+                report.defects.push(format!(
+                    "line {lineno}: malformed JSON line in chained region"
+                ));
+            } else {
+                leading_unparseable += 1;
+            }
+            continue;
+        };
+
+        // Classification: a v2 record carries seq and/or hash; a legacy v1
+        // record carries neither and is tolerated unconditionally.
+        if rec.seq.is_none() && rec.hash.is_none() {
+            report.legacy_unverified += 1;
+            continue;
+        }
+        seen_v2 = true;
+        report.chained += 1;
+
+        let Some(seq) = rec.seq else {
+            report
+                .defects
+                .push(format!("line {lineno}: partial chain fields (missing seq)"));
+            continue;
+        };
+        if seq != expected_seq {
+            report.defects.push(format!(
+                "line {lineno}: seq gap/duplicate (expected {expected_seq}, found {seq})"
+            ));
+        }
+        expected_seq = seq.wrapping_add(1);
+
+        let valid_prev = rec.prev.as_deref().filter(|p| is_hex64(p));
+        let valid_hash = rec.hash.as_deref().filter(|h| is_hex64(h));
+        let Some(prev) = valid_prev else {
+            report.defects.push(format!(
+                "line {lineno}: partial chain fields (missing/malformed prev)"
+            ));
+            continue;
+        };
+        let Some(hash) = valid_hash else {
+            report.defects.push(format!(
+                "line {lineno}: partial chain fields (missing/malformed hash)"
+            ));
+            continue;
+        };
+
+        if prev != prev_hash {
+            report.defects.push(format!(
+                "line {lineno}: prev-link mismatch (expected {}…, found {prev}…)",
+                &prev_hash[..12.min(prev_hash.len())]
+            ));
+        }
+
+        // Recompute over the parsed content — a mismatch means the record
+        // content was modified after writing (tampering).
+        let input = ChainHashInput {
+            seq,
+            prev,
+            timestamp: rec.timestamp,
+            event: &rec.event,
+            decision: &rec.decision,
+            rule_id: &rec.rule_id,
+            category: &rec.category,
+            surface: &rec.surface,
+            command: rec.command.as_deref(),
+            policy_fingerprint: &rec.policy_fingerprint,
+        };
+        let computed = chain_hash(&input);
+        if computed != hash {
+            report.defects.push(format!(
+                "line {lineno}: hash mismatch — record content was modified after writing"
+            ));
+        }
+
+        // Advance bookkeeping from the RECORDED values (localized damage).
+        prev_hash = hash.to_string();
+        tail = Some((seq, hash.to_string()));
+    }
+
+    if leading_unparseable > 0 {
+        report.warnings.push(format!(
+            "{leading_unparseable} unparseable leading line(s) ignored (pre-chain region)"
+        ));
+    }
+
+    // Sidecar cross-check: what makes tail truncation / post-hoc extension
+    // detectable at all.
+    let sp = state_path(log);
+    let sidecar = std::fs::read_to_string(&sp).ok();
+    match sidecar.map(|text| serde_json::from_str::<ChainState>(&text)) {
+        Some(Ok(s)) if s.version == CHAIN_STATE_VERSION && is_hex64(&s.head_hash) => {
+            let (max_seq, head) = match &tail {
+                Some((q, h)) => (*q, h.clone()),
+                None => (0, GENESIS_HASH.to_string()),
+            };
+            if s.last_seq > max_seq {
+                report.defects.push(format!(
+                    "tail truncation: sidecar last_seq={} but log ends at seq {max_seq} ({} record(s) missing)",
+                    s.last_seq,
+                    s.last_seq - max_seq
+                ));
+            } else if s.last_seq < max_seq {
+                report.defects.push(format!(
+                    "post-hoc extension: log ends at seq {max_seq} but sidecar last_seq={}",
+                    s.last_seq
+                ));
+            } else if s.head_hash != head {
+                report.defects.push(format!(
+                    "sidecar head mismatch at seq {max_seq}: sidecar {}…, log {}…",
+                    &s.head_hash[..12],
+                    &head[..12]
+                ));
+            }
+        }
+        Some(_) => {
+            report.warnings.push(format!(
+                "sidecar state {} is unreadable or unknown-version — tail truncation cannot be detected",
+                sp.display()
+            ));
+            if report.chained == 0 && report.legacy_unverified > 0 {
+                report.warnings.push(FULL_STRIP_WARNING.to_string());
+            }
+        }
+        None => {
+            if report.chained > 0 {
+                report.warnings.push(
+                    "sidecar state file missing — chain verified, but TAIL TRUNCATION cannot be detected"
+                        .to_string(),
+                );
+            } else if report.legacy_unverified > 0 {
+                // A legacy-only log with no usable sidecar is exactly what a
+                // FULL strip of the v2 region would look like — say so.
+                report.warnings.push(FULL_STRIP_WARNING.to_string());
+            }
+        }
+    }
+
+    Ok(report)
 }
 
 /// Open `path` append-only (creating it owner-only, 0600 on unix) and write the
@@ -812,5 +1312,247 @@ mod tests {
             out.contains("ANTHROPIC_API_KEY=sk-ant-api03-…[REDACTED-anthropic]"),
             "typed mask must win over NAME=***; got: {out}"
         );
+    }
+
+    // ---- V4-D hash chain (white-box) ---------------------------------------
+
+    /// A unique temp dir for chain unit tests (self-cleaning best-effort).
+    fn chain_temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentguard-audit-chain-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn genesis_prev_is_64_zeros() {
+        assert_eq!(GENESIS_HASH.len(), 64);
+        assert!(GENESIS_HASH.chars().all(|c| c == '0'));
+        assert!(is_hex64(GENESIS_HASH));
+    }
+
+    #[test]
+    fn hash_covers_redacted_form_never_raw_secret() {
+        // The chain must cover the REDACTED record form: the raw secret is
+        // neither on disk nor part of any hash input.
+        let dir = chain_temp_dir("redact-hash");
+        let log = dir.join("audit.jsonl");
+        let cfg = AuditConfig {
+            enabled: true,
+            path: Some(log.clone()),
+            include_command: true,
+        };
+        let secret_cmd = "export API_KEY=sk-secret123 && rm -rf ~";
+        let rec = AuditRecord::new(
+            "gate",
+            "block",
+            Some("rm-rf".to_string()),
+            Some("destructive".to_string()),
+            None,
+            Some(secret_cmd.to_string()),
+        );
+        record(&cfg, &rec);
+
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            !body.contains("sk-secret123"),
+            "raw secret must not hit disk; got: {body}"
+        );
+
+        // Recomputing over the REDACTED parsed form reproduces the stored
+        // hash; recomputing over the RAW form does not — proving the raw
+        // secret was never hashed.
+        let line = body.lines().next().unwrap();
+        let parsed: ParsedRecord = serde_json::from_str(line).unwrap();
+        let redacted_input = ChainHashInput {
+            seq: parsed.seq.unwrap(),
+            prev: parsed.prev.as_deref().unwrap(),
+            timestamp: parsed.timestamp,
+            event: &parsed.event,
+            decision: &parsed.decision,
+            rule_id: &parsed.rule_id,
+            category: &parsed.category,
+            surface: &parsed.surface,
+            command: parsed.command.as_deref(),
+            policy_fingerprint: &parsed.policy_fingerprint,
+        };
+        let stored_hash = parsed.hash.expect("v2 record carries hash");
+        assert_eq!(chain_hash(&redacted_input), stored_hash);
+
+        let raw_input = ChainHashInput {
+            command: Some(secret_cmd),
+            ..redacted_input
+        };
+        assert_ne!(
+            chain_hash(&raw_input),
+            stored_hash,
+            "the raw-secret form must NOT match the stored hash"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn state_write_is_atomic_no_torn_tmp_files() {
+        // White-box atomicity check: after successive state writes no temp
+        // sibling survives, the final content wins, and a stale tmp file
+        // (a simulated crash before rename) never affects readers.
+        let dir = chain_temp_dir("state-atomic");
+        let sp = dir.join("audit.jsonl.state");
+
+        write_state_atomic(
+            &sp,
+            &ChainState {
+                version: CHAIN_STATE_VERSION,
+                last_seq: 1,
+                head_hash: "aa".repeat(32),
+            },
+        )
+        .unwrap();
+        write_state_atomic(
+            &sp,
+            &ChainState {
+                version: CHAIN_STATE_VERSION,
+                last_seq: 2,
+                head_hash: "bb".repeat(32),
+            },
+        )
+        .unwrap();
+
+        let s: ChainState = serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(s.last_seq, 2, "the last write must win");
+        assert_eq!(s.head_hash, "bb".repeat(32));
+
+        let leftovers: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "atomic rename must leave no tmp siblings; got: {leftovers:?}"
+        );
+
+        // A leftover tmp file from a simulated crash is inert.
+        std::fs::write(dir.join("audit.jsonl.state.tmp-99999-1"), "garbage").unwrap();
+        let s2: ChainState = serde_json::from_str(&std::fs::read_to_string(&sp).unwrap()).unwrap();
+        assert_eq!(s2.last_seq, 2, "readers must ignore stale tmp files");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_empty_file_is_clean_and_missing_file_is_io_error() {
+        let dir = chain_temp_dir("verify-edges");
+        let empty = dir.join("empty.jsonl");
+        std::fs::write(&empty, "").unwrap();
+        let report = verify_chain(&empty).unwrap();
+        assert!(report.is_clean());
+        assert_eq!(report.chained, 0);
+        assert_eq!(report.legacy_unverified, 0);
+
+        assert!(
+            verify_chain(&dir.join("nope.jsonl")).is_err(),
+            "a missing log is an internal I/O error, not a defect report"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn chain_structs_evolve_in_lockstep_with_audit_record() {
+        // Lockstep-drift guard: a field added to [`AuditRecord`] but to
+        // neither chain struct would silently fall OUTSIDE hash coverage.
+        // Fully populate every optional field so serialized key sets are
+        // complete, then require exact parity.
+        let rec = AuditRecord {
+            timestamp: 1,
+            event: "e".to_string(),
+            decision: "d".to_string(),
+            rule_id: Some("r".to_string()),
+            category: Some("c".to_string()),
+            surface: Some("s".to_string()),
+            command: Some("cmd".to_string()),
+            policy_fingerprint: Some("f".to_string()),
+        };
+        let rec_keys = object_keys(&serde_json::to_value(&rec).unwrap());
+
+        let hash = "ab".repeat(32);
+        let line = RecordLine {
+            seq: 1,
+            prev: GENESIS_HASH,
+            timestamp: rec.timestamp,
+            event: &rec.event,
+            decision: &rec.decision,
+            rule_id: &rec.rule_id,
+            category: &rec.category,
+            surface: &rec.surface,
+            command: rec.command.as_deref(),
+            policy_fingerprint: &rec.policy_fingerprint,
+            hash: &hash,
+        };
+        let line_keys = object_keys(&serde_json::to_value(&line).unwrap());
+        for chain_field in ["seq", "prev", "hash"] {
+            assert!(
+                line_keys.contains(&chain_field.to_string()),
+                "RecordLine lost chain field {chain_field}"
+            );
+        }
+        // RecordLine minus the chain fields must be EXACTLY AuditRecord.
+        let line_content_keys: Vec<String> = line_keys
+            .into_iter()
+            .filter(|k| !matches!(k.as_str(), "seq" | "prev" | "hash"))
+            .collect();
+        assert_eq!(
+            sorted(rec_keys.clone()),
+            sorted(line_content_keys),
+            "field-set drift between AuditRecord and RecordLine — update the chain structs together"
+        );
+
+        // ChainHashInput must cover AuditRecord plus exactly {seq, prev}.
+        let input = ChainHashInput {
+            seq: 1,
+            prev: GENESIS_HASH,
+            timestamp: rec.timestamp,
+            event: &rec.event,
+            decision: &rec.decision,
+            rule_id: &rec.rule_id,
+            category: &rec.category,
+            surface: &rec.surface,
+            command: rec.command.as_deref(),
+            policy_fingerprint: &rec.policy_fingerprint,
+        };
+        let input_keys = object_keys(&serde_json::to_value(&input).unwrap());
+        let mut expected_hash_input: Vec<String> = rec_keys;
+        expected_hash_input.push("seq".to_string());
+        expected_hash_input.push("prev".to_string());
+        assert_eq!(
+            sorted(expected_hash_input),
+            sorted(input_keys),
+            "field-set drift between AuditRecord and ChainHashInput — hash coverage is incomplete"
+        );
+    }
+
+    /// Sorted key set of a serialized JSON object.
+    fn sorted(mut keys: Vec<String>) -> Vec<String> {
+        keys.sort();
+        keys
+    }
+
+    /// Key set of a serialized JSON object (chain structs always serialize to
+    /// objects).
+    fn object_keys(v: &serde_json::Value) -> Vec<String> {
+        v.as_object()
+            .expect("chain struct serialization is a JSON object")
+            .keys()
+            .cloned()
+            .collect()
     }
 }

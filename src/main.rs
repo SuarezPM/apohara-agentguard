@@ -1,7 +1,7 @@
 //! apohara-agentguard CLI entry point.
 //!
 //! Thin clap (derive) dispatch over the subcommands: `version`, `hook`,
-//! `sandbox`, `scan`, `check`, and `mcp`.
+//! `sandbox`, `scan`, `check`, `mcp`, `audit verify`, and `init`.
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -50,6 +50,8 @@ enum Command {
     Ask(CheckArgs),
     /// Serve the gate + firewall as MCP tools over stdio (JSON-RPC 2.0).
     Mcp,
+    /// Audit-trail operations on the local JSONL log.
+    Audit(AuditArgs),
     /// Detect supported agent hosts (Claude Code, OpenAI Codex, OpenCode,
     /// Kilo Code, kitty-code) and wire the apohara-agentguard hook into
     /// their configs / plugin dirs (append-only, idempotent). WITHOUT
@@ -64,6 +66,25 @@ enum Command {
 struct CheckArgs {
     /// The command to evaluate against the gate.
     command: String,
+}
+
+#[derive(Args)]
+struct AuditArgs {
+    #[command(subcommand)]
+    command: AuditCommand,
+}
+
+#[derive(Subcommand)]
+enum AuditCommand {
+    /// Verify the audit log's SHA-256 hash chain (tampering / truncation
+    /// detection). Legacy v1 records are tolerated and counted. Exit 0 when
+    /// clean, 2 on any defect, 74 on an internal I/O error.
+    Verify {
+        /// Path to the JSONL audit log (default: the configured [audit] path
+        /// from the standard config loader; --file overrides).
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 #[derive(Args)]
@@ -108,6 +129,9 @@ fn main() -> ExitCode {
         Command::Check(args) => run_check(args, cli.policy.as_deref()),
         Command::Ask(args) => run_ask(args, cli.policy.as_deref()),
         Command::Mcp => run_mcp(cli.policy.as_deref()),
+        Command::Audit(args) => match args.command {
+            AuditCommand::Verify { file } => run_audit_verify(file),
+        },
         Command::Init(args) => run_init(args),
     }
 }
@@ -341,6 +365,61 @@ fn run_mcp(cli_policy: Option<&std::path::Path>) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("apohara-agentguard mcp: {e}");
+            ExitCode::from(74)
+        }
+    }
+}
+
+/// Verify the audit log's hash chain (`agentguard audit verify`).
+///
+/// Prints one line per warning/defect plus a summary; exits 0 when clean,
+/// 2 on any defect (or when no log path is available), 74 on an internal
+/// I/O error reading the log. The `--file` flag overrides the configured
+/// `[audit]` path; with neither, the standard config loader supplies the
+/// default (fail-closed, like every other subcommand).
+fn run_audit_verify(file: Option<PathBuf>) -> ExitCode {
+    let path = match file {
+        Some(p) => p,
+        None => match load_config_fail_closed("audit verify").audit.path {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "apohara-agentguard audit verify: no --file given and no [audit] path configured"
+                );
+                return ExitCode::from(2);
+            }
+        },
+    };
+
+    match audit::verify_chain(&path) {
+        Ok(report) => {
+            for w in &report.warnings {
+                println!("warning: {w}");
+            }
+            for d in &report.defects {
+                println!("defect: {d}");
+            }
+            if report.is_clean() {
+                println!(
+                    "ok: {} chained, {} legacy-unverified",
+                    report.chained, report.legacy_unverified
+                );
+                ExitCode::SUCCESS
+            } else {
+                println!(
+                    "FAILED: {} defect(s), {} chained, {} legacy-unverified",
+                    report.defects.len(),
+                    report.chained,
+                    report.legacy_unverified
+                );
+                ExitCode::from(2)
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "apohara-agentguard audit verify: i/o error on {}: {e}",
+                path.display()
+            );
             ExitCode::from(74)
         }
     }
