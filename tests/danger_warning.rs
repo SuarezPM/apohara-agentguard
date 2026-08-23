@@ -74,7 +74,12 @@ fn danger_without_flag_still_refuses() {
     );
 }
 
+// Linux-only by nature: off-Linux the sandbox refuses with `Unavailable`
+// (fail-closed) before any command runs, so there is no successful invocation
+// to audit. The audit-on-danger-invocation contract itself lives in main.rs
+// and is platform-independent; this test drives it through the real sandbox.
 #[test]
+#[cfg(target_os = "linux")]
 fn danger_invocation_is_audited_when_enabled() {
     let dir = TempDir::new("danger-audit");
     let log = dir.path().join("audit.jsonl");
