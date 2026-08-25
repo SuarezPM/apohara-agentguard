@@ -165,3 +165,27 @@ the documented case for the opt-in semantic tier: deterministic signatures
 catch structure, not meaning, and no amount of pattern-tuning closes a
 paraphrase gap without either exploding FP or moving to semantics.
 
+
+## External benchmark campaign #1 — ox-alpha-free (2026-08-23/24)
+
+First full external stress-test campaign against public academic benchmarks, executed
+end-to-end through the shipped v0.4.0 surfaces. Full methodology and per-suite tables:
+`docs/benchmarks-results.md` (local working copy).
+
+| Surface | Benchmark | Result | External record |
+|---|---|---|---|
+| Structural Bash gate (obfuscation) | QuasarNix (483k cmds, Trizna et al., ACM TOPS 2025, doi:10.1145/3807450) | With the opt-in `reverse-shell` community pack: TPR 94.78% overall (orig 100%, adversarial 89.56%) · **93.33% mean across 15 obfuscation manipulations** · FPR 4.18e-2 | Published GBDT: 60.2% TPR @ FPR=1e-6, collapsing to ~0% under the same manipulations |
+
+Honest reading, with three required qualifiers: (1) **pack disclosure** — the result
+requires the opt-in reverse-shell community pack; the default taxonomy is
+destructive-only by design and scores 1.71% on this corpus without it; (2)
+**in-sample authorship** — pack rules were authored consulting the corpus, so the
+number is a favorable lower bound, not an unbiased sample; (3) **FPR axis** — our
+operating point is FPR 4.18e-2, not the record's 1e-6; the comparison is two-axis.
+The defensible claim is **perturbation-delta leadership**: we hold 93.33% mean TPR
+under manipulations where the published ML detector collapses to ~0%. Against a
+highly injection-resistant frontier model the deterministic gate adds no measurable
+ASR delta on semantic injection classes (floor effect, documented per-suite below) —
+its guarantee is the structural/destructive class, deterministically, at zero model
+cost. Known gaps from this campaign (hexesc normalization, `&&`-chaining fetch-pipe,
+exfil rules, MCPTox policy condition) are filed for v0.5.
