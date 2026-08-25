@@ -1,0 +1,61 @@
+# apohara-agentguard community pack `reverse-shell` corpus — BENIGN
+#
+# Realistic near-misses the `reverse-shell` pack must NOT flag (no Block),
+# even with the pack ENABLED. One per line. `#`-prefixed and blank lines
+# ignored. Several entries are real nl2bash shapes (marked REAL); the rest are
+# the standard dev workflows each rule was designed against.
+
+# --- plain nc clients / listeners WITHOUT an exec flag ---
+nc -l -p 4444
+nc -z example.com 80
+nc localhost 8080 < request.txt
+
+# --- nc listener serving HTTP via -c echo (REAL nl2bash; -c is NOT adjacent
+#     to `nc`, and the payload is an echo, not a shell) ---
+while true ; do nc -l -p 1500 -c 'echo -e "HTTP/1.1 200 OK\n\n $(date)"'; done
+
+# --- nc probe of a local dev server (REAL nl2bash shape) ---
+watch --interval 0.1 "nc example.com CLOSED_PORT"
+
+# --- ssh: control-socket multiplexing and -i identity (REAL nl2bash) ---
+ssh -S my-ctrl-socket -O check jm@sampledomain.com
+ssh -M -S my-ctrl-socket -fnNT -L 50000:localhost:3306 jm@sampledomain.com
+ssh -i ~/.ssh/id_rsa deploy@build.example
+ssh -i ~/.ssh/deploy_key build.example 2>&1 | tee ssh.log
+
+# --- legit python socket scripts: connect/recv only, no dup2/spawn ---
+python3 -c 'import socket;s=socket.socket();s.connect(("localhost",8080));print(s.recv(100))'
+python3 -c 'import socket;s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM);s.sendto(b"hi",("127.0.0.1",5353))'
+
+# --- python pty tty-fix idiom: pty.spawn with NO connected socket before it ---
+python3 -c 'import pty; pty.spawn("/bin/bash")'
+
+# --- python subprocess without any socket/dup2 context ---
+python3 -c 'import subprocess;subprocess.run(["ls","-la"])'
+
+# --- ruby socket use without a fork/popen command loop ---
+ruby -rsocket -e 'puts TCPSocket.getaddress("example.com")'
+ruby -rsocket -e 'puts TCPServer.new(2000).addr.inspect'
+
+# --- socat forwarders / unix sockets, no EXEC:/SYSTEM: executor ---
+socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:80
+socat - UNIX-CONNECT:/var/run/docker.sock
+
+# --- telnet fun / plain telnet client (no stdin file redirect) ---
+telnet towel.blinkenlights.nl
+printf 'GET /\n' | telnet example.com 80
+
+# --- bare /dev/tcp port probes stay allowed (documented pack boundary) ---
+timeout 1 bash -c 'cat < /dev/tcp/127.0.0.1/8080' >/dev/null 2>&1
+exec 3<>/dev/tcp/127.0.0.1/6379 && head -c 20 <&3
+
+# --- orchestration / dev-server plumbing near-misses ---
+kubectl port-forward pod/api 8080:80
+curl http://localhost:3000/api/health
+echo -e 'GET / HTTP/1.0\n' | nc localhost 8080
+
+# --- mkfifo for local log plumbing is fine on its own ---
+mkfifo /tmp/logpipe && tee /tmp/logpipe >/dev/null &
+
+# --- destructive-looking words as inert DATA (verb-aware suppression) ---
+git commit -m 'fix socket handling in connect()'
