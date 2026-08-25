@@ -1,0 +1,4 @@
+{
+  "expected_tier": "allow",
+  "notes": "FP control: hex escapes printed to stdout WITHOUT piping into a shell never execute; the printf literal stays data (non-executing verb)."
+}

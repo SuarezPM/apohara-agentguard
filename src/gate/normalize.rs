@@ -12,8 +12,11 @@
 //! (e.g. ANSI-C inside an echo-subst: `$(echo $'\x72\x6d')` → `rm`):
 //!   1. backslash line-continuation join (`\<newline>` → ``)
 //!   2. ANSI-C `$'...'` decoding (spliced in place of the span)
-//!   3. echo/printf command-substitution splice — **leg-head/verb position only**
-//!   4. IFS reassignment — records an extra top-level separator (NOT a splice)
+//!   3. hex-encoded `printf '<\xHH…>' | <shell>` decode — the invocation is
+//!      replaced by its decoded literal so the piped interpreter's input is
+//!      what gets scanned (**leg-head/verb position only**)
+//!   4. echo/printf command-substitution splice — **leg-head/verb position only**
+//!   5. IFS reassignment — records an extra top-level separator (NOT a splice)
 //!
 //! This is a *string rewriter with a hard budget*, never a shell evaluator.
 //! Three caps bound fan-out: [`MAX_NORMALIZE_BYTES`] (total size),
@@ -64,9 +67,11 @@ pub fn normalize_command(cmd: &str) -> Normalized {
     let s = join_line_continuations(cmd, &mut budget);
     // Pass 2: decode ANSI-C `$'...'` spans in place.
     let s = decode_ansi_c(&s, &mut budget);
-    // Pass 3: splice leg-head echo/printf command substitutions.
+    // Pass 3: decode a leg-head `printf '<\xHH…>' | <shell>` into its literal.
+    let s = decode_printf_pipe_shell(&s, &mut budget);
+    // Pass 4: splice leg-head echo/printf command substitutions.
     let s = splice_echo_substitution(&s, &mut budget);
-    // Pass 4: collect IFS-derived extra separators (no splice).
+    // Pass 5: collect IFS-derived extra separators (no splice).
     let extra_separators = collect_ifs_separators(&s);
 
     Normalized {
@@ -274,7 +279,190 @@ fn hex_val(b: u8) -> u32 {
     }
 }
 
-// --- Pass 3: echo/printf command-substitution splice (leg-head only) --------
+/// Decode backslash escapes in a printf/echo FORMAT literal (the inner text of
+/// a quoted argument), using the same escape table as ANSI-C spans — this is
+/// what `printf` itself does to its format string. Returns `None` when any
+/// escape is truncated or unrecognized; callers treat that as "leave the
+/// construct intact" (fail-closed).
+fn decode_printf_escapes(lit: &str) -> Option<String> {
+    if !lit.contains('\\') {
+        return Some(lit.to_string());
+    }
+    let bytes = lit.as_bytes();
+    let mut out = String::with_capacity(lit.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\\' {
+            if i + 1 >= bytes.len() {
+                return None; // lone trailing backslash
+            }
+            let (ch, next) = decode_escape(bytes, i + 1);
+            out.push(ch?);
+            i = next;
+        } else {
+            out.push(c as char);
+            i += 1;
+        }
+    }
+    Some(out)
+}
+
+// --- Pass 3: hex-encoded printf piped to a shell -----------------------------
+
+/// Shell interpreters a piped `printf '<lit>'` leg may feed for its payload to
+/// be surfaced. Matched on the target's basename, so `/bin/sh` counts while
+/// `| xargs sh` or `| env sh` do not (conservative).
+const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "ksh", "dash", "ash", "busybox"];
+
+/// Decode a leg-head `printf '\xHH…'` invocation whose leg pipes into a shell
+/// interpreter (`| sh`, `| /bin/bash`, …): the whole invocation up to its
+/// closing quote is replaced by the DECODED literal, leaving the pipe tail in
+/// place so the split surfaces exactly what the interpreter would read from
+/// stdin. This closes the benchmark "hexesc" manipulation
+/// (`cat /etc/shadow` → `printf '\x63\x61\x74\x20…' | sh`).
+///
+/// Deliberately narrow (fail-closed): only a single single-quoted argument
+/// containing at least one `\xHH` escape is decoded. `%` or `$` inside the
+/// literal, double-quoted/backtick arguments, anything but whitespace between
+/// the closing quote and the `|`, a non-shell pipe target, or any malformed
+/// escape leave the command intact.
+fn decode_printf_pipe_shell(s: &str, budget: &mut Budget) -> String {
+    // Cheap guards before walking bytes (hot path): both are necessary
+    // conditions of the shape, so missing either skips the pass entirely.
+    if !s.contains("printf") || !s.contains(r"\x") {
+        return s.to_string();
+    }
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while i < bytes.len() {
+        let c = bytes[i];
+
+        if c == b'p'
+            && !in_single
+            && !in_double
+            && at_leg_head(&out)
+            && bytes[i..].starts_with(b"printf")
+        {
+            if let Some((decoded, end)) = try_decode_printf_head(bytes, i) {
+                let src_len = end - i;
+                // Decoding shrinks (\xHH → one byte); enforce the shared cap anyway.
+                let within_ratio = decoded.len() <= src_len.saturating_mul(MAX_EXPANSION_RATIO);
+                if within_ratio && budget.allow(out.len() + decoded.len()) {
+                    out.push_str(&decoded);
+                    i = end;
+                    continue;
+                }
+            }
+        }
+
+        // Track ordinary quote state so we never touch a printf inside quotes.
+        if c == b'\'' && !in_double {
+            in_single = !in_single;
+        } else if c == b'"' && !in_single {
+            in_double = !in_double;
+        }
+
+        out.push(c as char);
+        i += 1;
+    }
+    out
+}
+
+/// Read a leg-head `printf '<lit>' … | <shell>` span starting at `start`
+/// (pointing at `printf`). On success returns the decoded literal and the index
+/// just past the closing quote — the `| <shell>` tail is verified but NOT part
+/// of the replacement. `None` for any shape outside the accepted form (see
+/// [`decode_printf_pipe_shell`]).
+fn try_decode_printf_head(bytes: &[u8], start: usize) -> Option<(String, usize)> {
+    const VERB: &[u8] = b"printf";
+    let mut j = start + VERB.len();
+    while matches!(bytes.get(j), Some(b' ') | Some(b'\t')) {
+        j += 1;
+    }
+
+    // Exactly one argument, single-quoted.
+    if bytes.get(j) != Some(&b'\'') {
+        return None;
+    }
+    j += 1;
+
+    let mut decoded = String::new();
+    let mut saw_hex = false;
+    let close;
+    loop {
+        let Some(&c) = bytes.get(j) else {
+            return None; // unterminated literal
+        };
+        if c == b'\'' {
+            close = j + 1; // just past the closing quote
+            j += 1;
+            break;
+        }
+        if c == b'%' || c == b'$' {
+            // Format directives consume arguments; `$` is expansion-shaped even
+            // though single quotes make it literal. Don't model either.
+            return None;
+        }
+        if c == b'\\' {
+            if j + 1 >= bytes.len() {
+                return None; // lone trailing backslash
+            }
+            saw_hex |= bytes[j + 1] == b'x';
+            let (ch, next) = decode_escape(bytes, j + 1);
+            decoded.push(ch?); // unknown/truncated escape -> fail closed
+            j = next;
+            continue;
+        }
+        decoded.push(c as char);
+        j += 1;
+    }
+    // No `\xHH` anywhere -> not the hexesc shape this pass targets.
+    if !saw_hex {
+        return None;
+    }
+
+    // Only whitespace may sit between the closing quote and the pipe.
+    while matches!(bytes.get(j), Some(b' ') | Some(b'\t')) {
+        j += 1;
+    }
+    if bytes.get(j) != Some(&b'|') {
+        return None;
+    }
+    j += 1;
+    while matches!(bytes.get(j), Some(b' ') | Some(b'\t')) {
+        j += 1;
+    }
+
+    // The pipe target token must resolve (basename) to a shell interpreter.
+    let tok_end = bytes[j..]
+        .iter()
+        .position(|b| {
+            matches!(
+                b,
+                b' ' | b'\t' | b'\n' | b';' | b'|' | b'&' | b'(' | b')' | b'<' | b'>'
+            )
+        })
+        .map_or(bytes.len(), |p| j + p);
+    if tok_end == j {
+        return None; // empty target (`| |sh` etc.)
+    }
+    let Ok(target) = std::str::from_utf8(&bytes[j..tok_end]) else {
+        return None;
+    };
+    let base = target.rsplit('/').next().unwrap_or(target);
+    if !SHELL_INTERPRETERS.contains(&base) {
+        return None;
+    }
+
+    Some((decoded, close))
+}
+
+// --- Pass 4: echo/printf command-substitution splice (leg-head only) --------
 
 /// Splice a leg-head `$(echo ...)` / `` `echo ...` `` / `$(printf ...)` whose
 /// body is exactly an `echo`/`printf` of literal args into the literal it would
@@ -425,7 +613,10 @@ fn echo_printf_literal(body: &str) -> Option<String> {
         return None;
     }
     let joined = rest.join(" ");
-    Some(strip_quotes(joined.trim()))
+    // printf interprets backslash escapes in its format; decode them so the
+    // spliced literal is what the shell would emit (e.g. `$(printf '\x72\x6d')`
+    // surfaces as `rm`). Any malformed escape leaves the substitution intact.
+    decode_printf_escapes(&strip_quotes(joined.trim()))
 }
 
 /// Remove one layer of matching single/double quotes around `s`.
@@ -439,7 +630,7 @@ fn strip_quotes(s: &str) -> String {
     s.to_string()
 }
 
-// --- Pass 4: IFS reassignment -----------------------------------------------
+// --- Pass 5: IFS reassignment -----------------------------------------------
 
 /// Scan the top-level legs for an `IFS=<value>` reassignment with a NON-EMPTY,
 /// single-character value, and return those characters as extra separators.
@@ -564,7 +755,95 @@ mod tests {
         assert_eq!(norm(r#"echo "$'\x72'""#), r#"echo "$'\x72'""#);
     }
 
-    // --- Pass 3: echo/printf cmdsubst splice (leg-head only) ---
+    // --- Pass 3: printf hexesc pipe-to-shell ---
+
+    #[test]
+    fn decodes_hexesc_printf_pipe_shell() {
+        // Exact m_hexesc shape for `cat /etc/shadow`.
+        let src = r"printf '\x63\x61\x74\x20\x2f\x65\x74\x63\x2f\x73\x68\x61\x64\x6f\x77' | sh";
+        assert_eq!(norm(src), "cat /etc/shadow | sh");
+    }
+
+    #[test]
+    fn decodes_hexesc_mixed_literal_chars() {
+        assert_eq!(norm(r"printf '\x72m -rf /' | sh"), "rm -rf / | sh");
+    }
+
+    #[test]
+    fn decodes_hexesc_uppercase_hex_digits() {
+        assert_eq!(norm(r"printf '\x72\x6D' | sh"), "rm | sh");
+    }
+
+    #[test]
+    fn decodes_hexesc_pathed_shell_target() {
+        assert_eq!(
+            norm(r"printf '\x72\x6d -rf /' | /bin/bash"),
+            "rm -rf / | /bin/bash"
+        );
+    }
+
+    #[test]
+    fn hexesc_double_quoted_untouched() {
+        let src = r#"printf "\x72\x6d" | sh"#;
+        assert_eq!(norm(src), src);
+    }
+
+    #[test]
+    fn hexesc_without_pipe_to_shell_untouched() {
+        // printf writes to stdout; nothing executes the payload.
+        let src = r"printf '\x72\x6d -rf /'";
+        assert_eq!(norm(src), src);
+    }
+
+    #[test]
+    fn hexesc_pipe_to_non_shell_untouched() {
+        let src = r"printf '\x72\x6d -rf /' | sort";
+        assert_eq!(norm(src), src);
+    }
+
+    #[test]
+    fn hexesc_arg_with_dollar_untouched() {
+        let src = r"printf '\x72\x6d $HOME' | sh";
+        assert_eq!(norm(src), src);
+    }
+
+    #[test]
+    fn hexesc_arg_with_percent_untouched() {
+        let src = r"printf '%s\x72\x6d' | sh";
+        assert_eq!(norm(src), src);
+    }
+
+    #[test]
+    fn hexesc_truncated_escape_untouched() {
+        // `\x` with zero hex digits: malformed byte -> leave intact.
+        let src = r"printf '\x72\x' | sh";
+        assert_eq!(norm(src), src);
+    }
+
+    #[test]
+    fn hexesc_unknown_escape_untouched() {
+        let src = r"printf '\x72\q' | sh";
+        assert_eq!(norm(src), src);
+    }
+
+    #[test]
+    fn hexesc_not_in_verb_position_untouched() {
+        let src = r#"git commit -m "printf '\x72\x6d' | sh""#;
+        assert_eq!(norm(src), src);
+    }
+
+    #[test]
+    fn hexesc_rewrite_count_cap_enforced() {
+        // Many independent hexesc invocations; only MAX_REWRITES decode, the
+        // tail stays verbatim.
+        let unit = r"printf '\x61\x62\x63\x64' | sh"; // -> `abcd | sh`
+        let input = vec![unit; MAX_REWRITES + 5].join("; ");
+        let out = norm(&input);
+        assert_eq!(out.matches("abcd").count(), MAX_REWRITES);
+        assert_eq!(out.matches(unit).count(), 5);
+    }
+
+    // --- Pass 4: echo/printf cmdsubst splice (leg-head only) ---
 
     #[test]
     fn splices_echo_subst_in_verb_position() {
@@ -603,6 +882,23 @@ mod tests {
         assert_eq!(norm("$(git rev-parse HEAD)"), "$(git rev-parse HEAD)");
     }
 
+    #[test]
+    fn splices_printf_subst_with_hex_decoded() {
+        assert_eq!(norm(r"$(printf '\x72\x6d') -rf ~"), "rm -rf ~");
+    }
+
+    #[test]
+    fn splices_backtick_printf_subst_with_hex_decoded() {
+        assert_eq!(norm(r"`printf '\x72\x6d'` -rf ~"), "rm -rf ~");
+    }
+
+    #[test]
+    fn does_not_splice_printf_subst_with_malformed_escape() {
+        // Fail-closed: a truncated escape leaves the substitution intact.
+        let src = r"$(printf '\x72\x') -rf ~";
+        assert_eq!(norm(src), src);
+    }
+
     // --- Composition (shared buffer) ---
 
     #[test]
@@ -610,7 +906,7 @@ mod tests {
         assert_eq!(norm(r"$(echo $'\x72\x6d') -rf ~"), "rm -rf ~");
     }
 
-    // --- Pass 4: IFS ---
+    // --- Pass 5: IFS ---
 
     #[test]
     fn collects_single_char_ifs_separator() {

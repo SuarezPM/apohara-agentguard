@@ -1,0 +1,5 @@
+{
+  "expected_tier": "block",
+  "reason_contains": "destructive [rm-rf]",
+  "notes": "hexesc (QuasarNix m_hexesc): every byte of `rm -rf /` encoded as \\xHH inside a single-quoted printf piped to sh; normalize pass 3 decodes the leg-head invocation so the interpreter's input is scanned."
+}

@@ -11,11 +11,12 @@
 //!    pipe analysis, rather than substring-matching a fixed list per leg.
 //!
 //! Pipeline (pinned order): allow-list short-circuit on the RAW command ->
-//! normalize pre-pass (in-place ANSI-C / echo-subst / line-continuation splice +
-//! IFS separator collection, if `config.normalize`) -> pre-split fetch-pipe
-//! analysis -> base64 decode/rescan -> split into legs -> resolve variable
-//! assignments -> per-leg taxonomy (verb-aware) + custom blocks -> gated IFS
-//! re-split -> take the MAX severity -> map to a tier via the thresholds.
+//! normalize pre-pass (in-place ANSI-C / printf-hexesc / echo-subst /
+//! line-continuation splice + IFS separator collection, if `config.normalize`)
+//! -> pre-split fetch-pipe analysis -> base64 decode/rescan -> split into legs
+//! -> resolve variable assignments -> per-leg taxonomy (verb-aware) + custom
+//! blocks -> gated IFS re-split -> take the MAX severity -> map to a tier via
+//! the thresholds.
 
 pub mod compound;
 mod decode;

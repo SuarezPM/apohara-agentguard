@@ -137,12 +137,13 @@ The gate's soundness is parser-bounded. Publishing exactly where the boundary si
 
 ### Now caught (v0.1.x)
 
-A bounded, in-place normalization pre-pass (`gate::normalize`) closes four forms the v0.1 gate let through. Each is spliced contiguously into the command before splitting, so the destructive leg surfaces and **Blocks**:
+A bounded, in-place normalization pre-pass (`gate::normalize`) closes five forms the v0.1 gate let through. Each is spliced contiguously into the command before splitting, so the destructive leg surfaces and **Blocks**:
 
 | Construct | Example | What `normalize` does |
 |---|---|---|
 | 🔤 **ANSI-C quoting** | `$'\x72\x6d' -rf ~` | hex/octal/`\u`/named escapes decoded in place |
 | 🪄 **Command-substitution-produced verbs** | `$(echo rm) -rf ~`, `` `echo rm` -rf ~ `` | leg-head `echo`/`printf` literal substitution spliced into the verb it emits |
+| 🎞️ **Hex-encoded printf piped to a shell** | `printf '\x72\x6d\x20\x2d\x72\x66\x20\x2f' \| sh` | a leg-head single-quoted printf format containing `\xHH` escapes whose leg pipes into a shell interpreter (`sh`/`bash`/…, path forms too) is decoded in place, so the interpreter's stdin is what gets scanned; anything else (`%`/`$` in the literal, double quotes, malformed escapes) stays untouched |
 | 💬 **Live command substitution in a double-quoted argument** | `echo "$(rm -rf ~)"`, `git commit -m "$(rm -rf ~)"` | body extracted and scanned as a command; `$(curl … \| sh)` Blocks too. A literal-emitter like `git commit -m "$(echo rm -rf)"` Allows; single quotes (`'literal $(rm -rf ~)'`) stay literal and Allow |
 | 🧮 **IFS reassignment** | `IFS=X; cmdXrmX-rfX~` | recorded separator word-joined into later legs and re-scanned — gated on surfacing a hit, so benign `IFS` loops/`read`s never false-positive |
 | ↩️ **Backslash line-continuation** | `r\`<newline>`m -rf ~` | the continuation is joined |
@@ -153,10 +154,11 @@ Variable assignment (`x=rm; $x …`) and single-level base64 decode-and-rescan w
 
 These remain honestly uncaught (parser-bounded):
 
-- 🪜 **Nested / chained encoders** — hex/rot13/gzip layered beyond the single decode level, or word-concatenation like `` $(printf '\x72')m -rf ``.
+- 🪜 **Nested / chained encoders** — hex/rot13/gzip layered beyond the single decode level (only ONE printf/ANSI-C decode is performed), or encodings the gate has no decoder for.
 - 🧷 **Deliberate parameter expansion** — beyond the incidental cases below.
 - 📄 **Real here-document parsing** — the body is matched incidentally, not parsed.
 - 🌐 **Non-literal command-substitutions** — a substitution in _command (verb) position_ whose output is not a literal `echo`/`printf`, e.g. `$(curl ...) -rf ~`. (An `$(curl … | sh)` in _argument_ position inside double quotes **is** now scanned and Blocks; only the verb-producing case remains out of scope.)
+- 🎞️ **Hex-printf shape variants** — the printf decode requires its exact shape: leg head, single-quoted format, direct pipe into a shell. An intermediate pipe stage (`printf '\x72\x6d …' | cat | sh`), a subshell wrapper (`( printf '\x72\x6d …' ) | sh`), or a `--` separator before the format stays uncaught — as does a command that starves the shared ≤64-splice budget with decoy rewrites before the printf decode runs.
 
 Two forms Block **incidentally** — as a side effect of leg matching, not by deliberate handling, so do not rely on them: parameter expansion with defaults (`${x:-rm}` / `${x:=rm}`) survives as a literal `rm` in the leg, and here-documents (`<<EOF … EOF`) have their body line treated as its own leg.
 
