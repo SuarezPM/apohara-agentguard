@@ -195,6 +195,18 @@ pub(crate) const WORKSPACE_WRITE_ADDITIONS_PURE_ALLOW: &[&str] = &[
     //  write/pwrite64/writev/pwritev2 also live there — stdout needs them; the
     //  ReadOnly filesystem-write ban is enforced by Landlock, not seccomp.)
     "clone3",
+    // `vfork`: GCC's driver (`cc`) spawns subprograms (notably `collect2`,
+    // which invokes the linker) via vfork(). Without it, any GCC-based build
+    // dies with "cannot execute 'collect2': vfork: Operation not permitted"
+    // (ubuntu-latest runners, CI run 32811061960); Node/Go are unaffected.
+    //
+    // Security rationale: vfork is the raw process-creation primitive for a
+    // spawn+exec sequence — the exact capability build tiers already grant via
+    // execve/execveat/wait4 (ReadOnly base). It creates no fd, touches no
+    // network, and the vforked child inherits NO_NEW_PRIVS and THIS filter, so
+    // it can never weaken its own confinement. x86_64-only name (aarch64 glibc
+    // emulates vfork via clone), consistent with the legacy-form entries above.
+    "vfork",
     // Path creation / mutation (legacy + *at forms, both observed)
     "creat",
     "open",
@@ -357,6 +369,7 @@ mod tests {
             "sched_getaffinity",
             "rseq",
             "clone3",
+            "vfork", // GCC driver spawns collect2/linker via vfork (CI 32811061960)
             "readlink",
             "access",
             "stat",
