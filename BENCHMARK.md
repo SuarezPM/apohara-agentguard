@@ -187,5 +187,27 @@ under manipulations where the published ML detector collapses to ~0%. Against a
 highly injection-resistant frontier model the deterministic gate adds no measurable
 ASR delta on semantic injection classes (floor effect, documented per-suite below) —
 its guarantee is the structural/destructive class, deterministically, at zero model
-cost. Known gaps from this campaign (hexesc normalization, `&&`-chaining fetch-pipe,
-exfil rules, MCPTox policy condition) are filed for v0.5.
+cost. Remaining gaps from this campaign (`&&`-chaining fetch-pipe,
+exfil rules, MCPTox policy condition) are filed for v0.5; the hexesc gap is closed —
+see below.
+
+
+## Post-v0.4.0 fix: hexesc normalization closed (2026-08-25)
+
+Commit `7f3d46f` adds a bounded normalize pass that decodes a leg-head, single-quoted
+`printf '\xHH…'` format piped directly into a shell interpreter, so what the shell
+executes is what gets scanned. Re-running QuasarNix's 5,000-command perturbation
+suite and the full benign split against the fixed gate, pack posture unchanged:
+
+| Metric | Campaign (v0.4.0) | Post-fix |
+|---|---|---|
+| `hexesc` manipulation TPR | 0% (0/5,000) | **100% (5,000/5,000)** |
+| Mean TPR across 15 manipulations | 93.33% | **100.00%** |
+| Other 14 manipulations | 100% each | unchanged |
+| Benign FPR | 4.18e-2 (527/12,607) | 4.18e-2 (527/12,607), unchanged |
+
+Two honesty notes: the decode fires only on its exact shape (leg head, single-quoted
+format, direct pipe to a shell); documented shape variants — an intermediate pipe
+stage, a subshell wrapper, a `--` separator, or starving the shared splice budget —
+remain uncaught and are listed in the README's out-of-scope section. The FPR axis is
+also unchanged: same operating point, same known false-positive classes.
