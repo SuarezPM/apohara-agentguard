@@ -6,6 +6,7 @@ pub mod adapters;
 pub mod audit;
 pub mod config;
 pub mod contract;
+pub mod doctor;
 pub mod firewall;
 pub mod gate;
 pub mod hook;

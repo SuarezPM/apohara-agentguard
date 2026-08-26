@@ -265,6 +265,13 @@ impl PolicySet {
         self.fingerprint.as_deref()
     }
 
+    /// Total number of pattern rules across every `[[tools]]` entry — the
+    /// diagnostics surface (`agentguard doctor` reports it as the policy's
+    /// size). The default no-op set has zero rules.
+    pub fn rule_count(&self) -> usize {
+        self.file.tools.iter().map(|t| t.rules.len()).sum()
+    }
+
     /// Evaluate `input` against the loaded policy. Pure with respect to
     /// the on-disk config; only the in-memory budget counters are
     /// mutated (so a second `evaluate` on the same `session_id` sees the
@@ -680,6 +687,31 @@ mod tests {
         let set = empty_policy();
         let v = set.evaluate(&pretooluse_bash("rm -rf ~"), &Config::default());
         assert_eq!(v.tier, Tier::Allow);
+    }
+
+    #[test]
+    fn rule_count_sums_rules_across_tools_and_defaults_to_zero() {
+        // Default no-op set: zero rules.
+        assert_eq!(PolicySet::default().rule_count(), 0);
+        assert_eq!(empty_policy().rule_count(), 0);
+        // Two tools with 2 + 1 rules ⇒ 3 (the doctor surface reports this).
+        let set = load_from_str(
+            r#"
+schema_version = 1
+[[tools]]
+name = "Bash"
+rules = [
+  { arg = "command", pattern = "*rm -rf*", severity = 9, reason = "a" },
+  { arg = "command", pattern = "*mkfs*", severity = 9, reason = "b" },
+]
+[[tools]]
+name = "WebFetch"
+rules = [
+  { arg = "url", pattern = "*169.254.169.254*", severity = 8, reason = "c" },
+]
+"#,
+        );
+        assert_eq!(set.rule_count(), 3);
     }
 
     #[test]

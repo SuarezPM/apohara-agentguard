@@ -485,7 +485,11 @@ fn level_preset(level: &str) -> Option<Thresholds> {
 }
 
 /// Candidate config paths in lookup order (see [`Config::load_default_locations`]).
-fn default_config_paths() -> Vec<PathBuf> {
+///
+/// Public so the `doctor` subcommand can report the EFFECTIVE config path
+/// (the first existing candidate per the documented resolution rule) without
+/// duplicating the candidate list.
+pub fn default_config_paths() -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from("agentguard.toml")];
 
     let config_home = std::env::var_os("XDG_CONFIG_HOME")

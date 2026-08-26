@@ -1,7 +1,7 @@
 //! apohara-agentguard CLI entry point.
 //!
 //! Thin clap (derive) dispatch over the subcommands: `version`, `hook`,
-//! `sandbox`, `scan`, `check`, `mcp`, `audit verify`, and `init`.
+//! `sandbox`, `scan`, `check`, `mcp`, `audit verify`, `init`, and `doctor`.
 
 use std::io::Read as _;
 use std::path::PathBuf;
@@ -60,6 +60,17 @@ enum Command {
     /// (applied immediately — the flag IS the consent). A corrupt host
     /// config aborts with exit code 2 and no modification.
     Init(InitArgs),
+    /// Diagnose installation health: binary identity, config loadability,
+    /// policy parseability, data-directory writability (MCP pin store +
+    /// audit log), per-host wiring status (wired / stale / not installed
+    /// across all five hosts), and a best-effort Landlock capability probe.
+    /// Exit 0 when everything is PASS/WARN; exit 1 on any FAIL.
+    /// `--json` emits the same report as structured JSON.
+    Doctor {
+        /// Emit a machine-readable JSON report instead of human text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -133,6 +144,7 @@ fn main() -> ExitCode {
             AuditCommand::Verify { file } => run_audit_verify(file),
         },
         Command::Init(args) => run_init(args),
+        Command::Doctor { json } => run_doctor(json, cli.policy.as_deref()),
     }
 }
 
@@ -549,6 +561,57 @@ fn run_init(args: InitArgs) -> ExitCode {
             );
             ExitCode::from(1)
         }
+    }
+}
+
+/// Run the installation health diagnostics (`agentguard doctor`).
+///
+/// Resolves the same environment inputs `init` uses (home dir, canonicalized
+/// running binary, `$XDG_CONFIG_HOME`) plus the global `--policy` override,
+/// hands them to the hermetic [`apohara_agentguard::doctor`] core, prints
+/// the report (human text or `--json`), and maps failures to exit 1.
+fn run_doctor(json: bool, cli_policy: Option<&std::path::Path>) -> ExitCode {
+    // Same home/exe resolution contract as `run_init` — the wiring-staleness
+    // comparison must see the EXACT path `init` wrote.
+    let Some(home) = std::env::home_dir() else {
+        eprintln!("apohara-agentguard doctor: could not determine the user home directory");
+        return ExitCode::from(1);
+    };
+    let exe = match std::env::current_exe().map(std::fs::canonicalize) {
+        Ok(Ok(p)) => p,
+        _ => {
+            eprintln!("apohara-agentguard doctor: could not resolve the running binary path");
+            return ExitCode::from(1);
+        }
+    };
+    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+
+    let env = apohara_agentguard::doctor::Env {
+        home: &home,
+        exe: &exe,
+        xdg_config_home: xdg_config_home.as_deref(),
+        policy_override: cli_policy,
+    };
+    let report = apohara_agentguard::doctor::run(&env);
+
+    if json {
+        let payload = serde_json::json!({
+            "ok": !report.has_failures(),
+            "checks": report.checks,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload)
+                .expect("doctor report serialization is infallible")
+        );
+    } else {
+        print!("{}", report.render());
+    }
+
+    if report.has_failures() {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
     }
 }
 

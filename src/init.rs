@@ -785,6 +785,165 @@ fn write_config(path: &Path, value: &Value) -> Result<(), InitError> {
     atomic_write(path, out.as_bytes())
 }
 
+// ---- Doctor surface: observed wiring state per host (read-only) ------------
+
+/// Observed wiring state of one host's artifacts on disk. Computed by
+/// [`diagnose_hosts`] for `agentguard doctor`; mirrors the install / undo
+/// semantics above WITHOUT writing anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WiringState {
+    /// Our marker / artifacts are present and point at (or equal) the current
+    /// binary content.
+    Wired,
+    /// Our wiring is present but points at a different binary path (JSON
+    /// hosts) or our reserved artifact content drifted (drop-in hosts) —
+    /// silent protection loss until the next `init --yes` self-heals it.
+    Stale,
+    /// Nothing of ours is on disk for this host.
+    NotInstalled,
+    /// kitty-code only: a `policy.toml` exists that is not our scaffold —
+    /// user policy, healthy by design (the engine embeds via library there).
+    UserPolicy,
+    /// A JSON-hook host config exists but cannot be parsed as a valid hook
+    /// document — our wiring cannot be verified (and `init` would refuse to
+    /// touch it).
+    Corrupt(String),
+}
+
+/// One host's observed wiring state plus its primary artifact path (the
+/// config file for JSON-hook hosts, the shim / scaffold for drop-ins).
+#[derive(Debug, Clone)]
+pub struct HostWiring {
+    pub host: &'static str,
+    pub path: PathBuf,
+    pub state: WiringState,
+}
+
+/// Observe the wiring state of all five hosts against `base_home`, writing
+/// nothing (`doctor`). Same path resolution as [`run`] — including
+/// `$XDG_CONFIG_HOME`, passed EXPLICITLY so this core stays hermetic like
+/// the rest of the module.
+pub fn diagnose_hosts(
+    base_home: &Path,
+    xdg_config_home: Option<&std::ffi::OsStr>,
+    exe: &Path,
+) -> Vec<HostWiring> {
+    let mut out = Vec::with_capacity(5);
+
+    // JSON-hook hosts: classify by parsing the config and scanning markers.
+    for (host, path) in [
+        ("claude-code", base_home.join(CLAUDE_DIR).join(CLAUDE_FILE)),
+        ("codex-code", base_home.join(CODEX_DIR).join(CODEX_FILE)),
+    ] {
+        let state = json_wiring_state(&path, exe);
+        out.push(HostWiring { host, path, state });
+    }
+
+    // Drop-in hosts: classify by exact-content equality of our reserved
+    // artifacts (same read_exact primitive install uses).
+    let opencode_shim = plugins_dir(base_home, xdg_config_home, OPENCODE_APP).join(SHIM_FILE_NAME);
+    let state = dropin_wiring_state(&[(&opencode_shim, OPENCODE_SHIM)]);
+    out.push(HostWiring {
+        host: "opencode",
+        path: opencode_shim.clone(),
+        state,
+    });
+
+    let kilo_plugins = plugins_dir(base_home, xdg_config_home, KILO_APP);
+    let kilo_shim = kilo_plugins.join(SHIM_FILE_NAME);
+    let kilo_guide =
+        xdg_config_dir(base_home, xdg_config_home, KILO_APP).join(KILO_GUIDE_FILE_NAME);
+    let state = dropin_wiring_state(&[
+        (&kilo_shim, OPENCODE_SHIM),
+        (&kilo_guide, crate::adapters::kilo::veto_guide()),
+    ]);
+    out.push(HostWiring {
+        host: "kilo",
+        path: kilo_shim.clone(),
+        state,
+    });
+
+    let kitty_policy = plan_kitty_wiring(base_home);
+    out.push(kitty_policy);
+    out
+}
+
+/// Classify one JSON-hook host config (`claude-code`, `codex-code`) without
+/// modifying it. Reuses the SAME parse validation ([`parse_config`]) and
+/// marker scan ([`is_wired`] / [`marker_commands`]) as install.
+fn json_wiring_state(path: &Path, exe: &Path) -> WiringState {
+    match std::fs::read(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => WiringState::NotInstalled,
+        Err(e) => WiringState::Corrupt(e.to_string()),
+        Ok(bytes) => {
+            let root = match parse_config(path, &bytes) {
+                Ok(v) => v,
+                Err(InitError::CorruptConfig { reason, .. }) => {
+                    return WiringState::Corrupt(reason)
+                }
+                Err(InitError::Io { source, .. }) => {
+                    return WiringState::Corrupt(source.to_string())
+                }
+            };
+            if !is_wired(&root) {
+                return WiringState::NotInstalled;
+            }
+            let exe_str = exe.to_string_lossy();
+            if marker_commands(&root)
+                .iter()
+                .all(|c| *c == exe_str.as_ref())
+            {
+                WiringState::Wired
+            } else {
+                WiringState::Stale
+            }
+        }
+    }
+}
+
+/// Classify a drop-in host from exact-content equality of each artifact:
+/// all present and exact ⇒ Wired; anything missing ⇒ NotInstalled; else
+/// (all present, ≥1 divergent) ⇒ Stale. An unreadable artifact maps to
+/// Stale too? No — an I/O error reading OUR reserved filename is treated as
+/// NotInstalled only when it is a NotFound; any other error surfaces as
+/// Stale (the artifact is there but unusable — self-heal applies).
+fn dropin_wiring_state(files: &[(&Path, &str)]) -> WiringState {
+    let mut missing_any = false;
+    let mut divergent_any = false;
+    for (path, ours) in files {
+        match std::fs::read(path) {
+            Ok(bytes) if bytes == ours.as_bytes() => {}
+            Ok(_) => divergent_any = true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing_any = true,
+            Err(_) => divergent_any = true,
+        }
+    }
+    if missing_any {
+        WiringState::NotInstalled
+    } else if divergent_any {
+        WiringState::Stale
+    } else {
+        WiringState::Wired
+    }
+}
+
+/// kitty-code classification: scaffold-exact ⇒ Wired; user policy ⇒
+/// UserPolicy; absent ⇒ NotInstalled (mirrors [`plan_kitty_host`] install
+/// detection exactly).
+fn plan_kitty_wiring(base_home: &Path) -> HostWiring {
+    let path = base_home.join(KITTY_DIR_NAME).join(KITTY_POLICY_FILE_NAME);
+    let state = match std::fs::read(&path) {
+        Ok(bytes) if bytes == KITTY_SCAFFOLD.as_bytes() => WiringState::Wired,
+        Ok(_) => WiringState::UserPolicy,
+        Err(_) => WiringState::NotInstalled,
+    };
+    HostWiring {
+        host: "kitty-code",
+        path,
+        state,
+    }
+}
+
 /// Write `payload` to `path` ATOMICALLY, creating parent dirs: the payload
 /// goes to a unique sibling temp file in the SAME directory, then
 /// `fs::rename` over the destination (atomic on POSIX; replaces the
@@ -820,4 +979,167 @@ fn atomic_write(path: &Path, payload: &[u8]) -> Result<(), InitError> {
         let _ = std::fs::remove_file(&tmp); // best-effort cleanup
     }
     result
+}
+
+#[cfg(test)]
+mod doctor_surface_tests {
+    use super::*;
+
+    fn temp_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "agentguard-init-diagnose-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn exe_marker() -> String {
+        "apohara-agentguard".to_string()
+    }
+
+    fn state_of<'a>(wiring: &'a [HostWiring], host: &str) -> &'a WiringState {
+        &wiring
+            .iter()
+            .find(|w| w.host == host)
+            .unwrap_or_else(|| panic!("host {host} missing from diagnose_hosts output"))
+            .state
+    }
+
+    #[test]
+    fn empty_home_reports_all_hosts_not_installed() {
+        let home = temp_home("empty");
+        let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
+        assert_eq!(wiring.len(), 5);
+        for host in [
+            "claude-code",
+            "codex-code",
+            "opencode",
+            "kilo",
+            "kitty-code",
+        ] {
+            assert_eq!(
+                state_of(&wiring, host),
+                &WiringState::NotInstalled,
+                "{host}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn installed_home_reports_every_host_wired() {
+        let home = temp_home("installed");
+        let results =
+            run(&home, Path::new(&exe_marker()), Mode::Install, true).expect("init install");
+        assert_eq!(results.len(), 5);
+
+        // The exe marker alone makes JSON hosts STALE (commands != marker
+        // string) — diagnose must agree with init's refresh semantics.
+        let wiring = diagnose_hosts(&home, None, Path::new("/real/path/apohara-agentguard"));
+        for host in ["claude-code", "codex-code"] {
+            assert_eq!(state_of(&wiring, host), &WiringState::Stale, "{host}");
+        }
+        for host in ["opencode", "kilo", "kitty-code"] {
+            assert_eq!(state_of(&wiring, host), &WiringState::Wired, "{host}");
+        }
+
+        // Diagnosing with the EXACT marker string as exe ⇒ Wired everywhere.
+        let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
+        for host in [
+            "claude-code",
+            "codex-code",
+            "opencode",
+            "kilo",
+            "kitty-code",
+        ] {
+            assert_eq!(state_of(&wiring, host), &WiringState::Wired, "{host}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn corrupt_json_host_config_surfaces_as_corrupt() {
+        let home = temp_home("corrupt");
+        let dir = home.join(CLAUDE_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(CLAUDE_FILE), b"{ not json").unwrap();
+
+        let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
+        match state_of(&wiring, "claude-code") {
+            WiringState::Corrupt(reason) => {
+                assert!(!reason.is_empty(), "the corrupt reason must carry detail");
+            }
+            other => panic!("expected Corrupt, got {other:?}"),
+        }
+        // The OTHER host is unaffected.
+        assert_eq!(state_of(&wiring, "codex-code"), &WiringState::NotInstalled);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn kitty_user_policy_is_reported_not_stale() {
+        let home = temp_home("kitty-user");
+        let dir = home.join(KITTY_DIR_NAME);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(KITTY_POLICY_FILE_NAME), "# user policy\n").unwrap();
+
+        let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
+        assert_eq!(
+            state_of(&wiring, "kitty-code"),
+            &WiringState::UserPolicy,
+            "a user-customized kitty policy is healthy, not stale"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn json_host_present_but_unwired_is_not_installed() {
+        let home = temp_home("unwired-host");
+        let dir = home.join(CLAUDE_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(CLAUDE_FILE), r#"{"model":"opus"}"#).unwrap();
+
+        let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
+        assert_eq!(
+            state_of(&wiring, "claude-code"),
+            &WiringState::NotInstalled,
+            "a host config without our marker is not-installed (from OUR perspective)"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn dropin_divergent_artifact_is_stale() {
+        let home = temp_home("divergent-shim");
+        let plugins = home.join(".config").join(OPENCODE_APP).join(PLUGINS_SUBDIR);
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join(SHIM_FILE_NAME), "// hand-edited shim\n").unwrap();
+
+        let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
+        assert_eq!(state_of(&wiring, "opencode"), &WiringState::Stale);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn diagnose_respects_xdg_config_home() {
+        let home = temp_home("xdg");
+        let xdg = home.join("xdg-config");
+        let plugins = xdg.join(OPENCODE_APP).join(PLUGINS_SUBDIR);
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(plugins.join(SHIM_FILE_NAME), OPENCODE_SHIM).unwrap();
+
+        // With XDG set: opencode wired via the XDG path.
+        let wiring = diagnose_hosts(&home, Some(xdg.as_os_str()), Path::new(&exe_marker()));
+        assert_eq!(state_of(&wiring, "opencode"), &WiringState::Wired);
+
+        // Without XDG: the same artifact is invisible ⇒ not installed.
+        let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
+        assert_eq!(state_of(&wiring, "opencode"), &WiringState::NotInstalled);
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }
