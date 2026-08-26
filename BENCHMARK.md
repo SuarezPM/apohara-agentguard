@@ -211,3 +211,52 @@ format, direct pipe to a shell); documented shape variants — an intermediate p
 stage, a subshell wrapper, a `--` separator, or starving the shared splice budget —
 remain uncaught and are listed in the README's out-of-scope section. The FPR axis is
 also unchanged: same operating point, same known false-positive classes.
+
+## MCPTox ON + policy-oracle measurement — labeled upper bound (2026-08-26)
+
+Closes backlog item #4 for the MCP transport proxy. The ON-default condition had
+already confirmed default-allow behavior on MCPTox (ASR 26.3% = OFF). This run adds
+an **ad-hoc TOML policy written with knowledge of the corpus** — deliberate overfit,
+declared up front: 21 per-tool rules over patternable arguments (sensitive paths,
+sentinel UIDs, credential search, the malicious domain, SQL exfil/DoS, destructive
+tools by name, injection in the `code`/`task` keys). It is a **measured best-case
+reference** of what a deterministic transport proxy achieved *here* — not a proven
+limit (a different deterministic policy could do better), not a generalizable
+defense, and not a shipped default. Both policies are committed under
+[`evals/mcptox-policy/`](evals/mcptox-policy/)
+([strict](evals/mcptox-policy/policy-oracle-strict.toml) /
+[conservative](evals/mcptox-policy/policy-oracle-conservative.toml)).
+
+| Condition | n | valid | Success | ASR | Benign FP |
+|---|---:|---:|---:|---:|---|
+| OFF (no proxy) | 1312 | 1297 | 341 | 26.3% | — |
+| ON-default (proxy, no policy) | 1312 | 1302 | 343 | 26.3% | 0% |
+| **ON + policy-oracle strict** | 1312 | 1277 | 305 | **23.9%** | **0.56%** (2/357) |
+
+Honest reading, with five required qualifiers:
+
+1. **ΔASR −2.4pp absolute (−9.1% relative)**; the proxy blocked 54 tool calls.
+2. **Noise-floor control**: ON-default 343 vs OFF 341 Success (+0.15pp) — pipeline /
+   cross-model-judge noise is far below the −2.4pp signal.
+3. **Valid denominators differ per condition** because the cross-model judge
+   invalidates episodes with parse failures (Invalid: 15 OFF / 10 ON-default /
+   35 strict); the net direction of judge bias is unknown in either direction.
+4. **FP root cause**: both false positives (2/357 benign) are denials of
+   destructive-by-name tools (`put_invoices_id_void` / `mark_as_paid`) that AdFin
+   uses legitimately — exactly the tool-name-deny block the conservative variant
+   omits.
+5. **Conservative variant is pending a run**, labeled as such: expected ASR lands
+   between 23.9% and 26.3%.
+
+What this proves: deterministic transport-level gating captures the fraction of
+misuse with patternable arguments (~19% estimated pre-run; measured effective −9%
+relative after multi-call episodes and judge noise). The remaining ~75–80% is
+**semantic misuse**: legitimate values in malicious context (`origin=0,0`,
+`database=production`, covert `getContacts(searchTerm)` recon before exfiltration)
+that a proxy without an intent model cannot distinguish. That boundary is precisely
+what motivates backlog items #2 (semantic exfil rules) and #6 (longitudinal
+rug-pull). No magic reduction is claimed: we publish where the edge sits.
+
+Technical detail: `agentguard-proxy` accepts a policy ONLY via the `--policy` CLI
+flag (the `AGENTGUARD_POLICY` env var applies to the main binary); the harness
+injects the flag when it detects the variable.
