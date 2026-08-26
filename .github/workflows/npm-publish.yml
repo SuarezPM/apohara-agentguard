@@ -1,0 +1,64 @@
+name: Publish npx wrapper to npm
+
+# Maintainer-triggered ONLY (workflow_dispatch). Publishing to npm is
+# effectively irreversible for a released version. This publishes the thin
+# launcher in packaging/npx-wrapper/ as the `apohara-agentguard` package; the
+# launcher downloads and SHA256-verifies the platform release binary itself.
+#
+# REQUIRED SECRET (TODO-humano): configure the repository secret `NPM_TOKEN`
+# (npm automation / granular token with publish rights for the package).
+# Until it is configured, the guard step below fails the run cleanly instead
+# of leaking an obscure registry auth error.
+#
+# `--provenance` requires: the `id-token: write` permission below, a public
+# package, `repository.url` matching this repo (present in package.json), and
+# a recent npm (node 22 provides one).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: npm publish (packaging/npx-wrapper)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      # Version invariant: packaging/npx-wrapper/package.json must equal the
+      # [package] version in Cargo.toml. scripts/sync-version.sh propagates
+      # Cargo.toml -> every user-facing release surface; if the tree differs
+      # afterwards, the release surfaces were not committed together.
+      - name: Verify version sync (Cargo.toml <-> npx wrapper)
+        run: |
+          bash scripts/sync-version.sh
+          if ! git diff --exit-code; then
+            echo "::error::version drift detected — packaging surfaces do not match Cargo.toml" >&2
+            echo "::error::run scripts/sync-version.sh locally, commit the synced files, re-run" >&2
+            exit 1
+          fi
+
+      - name: Fail fast when NPM_TOKEN secret is not configured
+        env:
+          NPM_TOKEN_SET: ${{ secrets.NPM_TOKEN != '' }}
+        run: |
+          if [ "$NPM_TOKEN_SET" != "true" ]; then
+            echo "::error::configure NPM_TOKEN secret (TODO-humano) — see RELEASING.md" >&2
+            exit 1
+          fi
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # No package-lock.json is committed for the launcher (it has zero
+      # runtime dependencies), so there is nothing to `npm ci`; publish runs
+      # directly against package.json.
+      - name: npm publish
+        working-directory: packaging/npx-wrapper
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public

@@ -158,13 +158,18 @@ jobs:
           EOF
           cross build --release --locked --target ${{ matrix.target }}
 
-      - name: Stage artifact
+      - name: Stage artifacts
         shell: bash
         run: |
           mkdir -p dist
-          src="target/${{ matrix.target }}/release/apohara-agentguard${{ matrix.ext }}"
-          dst="dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
-          cp "$src" "$dst"
+          # Both declared [[bin]] targets ship in every bundle: cargo-binstall
+          # hard-fails the install if any bin of the crate is missing from the
+          # resolved package (BinFileNotFound), so agentguard-proxy rides
+          # with the main binary under the same <bin>-<target> naming.
+          cp "target/${{ matrix.target }}/release/apohara-agentguard${{ matrix.ext }}" \
+             "dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
+          cp "target/${{ matrix.target }}/release/agentguard-proxy${{ matrix.ext }}" \
+             "dist/agentguard-proxy-${{ matrix.target }}${{ matrix.ext }}"
 
       # Verify the dependency inventory actually landed in the shipped bytes,
       # BEFORE any hashing or attestation below: if this fails, uninstrumented
@@ -206,13 +211,14 @@ jobs:
         shell: bash
         run: |
           cd dist
-          f="apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "$f" > "$f.sha256"
-          else
-            shasum -a 256 "$f" > "$f.sha256"
-          fi
-          cat "$f.sha256"
+          for f in *; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$f" > "$f.sha256"
+            else
+              shasum -a 256 "$f" > "$f.sha256"
+            fi
+            cat "$f.sha256"
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -306,7 +312,7 @@ jobs:
         run: |
           mkdir -p release
           # Collect every binary + its per-file .sha256 into one manifest.
-          find artifacts -type f -name 'apohara-agentguard-*' ! -name '*.sha256' -exec cp {} release/ \;
+          find artifacts -type f \( -name 'apohara-agentguard-*' -o -name 'agentguard-proxy-*' \) ! -name '*.sha256' -exec cp {} release/ \;
           cp -f artifacts/THIRD-PARTY-LICENSES/THIRD-PARTY-LICENSES release/ || true
           # Plugin manifests ride with the bundle so installs can register
           # hooks without a second fetch (checkout provides them).
@@ -318,7 +324,8 @@ jobs:
           (cd packs-community && tar -czf ../release/agentguard-packs.tar.gz *.toml)
           cd release
           : > SHA256SUMS
-          for f in apohara-agentguard-*; do
+          for f in apohara-agentguard-* agentguard-proxy-*; do
+            case "$f" in *.sha256) continue ;; esac
             if command -v sha256sum >/dev/null 2>&1; then
               sha256sum "$f" >> SHA256SUMS
             else

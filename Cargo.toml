@@ -21,6 +21,23 @@ path = "src/main.rs"
 name = "agentguard-proxy"
 path = "src/bin/agentguard-proxy.rs"
 
+# cargo-binstall distribution: `cargo binstall apohara-agentguard` resolves
+# these templates against the GitHub release assets. Assets are bare,
+# unarchived binaries named `<bin>-<target>[.exe]`, hence pkg-fmt = "bin" and
+# `{ archive-suffix }` (empty everywhere except ".exe" on Windows targets).
+# NOTE: binstall requires EVERY [[bin]] target above to exist in the resolved
+# package — a missing bin is a hard error — so the release workflow stages
+# agentguard-proxy-<triple>[.exe] alongside the main binary.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "bin"
+
+# Windows asset name spelled out literally for template engines that predate
+# the { archive-suffix } variable; identical resolution on current versions.
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.exe"
+
 [dependencies]
 anyhow = "1"
 thiserror = "2"
