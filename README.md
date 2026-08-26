@@ -24,7 +24,14 @@ A deterministic, offline Rust safety layer for AI coding agents: an **anti-bypas
 
 </div>
 
-<!-- demo GIF placeholder: recorded separately -->
+<p align="center">
+  <img src="packaging/demo.gif" alt="Demo: obfuscated destructive commands blocked, benign commits allowed" width="900">
+</p>
+
+<p align="center">
+  <code>curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh</code><br>
+  <sub>Deterministic Bash gate · seccomp+Landlock sandbox · MCP TOFU proxy — no LLM, no network, works from the shadows.</sub>
+</p>
 
 ---
 
