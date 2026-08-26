@@ -27,7 +27,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh
 #
 # Env overrides:
-#   AGENTGUARD_VERSION        release tag to install (default: 0.3.0)
+#   AGENTGUARD_VERSION        release tag to install (default: pinned by VERSION below)
 #   AGENTGUARD_DOWNLOAD_BASE  artifact base URL (default: GitHub release)
 #   AGENTGUARD_PREFIX         install dir (default: ~/.local/share/apohara-agentguard)
 
@@ -177,10 +177,12 @@ fetch_optional() {
 }
 
 # extract_packs_safely validates every archived path BEFORE extracting
-# anything: absolute paths, any ".." component, empty names, and option-looking
-# entries are rejected, so a hostile tarball can never write outside <dest>.
-# Our pack tarball carries flat "<name>.toml" entries only; anything else
-# fails validation and the caller aborts the install.
+# anything: absolute paths, any ".." component, empty names, option-looking
+# entries, and ANY entry that is not a flat "<name>.toml" manifest are
+# rejected, so a hostile tarball can never write outside <dest>. The
+# allowlist is deliberate: our pack tarball carries nothing else, so
+# symlinks, directories, or payloads in disguise fail validation and the
+# caller aborts the install.
 extract_packs_safely() {
   packs_archive="$1"
   packs_dest="$2"
@@ -188,6 +190,8 @@ extract_packs_safely() {
     [ -n "$entry" ] || continue
     case "$entry" in
       /* | *'..'* | -*) return 1 ;;
+      *.toml) ;;
+      *) return 1 ;;
     esac
   done <<EOF
 $(tar -tzf "$packs_archive")

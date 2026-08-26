@@ -11,6 +11,7 @@
 #   - packaging/install.sh                       (VERSION= default)
 #   - packaging/npx-wrapper/package.json         ("version")
 #   - packaging/npx-wrapper/bin/apohara-agentguard.js  (const VERSION)
+#   - .github/workflows/release.yml              (bundle artifact name)
 #
 # tests/readme_sync.rs::version_sync_across_manifests asserts the same
 # invariant from the Rust side; run this script after bumping Cargo.toml.
@@ -89,5 +90,11 @@ apply "${ROOT}/packaging/npx-wrapper/bin/apohara-agentguard.js" \
   "s|^const VERSION[[:space:]]*=.*$|const VERSION = \"${version}\";|" \
   "const VERSION = \"${version}\";" \
   "packaging/npx-wrapper/bin/apohara-agentguard.js"
+
+apply "${ROOT}/.github/workflows/release.yml" \
+  '^[[:space:]]*name:[[:space:]]+apohara-agentguard-v[0-9]+\.[0-9]+\.[0-9]+-release[[:space:]]*$' \
+  "s|^([[:space:]]*name:[[:space:]]*apohara-agentguard-v)[0-9]+\.[0-9]+\.[0-9]+(-release)[[:space:]]*\$|\1${version}\2|" \
+  "name: apohara-agentguard-v${version}-release" \
+  ".github/workflows/release.yml (bundle artifact name)"
 
 printf 'sync-version.sh: all release surfaces now at v%s\n' "$version"
