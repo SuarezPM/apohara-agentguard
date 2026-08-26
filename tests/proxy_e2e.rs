@@ -956,6 +956,120 @@ fn proxy_e2e_tool_granularity_strips_drifted_tools_and_blocks_their_calls() {
 }
 
 #[test]
+fn proxy_e2e_server_initiated_request_round_trips_with_original_id() {
+    // Remediation B2: a client RESPONSE to a server-initiated request must
+    // reach upstream VERBATIM (original id intact — neither re-minted nor
+    // dropped). Pre-fix, the relay re-minted its id and the upstream hung
+    // forever waiting on its own correlation id.
+    let env = Env::new("server-request");
+    let upstream = env.upstream();
+    let up_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = vec!["--"];
+    args.extend(up_refs);
+    let mut s = Interactive::spawn(&env, &args, &[]);
+
+    s.send(&init_req());
+    assert!(s.recv().get("error").is_none());
+
+    // The trigger makes the mock issue sampling/createMessage (id 777) and
+    // wait for OUR response before answering the call.
+    s.send(&call_req(
+        3,
+        "echo",
+        serde_json::json!({"trigger_server_request": true}),
+    ));
+    let server_req = s.recv();
+    assert_eq!(server_req["id"], 777, "{server_req}");
+    assert_eq!(server_req["method"], "sampling/createMessage");
+
+    // The client answers. Distinctive spacing proves byte-fidelity downstream:
+    // the splice must forward these EXACT bytes, not a reserialization.
+    let answer = r#"{"jsonrpc": "2.0", "id": 777, "result": {"choice": "blue pill"}}"#;
+    s.send(answer);
+
+    let call = s.recv();
+    assert_eq!(call["id"], 3);
+    assert_eq!(call["result"]["isError"], false);
+    let text = call["result"]["content"][0]["text"].as_str().unwrap();
+    assert_eq!(
+        text, "server-request-answer-id:777",
+        "upstream MUST have correlated our original id 777"
+    );
+
+    let (status, stderr) = s.finish();
+    assert!(
+        status.success(),
+        "round-trip session exits clean; stderr={stderr}"
+    );
+    // The mock log holds the client's response line BYTE-IDENTICAL.
+    let log = read_log(&env);
+    assert!(
+        log.iter().any(|l| l == answer),
+        "client response must arrive upstream unmodified; log={log:?}"
+    );
+}
+
+#[test]
+fn proxy_e2e_output_schema_only_drift_quarantines_under_tool_granularity() {
+    // Remediation B3: tools_hash includes outputSchema but the per-tool
+    // descriptor hash does NOT, so drift that ONLY touches outputSchema used
+    // to produce an empty attribution — tool granularity stripped nothing,
+    // blocked nobody, and silently re-forwarded the drifted manifest. It must
+    // ESCALATE to session-style quarantine instead.
+    let env = Env::new("schema-drift");
+    let tools_a = env.root.join("tools_a.json");
+    let tools_b = env.root.join("tools_b.json");
+    std::fs::write(
+        &tools_a,
+        r#"[{"name":"echo","description":"original","inputSchema":{"type":"object"}}]"#,
+    )
+    .expect("tools_a");
+    // ONLY delta vs tools_a: the added outputSchema member.
+    std::fs::write(
+        &tools_b,
+        r#"[{"name":"echo","description":"original","inputSchema":{"type":"object"},"outputSchema":{"type":"object"}}]"#,
+    )
+    .expect("tools_b");
+
+    let upstream = env.upstream();
+    let up_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = vec!["--drift-granularity", "tool", "--"];
+    args.extend(up_refs);
+
+    // Run 1 records the honest manifest.
+    let first = run_session(
+        &env,
+        &args,
+        &[("MOCK_TOOLS_FILE", tools_a.to_str().unwrap())],
+        &[init_req(), list_req()],
+    );
+    assert!(first.status.success(), "stderr={}", first.stderr);
+
+    // Run 2: schema-only drift must QUARANTINE the session (exit 2) with a
+    // loud alarm — never a silent re-forward of the drifted manifest.
+    let second = run_session(
+        &env,
+        &args,
+        &[("MOCK_TOOLS_FILE", tools_b.to_str().unwrap())],
+        &[init_req(), list_req()],
+    );
+    assert_eq!(
+        second.status.code(),
+        Some(2),
+        "session-style quarantine under tool granularity; stderr={}",
+        second.stderr
+    );
+    assert!(
+        second.stderr.contains("QUARANTINE"),
+        "loud stderr alarm expected; stderr={}",
+        second.stderr
+    );
+    let list = second.by_id(2);
+    assert_eq!(list["result"]["tools"], serde_json::json!([]));
+    assert_eq!(list["result"]["quarantined"], true);
+}
+
+#[test]
 fn proxy_e2e_warm_latency_median_under_120ms() {
     let env = Env::new("latency");
     let mut child = env

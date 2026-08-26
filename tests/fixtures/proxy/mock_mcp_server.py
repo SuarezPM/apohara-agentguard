@@ -36,6 +36,9 @@ DEFAULT_TOOLS = [
     }
 ]
 
+# Id used for the server→client request issued by the B2 round-trip trigger.
+SERVER_REQUEST_ID = 777
+
 
 def tools_payload():
     path = os.environ.get("MOCK_TOOLS_FILE")
@@ -87,6 +90,58 @@ def main():
             send({"jsonrpc": "2.0", "id": rid, "result": {"tools": tools_payload()}})
         elif method == "tools/call":
             args = msg.get("params", {}).get("arguments", {})
+            if args.get("trigger_server_request"):
+                # Remediation B2 round-trip: issue a SERVER→client request
+                # (sampling/createMessage shape) and wait for the client's
+                # response. The response must come back with id 777 EXACTLY
+                # as sent — a re-minted id would hang here forever.
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": SERVER_REQUEST_ID,
+                        "method": "sampling/createMessage",
+                        "params": {
+                            "messages": [
+                                {
+                                    "role": "user",
+                                    "content": {"type": "text", "text": "pick one"},
+                                }
+                            ]
+                        },
+                    }
+                )
+                answer = None
+                for raw2 in sys.stdin:
+                    line2 = raw2.strip()
+                    if not line2:
+                        continue
+                    log(line2)
+                    try:
+                        m2 = json.loads(line2)
+                    except ValueError:
+                        continue
+                    if m2.get("id") == SERVER_REQUEST_ID and (
+                        "result" in m2 or "error" in m2
+                    ):
+                        answer = m2
+                        break
+                answer_id = json.dumps(answer.get("id")) if answer else "none"
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "result": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "server-request-answer-id:" + answer_id,
+                                }
+                            ],
+                            "isError": False,
+                        },
+                    }
+                )
+                continue
             send(
                 {
                     "jsonrpc": "2.0",

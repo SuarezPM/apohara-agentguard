@@ -661,6 +661,20 @@ fn handle_client_line(
         };
     }
 
+    // Client→server RESPONSE (result/error WITHOUT a method): this answers a
+    // SERVER-initiated request (sampling/createMessage, roots/list,
+    // elicitation/create). The anti-spoofing table only maps ids the RELAY
+    // minted on client→upstream requests, so there is nothing to restore:
+    // splice VERBATIM like notifications (remediation B2). Re-minting here
+    // would sever the upstream's correlation (silent hang) AND register a
+    // pending entry that can never resolve — enough of them saturate the
+    // table into spurious -32002s on legitimate traffic. The anti-spoofing
+    // gate protects upstream→client; this direction does not need it.
+    if method.is_none() && (msg.get("result").is_some() || msg.get("error").is_some()) {
+        let _ = tx_in.send(line.to_string());
+        return None;
+    }
+
     // Everything else forwards — with its id re-minted if it is a request.
     forward_with_proxied_id(
         line,
@@ -852,9 +866,19 @@ fn handle_upstream_line(
                         ..
                     } = &verdict
                     {
-                        return apply_tool_granularity_drift(
-                            changes, collisions, line, span, &entry, shared, tx_out,
-                        );
+                        // Remediation B3: outputSchema-only drift yields an
+                        // EMPTY attribution (`tools_hash` includes
+                        // outputSchema but the per-tool descriptor hash
+                        // deliberately excludes it). Tool-granularity would
+                        // strip nothing and block nobody — silently
+                        // re-forwarding the drifted manifest. When there is
+                        // NO tool to blame, ESCALATE to the session-style
+                        // handling below instead.
+                        if !changes.is_empty() || !collisions.is_empty() {
+                            return apply_tool_granularity_drift(
+                                changes, collisions, line, span, &entry, shared, tx_out,
+                            );
+                        }
                     }
                 }
                 let reason = verdict.reason();
@@ -913,6 +937,10 @@ fn handle_upstream_line(
 /// affected tools are stripped from the manifest before it reaches the
 /// client, their future calls are blocked (mode-dependent), and the SESSION
 /// keeps flowing — the quarantine-on-drift default stays untouched.
+///
+/// Callers must NOT dispatch here with an EMPTY attribution (no changes, no
+/// collisions): that shape means outputSchema-only drift (remediation B3) and
+/// escalates to session-style handling instead of a silent no-op.
 ///
 /// The store is NOT updated (the honest baseline is preserved), matching the
 /// session-granularity mismatch semantics.
@@ -1425,6 +1453,42 @@ mod tests {
     }
 
     #[test]
+    fn client_responses_to_server_requests_splice_verbatim_without_pending_growth() {
+        // Remediation B2: a client answering a SERVER-initiated request
+        // (sampling/createMessage, roots/list, elicitation/create) carries a
+        // result/error WITHOUT a method. It must reach upstream BYTE-IDENTICAL
+        // (the upstream correlates on its own id) and register NOTHING in the
+        // pending table.
+        let shared = Shared::default();
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+        let gates = test_gates();
+        let before = pending_len(&shared);
+
+        let resp = r#"{"jsonrpc":"2.0","id":900,"result":{"role":"assistant","model":"mock"}}"#;
+        assert!(handle_client_line(resp, &shared, &tx_in, &tx_out, &gates).is_none());
+        assert_eq!(
+            rx_in.recv().expect("forwarded response"),
+            resp,
+            "response must be spliced verbatim — no re-minted id"
+        );
+        assert_eq!(pending_len(&shared), before, "no pending entry may appear");
+        assert!(rx_out.try_recv().is_err(), "nothing synthesized");
+
+        // Error responses take the same path (elicitation decline etc.).
+        let err = r#"{"jsonrpc":"2.0","id":901,"error":{"code":-32601,"message":"declined"}}"#;
+        assert!(handle_client_line(err, &shared, &tx_in, &tx_out, &gates).is_none());
+        assert_eq!(rx_in.recv().expect("forwarded error response"), err);
+        assert_eq!(pending_len(&shared), before);
+
+        // Requests are unaffected: still re-minted and tracked.
+        let req = r#"{"jsonrpc":"2.0","id":10,"method":"ping"}"#;
+        assert!(handle_client_line(req, &shared, &tx_in, &tx_out, &gates).is_none());
+        assert!(rx_in.recv().unwrap().contains(PROXY_ID_PREFIX));
+        assert_eq!(pending_len(&shared), before + 1);
+    }
+
+    #[test]
     fn upstream_garbage_is_a_protocol_fatal() {
         let (_dir, store) = temp_store("garbage");
         let mut pin_gate = PinGate::new(store, "srv".into(), None);
@@ -1712,6 +1776,53 @@ mod tests {
 
     fn gates_dummy() -> Gates {
         test_gates()
+    }
+
+    #[test]
+    fn output_schema_only_drift_escalates_to_session_handling_in_tool_mode() {
+        // Remediation B3: tools_hash includes outputSchema but the per-tool
+        // descriptor hash deliberately does NOT, so a manifest whose ONLY
+        // drift is an added/changed outputSchema produces Mismatch with an
+        // empty attribution. Tool granularity must NOT strip-nothing-and-
+        // forward: it escalates to session-style handling (quarantine here).
+        let (_dir, store) = temp_store("schema-drift");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = shared_with(RelayMode::Enforce, DriftGranularity::Tool);
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+
+        // Pinned baseline: echo WITHOUT outputSchema.
+        pin_gate.on_list_response(&json!({ "tools": [
+            {"name": "echo", "description": "honest", "inputSchema": {"type": "object"}}
+        ]}));
+
+        // Drifted manifest: SAME name/description/inputSchema, outputSchema
+        // appears. Descriptor hashes are byte-identical ⇒ changes == [].
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "1");
+        let line = upstream_response(
+            &pid,
+            json!({ "tools": [
+                {"name": "echo", "description": "honest",
+                 "inputSchema": {"type": "object"},
+                 "outputSchema": {"type": "object"}}
+            ]}),
+        );
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(
+            shared.quarantined.load(Ordering::SeqCst),
+            "outputSchema-only drift must escalate to a session quarantine"
+        );
+        let out = rx_out.recv().expect("quarantined replacement");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["id"], 1);
+        assert_eq!(v["result"]["tools"], json!([]));
+        assert_eq!(v["result"]["quarantined"], true);
+
+        // And the blocked-tools map stays EMPTY: no tool was attributed.
+        assert!(
+            shared.blocked_tools.lock().unwrap().is_empty(),
+            "no per-tool attribution exists, so nothing may be tool-blocked"
+        );
     }
 
     #[test]
