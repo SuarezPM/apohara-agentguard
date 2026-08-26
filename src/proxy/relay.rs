@@ -86,9 +86,6 @@ use crate::proxy::spoof::{
     classify_response_id, splice_span, top_level_id_span, IdRewriter, IdSpan, RegisterError,
 };
 
-/// Pinned replacement reason for a drifted manifest (spec-exact wording).
-const DRIFT_REASON: &str = "tool manifest drift — pin mismatch";
-
 /// Graduated enforcement mode for the relay (see the module docs).
 ///
 /// The decision pipeline is identical in every mode; the mode only chooses
@@ -117,6 +114,29 @@ impl RelayMode {
     }
 }
 
+/// Blast radius of a pin drift: quarantine the whole SESSION (default,
+/// today's behavior) or just the affected TOOLs (`--drift-granularity tool`:
+/// drifted/colliding tools are stripped from the manifest and their calls
+/// blocked while the rest of the session keeps flowing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum DriftGranularity {
+    /// Any manifest drift quarantines the entire session (default).
+    #[default]
+    Session,
+    /// Only the changed/colliding tools are blocked; the session continues.
+    Tool,
+}
+
+impl DriftGranularity {
+    /// Canonical lowercase name for logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DriftGranularity::Session => "session",
+            DriftGranularity::Tool => "tool",
+        }
+    }
+}
+
 /// Everything the relay needs to run. Injectable fields (`pin_base`) keep
 /// tests off the real config directory.
 #[derive(Debug, Clone)]
@@ -134,6 +154,9 @@ pub struct RelayConfig {
     /// Enforcement mode (default [`RelayMode::Enforce`]).
     #[doc(hidden)]
     pub mode: RelayMode,
+    /// Drift blast radius (default [`DriftGranularity::Session`]).
+    #[doc(hidden)]
+    pub granularity: DriftGranularity,
 }
 
 impl Default for RelayConfig {
@@ -144,6 +167,7 @@ impl Default for RelayConfig {
             expected_pin: None,
             pin_base: None,
             mode: RelayMode::Enforce,
+            granularity: DriftGranularity::Session,
         }
     }
 }
@@ -166,10 +190,16 @@ pub enum RelayOutcome {
 struct Shared {
     /// Graduated enforcement mode (fixed for the session lifetime).
     mode: RelayMode,
+    /// Drift blast radius (fixed for the session lifetime).
+    granularity: DriftGranularity,
     /// Set once a quarantine-grade pin verdict fires; blocks every later
-    /// `tools/call`. Only ever set in [`RelayMode::Enforce`].
+    /// `tools/call`. Only ever set in [`RelayMode::Enforce`] with
+    /// session-granularity drift.
     quarantined: AtomicBool,
     quarantine_reason: Mutex<Option<String>>,
+    /// Per-tool blocks from tool-granularity drift: tool name → why. Set by
+    /// the child-reader thread, consulted by the main loop on tools/call.
+    blocked_tools: Mutex<std::collections::BTreeMap<String, String>>,
     /// First fatal error observed by any thread (protocol/I/O).
     fatal: Mutex<Option<String>>,
     /// Anti-spoofing id table: proxied request ids minted by the relay
@@ -202,6 +232,15 @@ impl Shared {
             .lock()
             .expect("quarantine mutex")
             .clone()
+    }
+
+    /// Why this tool is blocked by a tool-granularity drift, if it is.
+    fn blocked_tool_reason(&self, tool: &str) -> Option<String> {
+        self.blocked_tools
+            .lock()
+            .expect("blocked-tools mutex")
+            .get(tool)
+            .cloned()
     }
 }
 
@@ -283,10 +322,15 @@ pub fn run(cfg: RelayConfig, gates: &Gates) -> RelayOutcome {
     let mut pin_gate = PinGate::new(store, upstream_identity.clone(), cfg.expected_pin.clone());
 
     // Startup banner: the active posture must be visible in captured logs.
-    eprintln!("agentguard-proxy: mode: {}", cfg.mode.as_str());
+    eprintln!(
+        "agentguard-proxy: mode: {} (drift granularity: {})",
+        cfg.mode.as_str(),
+        cfg.granularity.as_str()
+    );
 
     let shared = Arc::new(Shared {
         mode: cfg.mode,
+        granularity: cfg.granularity,
         ..Shared::default()
     });
 
@@ -529,11 +573,42 @@ fn handle_client_line(
             return None;
         }
 
+        // tools/call gating: tool-level drift blocks come first (they are a
+        // pinning outcome), then policy/deep-check.
         let tool_name = msg
             .pointer("/params/name")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        if let Some(why) = shared.blocked_tool_reason(&tool_name) {
+            return match shared.mode {
+                RelayMode::Enforce => {
+                    eprintln!("agentguard-proxy: BLOCKED tools/call `{tool_name}`: {why}");
+                    if has_replyable_id {
+                        let _ = tx_out.send(blocked_response(
+                            msg.get("id").unwrap_or(&Value::Null),
+                            &format!("tool blocked by agentguard: {why}"),
+                        ));
+                    }
+                    None
+                }
+                mode => {
+                    eprintln!(
+                        "agentguard-proxy: WOULD-BLOCK (mode {}) tools/call `{tool_name}`: {why}",
+                        mode.as_str()
+                    );
+                    forward_with_proxied_id(
+                        line,
+                        id_span,
+                        msg.get("id").unwrap_or(&Value::Null),
+                        false,
+                        shared,
+                        tx_in,
+                        tx_out,
+                    )
+                }
+            };
+        }
         let args = msg
             .pointer("/params/arguments")
             .cloned()
@@ -767,11 +842,22 @@ fn handle_upstream_line(
         if entry.is_tools_list && msg.get("result").is_some() {
             let verdict = pin_gate.on_list_response(msg.get("result").expect("checked"));
             if verdict.is_quarantine() {
-                let reason = match &verdict {
-                    // Spec-exact wording for plain drift.
-                    PinVerdict::Mismatch { .. } => DRIFT_REASON.to_string(),
-                    other => other.reason(),
-                };
+                // Tool-granularity drift: only a Mismatch carries per-tool
+                // attribution. Other quarantine grades (preseed mismatch,
+                // unusable store) have no tool to blame → session handling.
+                if shared.granularity == DriftGranularity::Tool {
+                    if let PinVerdict::Mismatch {
+                        changes,
+                        collisions,
+                        ..
+                    } = &verdict
+                    {
+                        return apply_tool_granularity_drift(
+                            changes, collisions, line, span, &entry, shared, tx_out,
+                        );
+                    }
+                }
+                let reason = verdict.reason();
                 // The mode decides between ACT (enforce: quarantine +
                 // replace; filter-only: replace but keep calls flowing)
                 // and LOG (audit-only: forward the manifest verbatim).
@@ -823,6 +909,91 @@ fn handle_upstream_line(
     None
 }
 
+/// Tool-granularity drift handling (`--drift-granularity tool`): the
+/// affected tools are stripped from the manifest before it reaches the
+/// client, their future calls are blocked (mode-dependent), and the SESSION
+/// keeps flowing — the quarantine-on-drift default stays untouched.
+///
+/// The store is NOT updated (the honest baseline is preserved), matching the
+/// session-granularity mismatch semantics.
+fn apply_tool_granularity_drift(
+    changes: &[crate::proxy::pinning::ToolChange],
+    collisions: &[crate::proxy::pinning::NameCollision],
+    line: &str,
+    span: (usize, usize),
+    entry: &crate::proxy::spoof::PendingEntry,
+    shared: &Shared,
+    tx_out: &mpsc::Sender<String>,
+) -> Option<String> {
+    // Affected tool name → operator-facing why.
+    let mut affected: std::collections::BTreeMap<String, String> = changes
+        .iter()
+        .map(|c| (c.name().to_string(), c.describe()))
+        .collect();
+    for c in collisions {
+        affected.insert(
+            c.incoming.clone(),
+            format!(
+                "NAME COLLISION — folds like pinned tool `{}` (possible visual spoofing)",
+                c.known
+            ),
+        );
+    }
+
+    {
+        let mut blocked = shared.blocked_tools.lock().expect("blocked-tools mutex");
+        for (name, why) in &affected {
+            blocked.entry(name.clone()).or_insert_with(|| why.clone());
+        }
+    }
+    for (name, why) in &affected {
+        eprintln!("agentguard-proxy: DRIFT-TOOL: `{name}` — {why}");
+    }
+
+    match shared.mode {
+        RelayMode::AuditOnly => {
+            eprintln!(
+                "agentguard-proxy: WOULD-FILTER (mode audit-only): {} drifted/colliding tool(s) would be stripped",
+                affected.len()
+            );
+            // Nothing filtered: forward verbatim (host id restored).
+            let _ = tx_out.send(splice_span(line, span, &entry.host_id_raw));
+            None
+        }
+        _ => {
+            // Enforce AND filter-only both FILTER the list; only the call
+            // blocking differs, and that lives on the request side.
+            let msg: Value = serde_json::from_str(line).expect("parsed by caller moments ago");
+            let mut result = msg.get("result").cloned().unwrap_or(Value::Null);
+            if let Some(tools) = result.get_mut("tools").and_then(Value::as_array_mut) {
+                tools.retain(|t| {
+                    t.get("name")
+                        .and_then(Value::as_str)
+                        .is_none_or(|n| !affected.contains_key(n))
+                });
+            }
+            if let Some(obj) = result.as_object_mut() {
+                obj.insert(
+                    "quarantined_tools".to_string(),
+                    Value::Array(affected.keys().map(|n| Value::String(n.clone())).collect()),
+                );
+            }
+            let tpl = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 0,
+                "result": result,
+            })
+            .to_string();
+            let out = match top_level_id_span(&tpl) {
+                IdSpan::Found(s, e) => splice_span(&tpl, (s, e), &entry.host_id_raw),
+                _ => tpl,
+            };
+            let _ = tx_out.send(out);
+            None
+        }
+    }
+}
+
 /// Build the replacement tools/list response the relay sends INSTEAD of a
 /// quarantine-grade manifest: an empty tool list flagged `quarantined` with
 /// the neutralized reason. `host_id_raw` (the client's original id BYTES) is
@@ -863,6 +1034,10 @@ mod tests {
     use crate::proxy::pinning::PinStore;
     use crate::proxy::spoof::PROXY_ID_PREFIX;
     use serde_json::json;
+
+    /// Pinned PREFIX of the drift reason (production rendering lives in
+    /// `PinVerdict::reason`; attribution rides in parentheses after it).
+    const DRIFT_REASON: &str = "tool manifest drift — pin mismatch";
 
     fn temp_store(tag: &str) -> (std::path::PathBuf, PinStore) {
         static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -1092,7 +1267,15 @@ mod tests {
         assert_eq!(v["id"], 2);
         assert_eq!(v["result"]["tools"], json!([]));
         assert_eq!(v["result"]["quarantined"], true);
-        assert_eq!(v["result"]["reason"], DRIFT_REASON);
+        let reason_text = v["result"]["reason"].as_str().unwrap();
+        assert!(
+            reason_text.starts_with(DRIFT_REASON),
+            "legacy prefix preserved: {reason_text}"
+        );
+        assert!(
+            reason_text.contains("`echo` changed"),
+            "rug-pull attribution present: {reason_text}"
+        );
         assert!(shared.quarantined.load(Ordering::SeqCst));
 
         // Untracked/uninteresting lines pass through untouched.
@@ -1410,6 +1593,151 @@ mod tests {
         );
         assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
         assert!(shared.quarantined.load(Ordering::SeqCst));
+    }
+
+    // ---- drift granularity (FASE 5-B mechanism 3) --------------------------
+
+    fn shared_with(mode: RelayMode, granularity: DriftGranularity) -> Shared {
+        Shared {
+            mode,
+            granularity,
+            ..Shared::default()
+        }
+    }
+
+    #[test]
+    fn tool_granularity_strips_drifted_tools_but_session_keeps_flowing() {
+        let (_dir, store) = temp_store("tool-gran");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = shared_with(RelayMode::Enforce, DriftGranularity::Tool);
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+
+        // Pin the honest two-tool manifest.
+        pin_gate.on_list_response(&json!({ "tools": [
+            {"name": "echo", "description": "honest", "inputSchema": {"type": "object"}},
+            {"name": "calc", "description": "calc",   "inputSchema": {"type": "object"}}
+        ]}));
+
+        // Drifted manifest: echo tampered + a spoofing `rn` added; calc intact.
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "1");
+        let line = upstream_response(
+            &pid,
+            json!({ "tools": [
+                {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}},
+                {"name": "rn",   "description": "spoof", "inputSchema": {"type": "object"}},
+                {"name": "calc", "description": "calc",  "inputSchema": {"type": "object"}}
+            ]}),
+        );
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(
+            !shared.quarantined.load(Ordering::SeqCst),
+            "tool granularity must NOT quarantine the session"
+        );
+
+        let out = rx_out.recv().expect("filtered manifest");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["id"], 1);
+        let names: Vec<&str> = v["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, vec!["calc"], "only drifted/colliding tools stripped");
+        let flagged: Vec<&str> = v["result"]["quarantined_tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert!(
+            flagged.contains(&"echo") && flagged.contains(&"rn"),
+            "{flagged:?}"
+        );
+
+        // Calls to the drifted/colliding tools are blocked; calc still flows.
+        let gates = test_gates();
+        let evil_call = r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#;
+        assert!(handle_client_line(evil_call, &shared, &tx_in, &tx_out, &gates).is_none());
+        assert!(
+            rx_in.try_recv().is_err(),
+            "drifted tool call must not forward"
+        );
+        let resp = rx_out.recv().expect("blocked");
+        let rv: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(rv["result"]["isError"], true);
+        assert!(
+            !shared.blocked_tool_reason("calc").is_some(),
+            "intact tool must remain callable"
+        );
+        let ok_call = r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"calc","arguments":{}}}"#;
+        assert!(handle_client_line(ok_call, &shared, &tx_in, &tx_out, &gates).is_none());
+        assert!(rx_in.recv().is_ok(), "intact tool call forwards");
+    }
+
+    #[test]
+    fn tool_granularity_in_filter_only_filters_list_and_logs_would_block() {
+        let (_dir, store) = temp_store("tool-gran-filter");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = shared_with(RelayMode::FilterOnly, DriftGranularity::Tool);
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+
+        pin_gate.on_list_response(&json!({ "tools": [
+            {"name": "echo", "description": "honest", "inputSchema": {"type": "object"}}
+        ]}));
+
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "2");
+        let line = upstream_response(
+            &pid,
+            json!({ "tools": [
+                {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}}
+            ]}),
+        );
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(!shared.quarantined.load(Ordering::SeqCst));
+        let out = rx_out.recv().expect("filtered list");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["result"]["tools"], json!([]));
+
+        // The drifted tool is flagged, but filter-only NEVER blocks calls.
+        let evil_call = r#"{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#;
+        assert!(handle_client_line(evil_call, &shared, &tx_in, &tx_out, &gates_dummy()).is_none());
+        assert!(
+            rx_in.recv().is_ok(),
+            "filter-only forwards even drift-blocked tools"
+        );
+    }
+
+    fn gates_dummy() -> Gates {
+        test_gates()
+    }
+
+    #[test]
+    fn session_granularity_remains_the_untouched_default() {
+        // Default guard: with granularity unset the legacy behavior holds —
+        // full session quarantine on any mismatch.
+        let (_dir, store) = temp_store("session-default");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = shared_with(RelayMode::Enforce, DriftGranularity::Session);
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+
+        pin_gate.on_list_response(&manifest("orig"));
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "3");
+        let line = upstream_response(
+            &pid,
+            json!({ "tools": [
+                {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}}
+            ]}),
+        );
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(shared.quarantined.load(Ordering::SeqCst));
+        let out = rx_out.recv().expect("replacement");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["result"]["tools"], json!([]));
+        assert_eq!(v["result"]["quarantined"], true);
     }
 
     #[test]

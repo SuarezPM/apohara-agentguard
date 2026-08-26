@@ -31,7 +31,9 @@ use clap::Parser;
 
 use apohara_agentguard::proxy::framing::DEFAULT_MAX_LINE_BYTES;
 use apohara_agentguard::proxy::gate::Gates;
-use apohara_agentguard::proxy::relay::{run, RelayConfig, RelayMode, RelayOutcome};
+use apohara_agentguard::proxy::relay::{
+    run, DriftGranularity, RelayConfig, RelayMode, RelayOutcome,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -64,6 +66,12 @@ struct Args {
     /// would-block / would-filter to stderr.
     #[arg(long, value_enum, default_value_t = RelayMode::Enforce)]
     mode: RelayMode,
+
+    /// Blast radius of a manifest drift: `session` (default) quarantines the
+    /// whole session; `tool` strips only the changed/colliding tools from the
+    /// manifest and blocks their calls while the session keeps flowing.
+    #[arg(long, value_enum, default_value_t = DriftGranularity::Session)]
+    drift_granularity: DriftGranularity,
 
     /// Maximum accepted NDJSON line size in bytes (fail-closed above it).
     #[arg(long, value_name = "BYTES", default_value_t = DEFAULT_MAX_LINE_BYTES)]
@@ -112,6 +120,7 @@ fn main() -> ExitCode {
         expected_pin,
         pin_base: None, // resolve via XDG_CONFIG_HOME / HOME (fail-closed if neither is set)
         mode: args.mode,
+        granularity: args.drift_granularity,
     };
 
     match run(cfg, &gates) {

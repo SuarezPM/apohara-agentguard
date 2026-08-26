@@ -355,10 +355,13 @@ fn proxy_e2e_tampered_description_quarantines_and_blocks_calls() {
     assert_eq!(list["id"], 2);
     assert_eq!(list["result"]["tools"], serde_json::json!([]));
     assert_eq!(list["result"]["quarantined"], true);
-    assert_eq!(
-        list["result"]["reason"],
-        "tool manifest drift — pin mismatch"
+    // Legacy wording preserved as the prefix; per-tool attribution appended.
+    let reason = list["result"]["reason"].as_str().unwrap();
+    assert!(
+        reason.starts_with("tool manifest drift — pin mismatch"),
+        "{reason}"
     );
+    assert!(reason.contains("`echo` changed"), "{reason}");
 
     // The next call, issued AFTER the quarantined manifest was delivered, is
     // blocked locally (isError) and never forwarded.
@@ -842,6 +845,113 @@ fn proxy_e2e_enforce_remains_default_mode() {
     assert!(
         !log.iter().any(|l| l.contains("rm -rf")),
         "enforce must block; log={log:?}"
+    );
+}
+
+#[test]
+fn proxy_e2e_tool_granularity_strips_drifted_tools_and_blocks_their_calls() {
+    // FASE 5-B mechanism 3: with --drift-granularity tool a rug-pull only
+    // takes down the affected TOOLS; the rest of the session keeps flowing.
+    let env = Env::new("gran-tool");
+    let tools_a = env.root.join("tools_a.json");
+    let tools_b = env.root.join("tools_b.json");
+    std::fs::write(
+        &tools_a,
+        r#"[
+            {"name":"echo","description":"original","inputSchema":{"type":"object"}},
+            {"name":"calc","description":"calculator","inputSchema":{"type":"object"}}
+        ]"#,
+    )
+    .expect("tools_a");
+    std::fs::write(
+        &tools_b,
+        r#"[
+            {"name":"echo","description":"TAMPERED — evil instructions","inputSchema":{"type":"object"}},
+            {"name":"rn","description":"spoof of pinned `m`-style name","inputSchema":{"type":"object"}},
+            {"name":"m","description":"collides with nothing yet","inputSchema":{"type":"object"}},
+            {"name":"calc","description":"calculator","inputSchema":{"type":"object"}}
+        ]"#,
+    )
+    .expect("tools_b");
+
+    let upstream = env.upstream();
+    let up_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = vec!["--drift-granularity", "tool", "--"];
+    args.extend(up_refs);
+
+    // Run 1 records the honest manifest.
+    let first = run_session(
+        &env,
+        &args,
+        &[("MOCK_TOOLS_FILE", tools_a.to_str().unwrap())],
+        &[init_req(), list_req()],
+    );
+    assert!(first.status.success(), "stderr={}", first.stderr);
+
+    // Run 2: drift strips ONLY the affected tools; calc survives; the call
+    // to the drifted tool is blocked; session exits CLEAN (no quarantine).
+    let mut s = Interactive::spawn(
+        &env,
+        &args,
+        &[("MOCK_TOOLS_FILE", tools_b.to_str().unwrap())],
+    );
+    s.send(&init_req());
+    assert!(s.recv().get("error").is_none());
+
+    s.send(&list_req());
+    let list = s.recv();
+    assert_eq!(list["id"], 2);
+    assert!(
+        list["result"].get("quarantined").is_none(),
+        "session-level quarantine flag must NOT appear: {list}"
+    );
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["calc"],
+        "drifted/colliding tools stripped: {list}"
+    );
+    let flagged: Vec<&str> = list["result"]["quarantined_tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x.as_str().unwrap())
+        .collect();
+    assert!(flagged.contains(&"echo"), "{flagged:?}");
+    assert!(
+        flagged.contains(&"rn"),
+        "fold collision flagged: {flagged:?}"
+    );
+
+    // A call to the drifted tool is blocked; a call to calc still flows.
+    s.send(&call_req(4, "echo", serde_json::json!({"value":"x"})));
+    let blocked_call = s.recv();
+    assert_eq!(blocked_call["id"], 4);
+    assert_eq!(blocked_call["result"]["isError"], true);
+
+    s.send(&call_req(5, "calc", serde_json::json!({"expr":"1+1"})));
+    let ok_call = s.recv();
+    assert_eq!(ok_call["id"], 5);
+    assert_eq!(ok_call["result"]["isError"], false);
+
+    let (status, stderr) = s.finish();
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "tool-granularity session exits 0; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("DRIFT-TOOL"),
+        "per-tool alarm expected; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("QUARANTINE:"),
+        "no session quarantine; stderr={stderr}"
     );
 }
 

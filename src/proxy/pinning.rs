@@ -51,14 +51,22 @@ use sha2::{Digest, Sha256};
 /// Store schema version. Bumped on any incompatible layout change so old
 /// files fail loudly instead of being silently misread.
 ///
-/// **v2** keys pins by an identity digest over the LENGTH-PREFIXED ARGV
+/// **v3** adds per-tool descriptor hashes ([`PinEntry::tool_hashes`]) so a
+/// drifted manifest can be attributed to SPECIFIC tools (rug-pull detection:
+/// which tool's description/schema changed) and so tool-name fold collisions
+/// (visual spoofing, `rn` vs `m`) can be flagged against the KNOWN names.
+///
+/// **v2** keyed pins by an identity digest over the LENGTH-PREFIXED ARGV
 /// VECTOR plus the resolved child CWD (see [`upstream_identity`]); v1 keyed
 /// by a whitespace join of the argv, which collided across element
 /// boundaries (`["a b"]` vs `["a","b"]`) and inherited pins across projects
-/// running the same command string from a different directory. A v1 store is
-/// therefore treated as ABSENT: its entries are never trusted, and everything
-/// is re-recorded under v2 identities with a loud stderr note.
-const STORE_VERSION: u32 = 2;
+/// running the same command string from a different directory.
+///
+/// Legacy stores (v1 AND v2) are treated as ABSENT: their entries are never
+/// trusted, and everything is re-recorded under v3 identities with a loud
+/// stderr note. Re-recording is the safe direction — TOFU first-sighting
+/// alarms re-fire, they never silently pass.
+const STORE_VERSION: u32 = 3;
 
 /// Domain-separation tag prefixed to the upstream identity key material so
 /// hashed argv/cwd bytes can never be confused with another encoding.
@@ -94,10 +102,79 @@ pub struct PinEntry {
     pub upstream_cmd_hash: String,
     /// SHA-256 hex of the canonical tools manifest at last verification.
     pub tools_hash: String,
+    /// Per-tool descriptor hashes at last verification: tool name →
+    /// [`descriptor_hash`] hex. Enables rug-pull attribution (WHICH tool
+    /// changed) and fold-collision detection against known names.
+    #[serde(default)]
+    pub tool_hashes: std::collections::BTreeMap<String, String>,
     /// First-seen timestamp (unix epoch seconds).
     pub first_seen: u64,
     /// Last successful verification timestamp (unix epoch seconds).
     pub last_verified: u64,
+}
+
+/// One attributable change between the stored manifest and the incoming one
+/// (rug-pull attribution: the operator sees WHICH tool moved).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolChange {
+    /// A tool the pin never recorded appeared.
+    Added { name: String, hash: String },
+    /// A pinned tool vanished from the manifest.
+    Removed { name: String, hash: String },
+    /// A pinned tool's descriptor changed in place.
+    Modified {
+        name: String,
+        old_hash: String,
+        new_hash: String,
+    },
+}
+
+impl ToolChange {
+    /// The affected tool name.
+    pub fn name(&self) -> &str {
+        match self {
+            ToolChange::Added { name, .. }
+            | ToolChange::Removed { name, .. }
+            | ToolChange::Modified { name, .. } => name,
+        }
+    }
+
+    /// Human-readable one-liner with short hashes (8 hex chars).
+    pub fn describe(&self) -> String {
+        const SHORT: usize = 8;
+        let short = |h: &str| h.get(..SHORT).unwrap_or(h).to_string();
+        match self {
+            ToolChange::Added { name, hash } => {
+                format!("tool `{name}` added (descriptor sha256:{})", short(hash))
+            }
+            ToolChange::Removed { name, hash } => {
+                format!(
+                    "tool `{name}` removed (was descriptor sha256:{})",
+                    short(hash)
+                )
+            }
+            ToolChange::Modified {
+                name,
+                old_hash,
+                new_hash,
+            } => format!(
+                "tool `{name}` changed (descriptor sha256:{} → {})",
+                short(old_hash),
+                short(new_hash)
+            ),
+        }
+    }
+}
+
+/// An incoming tool name that FOLDS onto a known pinned name while being
+/// byte-different: visual spoofing (`rn` vs `m`, zero-width padding,
+/// homoglyphs). See [`fold`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameCollision {
+    /// The incoming (unverified) tool name.
+    pub incoming: String,
+    /// The pinned tool name it visually collides with.
+    pub known: String,
 }
 
 /// On-disk pin store document.
@@ -122,8 +199,15 @@ pub enum PinVerdict {
     /// Manifest matches the stored pin.
     Matched { hash: String },
     /// Manifest drifted from the stored pin. `expected` is the stored hash,
-    /// `actual` the computed one. Fail-closed: the store is NOT updated.
-    Mismatch { expected: String, actual: String },
+    /// `actual` the computed one; `changes` attributes the drift to specific
+    /// tools and `collisions` flags incoming names that fold onto known
+    /// names (visual spoofing). Fail-closed: the store is NOT updated.
+    Mismatch {
+        expected: String,
+        actual: String,
+        changes: Vec<ToolChange>,
+        collisions: Vec<NameCollision>,
+    },
     /// The operator-supplied pre-seed (`--pin` / `AGENTGUARD_PIN`) does not
     /// match the actual manifest. Immediate quarantine.
     PreseedMismatch { expected: String, actual: String },
@@ -154,9 +238,44 @@ impl PinVerdict {
                 }
             }
             PinVerdict::Matched { hash } => format!("pin matched sha256:{hash}"),
-            PinVerdict::Mismatch { expected, actual } => format!(
-                "tool manifest drift — stored pin sha256:{expected}, actual sha256:{actual}"
-            ),
+            PinVerdict::Mismatch {
+                expected,
+                actual,
+                changes,
+                collisions,
+            } => {
+                // The legacy wording stays as the EXACT prefix; the rug-pull
+                // attribution rides in a parenthesized detail block.
+                let mut detail: Vec<String> = changes.iter().map(ToolChange::describe).collect();
+                for c in collisions {
+                    detail.push(format!(
+                        "tool `{}` NAME COLLISION — folds like pinned tool `{}` \
+                         (possible visual spoofing)",
+                        c.incoming, c.known
+                    ));
+                }
+                if detail.is_empty() {
+                    return format!(
+                        "tool manifest drift — pin mismatch (stored sha256:{expected}, \
+                         actual sha256:{actual}; per-tool attribution unavailable)"
+                    );
+                }
+                // Cap pathological manifests: 6 items verbatim, then a count.
+                const MAX_ITEMS: usize = 6;
+                let mut body = detail
+                    .iter()
+                    .take(MAX_ITEMS)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                if detail.len() > MAX_ITEMS {
+                    body.push_str(&format!(
+                        "; …and {} more changed tool(s)",
+                        detail.len() - MAX_ITEMS
+                    ));
+                }
+                format!("tool manifest drift — pin mismatch ({body})")
+            }
             PinVerdict::PreseedMismatch { expected, actual } => format!(
                 "pre-seeded pin mismatch — expected sha256:{expected}, actual sha256:{actual}"
             ),
@@ -252,14 +371,15 @@ impl PinStore {
         }
 
         // 2. Store logic. Any store-level failure is fail-closed. A legacy
-        //    v1 store is treated as ABSENT (its entries are never trusted);
-        //    re-recording carries a loud note instead.
+        //    store (v1/v2) is treated as ABSENT (its entries are never
+        //    trusted); re-recording carries a loud note instead.
         let (mut doc, legacy_note) = match self.load() {
             Ok(pair) => pair,
             Err(reason) => return PinVerdict::StoreUnavailable { reason },
         };
         let key = hash_hex(upstream_identity.as_bytes());
         let now = unix_now();
+        let actual_tools = tool_descriptor_hashes(tools_result);
         if let Some(entry) = doc.pins.iter_mut().find(|e| e.upstream_cmd_hash == key) {
             if entry.tools_hash == actual {
                 entry.last_verified = now;
@@ -268,14 +388,21 @@ impl PinStore {
                 let _ = self.store(&doc);
                 return PinVerdict::Matched { hash: actual };
             }
+            // Rug-pull attribution: diff per-tool descriptors, then flag any
+            // incoming name that folds onto a KNOWN pinned name.
+            let changes = diff_tool_changes(&entry.tool_hashes, &actual_tools);
+            let collisions = find_name_collisions(&entry.tool_hashes, tools_result);
             return PinVerdict::Mismatch {
                 expected: entry.tools_hash.clone(),
                 actual,
+                changes,
+                collisions,
             };
         }
         doc.pins.push(PinEntry {
             upstream_cmd_hash: key,
             tools_hash: actual.clone(),
+            tool_hashes: actual_tools,
             first_seen: now,
             last_verified: now,
         });
@@ -314,7 +441,8 @@ impl PinStore {
         match doc.version {
             STORE_VERSION => Ok((doc, None)),
             // Legacy v1: whitespace-join argv keys + no cwd scoping — entries
-            // are meaningless under v2 identity rules. Ignore, never trust.
+            // are meaningless under modern identity rules. Ignore, never
+            // trust.
             1 => Ok((
                 PinStoreDoc {
                     version: STORE_VERSION,
@@ -323,6 +451,22 @@ impl PinStore {
                 Some(
                     "legacy v1 pin store ignored (pre-cwd-scoping format) — \
                      all upstreams re-recorded as first sightings"
+                        .to_string(),
+                ),
+            )),
+            // Legacy v2: no per-tool descriptor hashes — rug-pull attribution
+            // would be impossible against its entries. Ignore, never trust;
+            // re-recording re-fires TOFU first-sighting alarms (safe
+            // direction) and rebuilds per-tool baselines.
+            2 => Ok((
+                PinStoreDoc {
+                    version: STORE_VERSION,
+                    pins: Vec::new(),
+                },
+                Some(
+                    "legacy v2 pin store ignored (no per-tool hashes for \
+                     drift attribution) — all upstreams re-recorded as first \
+                     sightings"
                         .to_string(),
                 ),
             )),
@@ -433,6 +577,164 @@ fn pin_subset(tool: &Value) -> Value {
         }
     }
     Value::Object(m)
+}
+
+/// Per-tool rug-pull descriptor: exactly `{name, description, inputSchema}`
+/// (spec-pinned; `outputSchema` stays manifest-only). Canonicalized with the
+/// same sort-keys-recursive discipline as the full manifest.
+fn canonical_tool_descriptor(tool: &Value) -> String {
+    let mut m = Map::new();
+    for key in ["name", "description", "inputSchema"] {
+        if let Some(v) = tool.get(key) {
+            m.insert(key.to_string(), v.clone());
+        }
+    }
+    let mut value = Value::Object(m);
+    sort_keys_recursively(&mut value);
+    serde_json::to_string(&value).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// SHA-256 of one tool's canonical [`canonical_tool_descriptor`].
+pub fn descriptor_hash(tool: &Value) -> String {
+    hash_hex(canonical_tool_descriptor(tool).as_bytes())
+}
+
+/// Descriptor hashes for EVERY tool in a tools/list result, keyed by raw
+/// name. Tools without a usable name are skipped (nothing to attribute).
+pub fn tool_descriptor_hashes(tools_result: &Value) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    if let Some(tools) = tools_result.get("tools").and_then(Value::as_array) {
+        for tool in tools {
+            if let Some(name) = tool.get("name").and_then(Value::as_str) {
+                out.insert(name.to_string(), descriptor_hash(tool));
+            }
+        }
+    }
+    out
+}
+
+/// Diff stored vs incoming descriptor maps into attributable changes.
+fn diff_tool_changes(
+    stored: &std::collections::BTreeMap<String, String>,
+    actual: &std::collections::BTreeMap<String, String>,
+) -> Vec<ToolChange> {
+    let mut changes = Vec::new();
+    for (name, old_hash) in stored {
+        match actual.get(name) {
+            None => changes.push(ToolChange::Removed {
+                name: name.clone(),
+                hash: old_hash.clone(),
+            }),
+            Some(new_hash) if new_hash != old_hash => changes.push(ToolChange::Modified {
+                name: name.clone(),
+                old_hash: old_hash.clone(),
+                new_hash: new_hash.clone(),
+            }),
+            Some(_) => {}
+        }
+    }
+    for (name, hash) in actual {
+        if !stored.contains_key(name) {
+            changes.push(ToolChange::Added {
+                name: name.clone(),
+                hash: hash.clone(),
+            });
+        }
+    }
+    changes.sort_by(|a, b| a.name().cmp(b.name()));
+    changes
+}
+
+/// Flag incoming tool names that FOLD onto a known pinned name while being
+/// byte-different — visual spoofing (`rn` vs `m`). Only names that are NOT
+/// exact matches of a known name can collide (an identical raw name is the
+/// legitimate tool, judged by descriptor hashes instead).
+fn find_name_collisions(
+    stored: &std::collections::BTreeMap<String, String>,
+    tools_result: &Value,
+) -> Vec<NameCollision> {
+    let mut out = Vec::new();
+    if let Some(tools) = tools_result.get("tools").and_then(Value::as_array) {
+        for tool in tools {
+            let Some(incoming) = tool.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            for known in stored.keys() {
+                if known != incoming && fold(known) == fold(incoming) {
+                    out.push(NameCollision {
+                        incoming: incoming.to_string(),
+                        known: known.clone(),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Fold a tool name for collision detection:
+/// 1. strip INVISIBLE/bidi characters (zero-widths U+200B–200F, bidi
+///    controls U+202A–202E / U+2060–2064, soft hyphen, BOM),
+/// 2. lowercase (full Unicode),
+/// 3. minimal compatibility/confusable folding.
+///
+/// **Minimal table this phase** (documented residual, future work = full
+/// NFKC + Unicode TR39 confusables): the classic `rn` → `m` shape,
+/// Cyrillic/Greek homoglyph letters onto their Latin twins, and fullwidth
+/// ASCII (U+FF01–FF5E) onto plain ASCII. A full confusables table is NOT
+/// implemented here by design — the goal is catching the cheap spoofs, not
+/// exhaustive skeleton normalization.
+///
+/// Note NFKC alone would NOT catch `rn`↔`m` (they are confusable, not
+/// canonically equivalent) — hence the explicit pair.
+pub fn fold(name: &str) -> String {
+    let stripped: String = name.chars().filter(|c| !is_invisible_char(*c)).collect();
+    let lowered = stripped.to_lowercase();
+    let chars: Vec<char> = lowered.chars().collect();
+    let mut out = String::with_capacity(lowered.len());
+    let mut i = 0;
+    while i < chars.len() {
+        // Multi-char confusable first: r n → m.
+        if chars[i] == 'r' && i + 1 < chars.len() && chars[i + 1] == 'n' {
+            out.push('m');
+            i += 2;
+            continue;
+        }
+        out.push(compat_fold_char(chars[i]));
+        i += 1;
+    }
+    out
+}
+
+/// Characters that vanish before folding (invisible formatting + bidi).
+fn is_invisible_char(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x00AD | 0x200B..=0x200F | 0x202A..=0x202E | 0x2060..=0x2064 | 0xFEFF
+    )
+}
+
+/// Single-char compatibility fold (see [`fold`] for scope).
+fn compat_fold_char(c: char) -> char {
+    let u = c as u32;
+    if (0xFF01..=0xFF5E).contains(&u) {
+        // Fullwidth ASCII forms → ASCII (NFKC-lite via fixed offset).
+        return char::from_u32(u - 0xFEE0).unwrap_or(c);
+    }
+    match c {
+        // Cyrillic homoglyphs onto Latin twins.
+        'а' => 'a',
+        'е' => 'e',
+        'о' => 'o',
+        'р' => 'p',
+        'с' => 'c',
+        'х' => 'x',
+        'у' => 'y',
+        // Ukrainian і and Greek omicron/ι look-alikes.
+        '\u{0456}' => 'i', // і
+        'ο' => 'o',        // omicron
+        _ => c,
+    }
 }
 
 /// Recursively sort object keys in place (see `canonical_tools_json`).
@@ -591,12 +893,19 @@ mod tests {
         let tampered = tools_result(&[("echo", "EVIL")]);
         let v3 = store.verify_or_record("python3 srv.py", &tampered, None);
         match &v3 {
-            PinVerdict::Mismatch { expected, actual } => {
+            PinVerdict::Mismatch {
+                expected,
+                actual,
+                changes,
+                ..
+            } => {
                 let PinVerdict::Recorded { hash, .. } = &v1 else {
                     panic!("unreachable shape")
                 };
                 assert_eq!(expected, hash, "expected carries the STORED hash");
                 assert_ne!(actual, hash);
+                assert_eq!(changes.len(), 1, "{changes:?}");
+                assert_eq!(changes[0].name(), "echo", "drift attributed to `echo`");
             }
             other => panic!("drift must mismatch, got {other:?}"),
         }
@@ -729,7 +1038,7 @@ mod tests {
         // matches normally with no note.
         let stored: Value =
             serde_json::from_str(&fs::read_to_string(store.path()).expect("read")).unwrap();
-        assert_eq!(stored["version"], 2);
+        assert_eq!(stored["version"], 3);
         let second = store.verify_or_record("srv-identity", &r, None);
         assert!(matches!(&second, PinVerdict::Matched { .. }), "{second:?}");
     }
@@ -812,5 +1121,208 @@ mod tests {
             Some(PathBuf::from("/home/.config"))
         );
         assert_eq!(config_base_from(Some(OsStr::new("")), None), None);
+    }
+
+    // ---- per-tool rug-pull detection (FASE 5-B mechanism 3) ----------------
+
+    fn two_tool_result() -> Value {
+        json!({ "tools": [
+            {"name": "echo", "description": "Echoes input", "inputSchema": {"type": "object"}},
+            {"name": "calc", "description": "Calculator", "inputSchema": {"type": "object", "properties": {"expr": {"type": "string"}}}}
+        ]})
+    }
+
+    #[test]
+    fn descriptor_hash_covers_name_description_schema_only() {
+        let base = json!({"name":"t","description":"d","inputSchema":{"type":"object"}});
+        let h = descriptor_hash(&base);
+        assert_eq!(
+            h,
+            descriptor_hash(&json!({"description":"d","name":"t","inputSchema":{"type":"object"}})),
+            "key order must not matter"
+        );
+
+        let mut with_extras = base.clone();
+        with_extras["annotations"] = json!({"readOnlyHint": true});
+        with_extras["outputSchema"] = json!({"type": "object"});
+        with_extras["title"] = json!("T");
+        assert_eq!(
+            h,
+            descriptor_hash(&with_extras),
+            "outputSchema/annotations/title are NOT part of the per-tool descriptor"
+        );
+
+        let schema_tweak = json!({"name":"t","description":"d","inputSchema":{"type":"object","properties":{"x":{"type":"string"}}}});
+        assert_ne!(
+            h,
+            descriptor_hash(&schema_tweak),
+            "inputSchema drift must change the hash"
+        );
+        assert_ne!(
+            h,
+            descriptor_hash(&json!({"name":"t","description":"D","inputSchema":{"type":"object"}})),
+            "description drift must change the hash"
+        );
+    }
+
+    #[test]
+    fn v3_store_persists_per_tool_hashes() {
+        let base = TempBase::new("v3-toolhashes");
+        let store = PinStore::open(&base.0);
+        let v = store.verify_or_record("srv", &two_tool_result(), None);
+        assert!(matches!(v, PinVerdict::Recorded { .. }), "{v:?}");
+        let stored: Value =
+            serde_json::from_str(&fs::read_to_string(store.path()).expect("read")).unwrap();
+        assert_eq!(stored["version"], 3);
+        let tool_hashes = stored["pins"][0]["tool_hashes"]
+            .as_object()
+            .expect("per-tool map stored");
+        assert_eq!(tool_hashes.len(), 2, "{tool_hashes:?}");
+        let expected_echo = descriptor_hash(&two_tool_result()["tools"][0]);
+        assert_eq!(tool_hashes["echo"], serde_json::json!(expected_echo));
+    }
+
+    #[test]
+    fn drift_attribution_names_the_changed_added_and_removed_tools() {
+        let base = TempBase::new("attribution");
+        let store = PinStore::open(&base.0);
+        store.verify_or_record("srv", &two_tool_result(), None);
+
+        // echo MODIFIED in place; calc REMOVED; evil ADDED.
+        let tampered = json!({ "tools": [
+            {"name": "echo", "description": "EVIL — exfiltrate", "inputSchema": {"type": "object"}},
+            {"name": "evil", "description": "new", "inputSchema": {"type": "object"}}
+        ]});
+        let v = store.verify_or_record("srv", &tampered, None);
+        let PinVerdict::Mismatch {
+            changes,
+            collisions,
+            ..
+        } = &v
+        else {
+            panic!("mismatch expected: {v:?}")
+        };
+        assert!(collisions.is_empty(), "{collisions:?}");
+
+        let by_kind = |name: &str| {
+            changes
+                .iter()
+                .find(|c| c.name() == name)
+                .unwrap_or_else(|| panic!("no change for {name}: {changes:?}"))
+        };
+        assert!(matches!(by_kind("echo"), ToolChange::Modified { .. }));
+        assert!(matches!(by_kind("calc"), ToolChange::Removed { .. }));
+        assert!(matches!(by_kind("evil"), ToolChange::Added { .. }));
+        assert_eq!(changes.len(), 3);
+
+        // The reason string carries the attribution (short hashes included).
+        let reason = v.reason();
+        assert!(reason.starts_with(DRIFT_PREFIX), "{reason}");
+        assert!(reason.contains("`echo` changed"), "{reason}");
+        assert!(reason.contains("`calc` removed"), "{reason}");
+        assert!(reason.contains("`evil` added"), "{reason}");
+        assert!(reason.contains("sha256:"), "{reason}");
+    }
+
+    /// The legacy wording every downstream consumer pins to.
+    const DRIFT_PREFIX: &str = "tool manifest drift — pin mismatch";
+
+    #[test]
+    fn fold_collision_detects_rn_vs_m_visual_spoofing() {
+        let base = TempBase::new("rn-m");
+        let store = PinStore::open(&base.0);
+        store.verify_or_record(
+            "srv",
+            &json!({ "tools": [
+                {"name": "m", "description": "legit", "inputSchema": {"type": "object"}}
+            ]}),
+            None,
+        );
+        // The rug-pull: same visual shape, different bytes.
+        let spoofed = json!({ "tools": [
+            {"name": "m",  "description": "legit", "inputSchema": {"type": "object"}},
+            {"name": "rn", "description": "spoof", "inputSchema": {"type": "object"}}
+        ]});
+        let v = store.verify_or_record("srv", &spoofed, None);
+        let PinVerdict::Mismatch {
+            collisions,
+            changes,
+            ..
+        } = &v
+        else {
+            panic!("mismatch expected: {v:?}")
+        };
+        assert_eq!(
+            collisions,
+            &[NameCollision {
+                incoming: "rn".to_string(),
+                known: "m".to_string(),
+            }],
+            "rn↔m collision must be flagged"
+        );
+        assert!(
+            !changes.is_empty(),
+            "the spoofing tool also shows up as an Added change"
+        );
+        let reason = v.reason();
+        assert!(reason.contains("NAME COLLISION"), "{reason}");
+        assert!(reason.contains("folds like pinned tool `m`"), "{reason}");
+        assert!(reason.contains("visual spoofing"), "{reason}");
+    }
+
+    #[test]
+    fn fold_collisions_catch_zero_width_padding_and_homoglyphs() {
+        // Zero-width joiner padding a pinned name.
+        let padded = "m\u{200b}";
+        assert_ne!(padded, "m");
+        assert_eq!(fold(padded), fold("m"));
+        // Cyrillic 'о' inside an otherwise-Latin name.
+        assert_ne!("f\u{043E}ld", "fold");
+        assert_eq!(fold("f\u{043E}ld"), fold("fold"));
+        // Fullwidth ASCII.
+        assert_eq!(fold("\u{FF4D}\u{FF50}"), "mp");
+        // Uppercase RN folds like m too (lowercase first).
+        assert_eq!(fold("RN"), fold("m"));
+        // Distinct names stay distinct.
+        assert_ne!(fold("read"), fold("mread"));
+    }
+
+    #[test]
+    fn legacy_v2_store_is_ignored_and_rerecorded_with_note() {
+        let base = TempBase::new("legacy-v2");
+        let store = PinStore::open(&base.0);
+        fs::create_dir_all(store.path().parent().unwrap()).expect("dir");
+        let r = tools_result(&[("echo", "honest")]);
+        let v2doc = serde_json::json!({
+            "version": 2,
+            "pins": [{
+                "upstream_cmd_hash": hash_hex(b"python3 srv.py"),
+                "tools_hash": hash_hex(b"old-manifest"),
+                "first_seen": 1,
+                "last_verified": 1
+            }]
+        });
+        fs::write(
+            store.path(),
+            serde_json::to_string_pretty(&v2doc).expect("serialize v2"),
+        )
+        .expect("write v2 store");
+
+        let first = store.verify_or_record("srv-identity", &r, None);
+        match &first {
+            PinVerdict::Recorded { note, .. } => {
+                let note = note.as_deref().expect("note required");
+                assert!(note.contains("legacy v2"), "{note}");
+                assert!(note.contains("re-recorded"), "{note}");
+            }
+            other => panic!("v2 entries must be ignored ⇒ Recorded, got {other:?}"),
+        }
+        let stored: Value =
+            serde_json::from_str(&fs::read_to_string(store.path()).expect("read")).unwrap();
+        assert_eq!(stored["version"], 3);
+        assert!(
+            stored["pins"][0]["tool_hashes"].is_object(),
+            "v3 layout written"
+        );
     }
 }
