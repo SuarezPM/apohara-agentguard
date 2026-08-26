@@ -7,7 +7,7 @@ Set FontSize 18
 Set Theme "Catppuccin Mocha"
 
 # Seed PATH so the shell finds the release binary
-Type `export PATH="/home/thelinconx/Proyectos/Repos/apohara-agentguard/target/release:$PATH"`
+Type `export PATH="$PWD/target/release:$PATH"`
 Enter
 Sleep 500ms
 
