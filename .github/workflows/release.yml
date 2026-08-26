@@ -4,10 +4,12 @@ name: Release
 # and emits a SHA256 manifest of the artifacts. Each binary carries an
 # embedded dependency inventory (SBOM) injected by cargo-auditable at BUILD
 # time — strictly upstream of SHA256 hashing and SLSA attestation, so hashes
-# and provenance describe exactly the shipped bytes. It does NOT auto-publish:
-# tag creation, GitHub Release submission, and crates.io/npm publish are left
-# to a maintainer. Trigger manually (workflow_dispatch) or on a v* tag to
-# assemble the artifact set for review.
+# and provenance describe exactly the shipped bytes. The review bundle
+# additionally carries a CycloneDX SBOM (cargo-cyclonedx) and a keyless
+# Sigstore signature bundle (.sigstore.json) per shipped binary. It does NOT
+# auto-publish: tag creation, GitHub Release submission, and crates.io/npm
+# publish are left to a maintainer (RELEASING.md). Trigger manually
+# (workflow_dispatch) or on a v* tag to assemble the artifact set for review.
 
 on:
   workflow_dispatch:
@@ -291,22 +293,55 @@ jobs:
             echo "::group::verify $bin"
             gh attestation verify "$bin" -R SuarezPM/apohara-agentguard
             echo "::endgroup::"
-          done < <(find artifacts -type f -name 'apohara-agentguard-*' ! -name '*.sha256' -print0)
+          done < <(find artifacts -type f -name 'apohara-agentguard-*' ! -name '*.sha256' ! -name '*.sigstore.json' ! -name '*.intoto.jsonl' -print0)
           if [ "$found" -eq 0 ]; then
             echo "::error::no binaries found to verify" >&2
             exit 1
           fi
           echo "verified $found attested binaries"
 
+  # Bundle assembly + supply-chain hardening. id-token: write is scoped HERE
+  # ONLY, for the keyless Sigstore signing of the staged binaries below; build
+  # jobs stay permissionless (SLSA L3 provenance remains isolated in `attest`,
+  # which declares its own scopes).
   manifest:
     name: assemble SHA256 manifest
     needs: [build, third-party-licenses]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
+
+      - name: Install cargo-cyclonedx
+        uses: taiki-e/install-action@c93ccc03e00cd0e08e494f5fd058a6c55a6a1907 # v2
+        with:
+          tool: cargo-cyclonedx
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Standalone CycloneDX 1.5 SBOM generated from the committed lockfile —
+      # complements the embedded cargo-auditable inventory inside each binary.
+      # Generated BEFORE hashing so SHA256SUMS covers the exact shipped bytes.
+      - name: Generate CycloneDX SBOM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo cyclonedx
+          f="$(find . -name 'apohara-agentguard.cdx.json' ! -path './.git/*' | head -n 1)"
+          if [ -z "$f" ]; then
+            echo "::error::cargo-cyclonedx produced no apohara-agentguard.cdx.json" >&2
+            exit 1
+          fi
+          mkdir -p release
+          mv "$f" release/apohara-agentguard.cdx.json
+
       - name: Build combined SHA256SUMS
         shell: bash
         run: |
@@ -332,13 +367,33 @@ jobs:
               shasum -a 256 "$f" >> SHA256SUMS
             fi
           done
-          if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum agentguard-packs.tar.gz >> SHA256SUMS
-          else
-            shasum -a 256 agentguard-packs.tar.gz >> SHA256SUMS
-          fi
+          for extra in agentguard-packs.tar.gz apohara-agentguard.cdx.json; do
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum "$extra" >> SHA256SUMS
+            else
+              shasum -a 256 "$extra" >> SHA256SUMS
+            fi
+          done
           echo "----- SHA256SUMS -----"
           cat SHA256SUMS
+
+      # Keyless Sigstore signatures over every binary in the bundle (main +
+      # proxy, all targets). Complements the SLSA provenance attestations from
+      # the isolated `attest` job with a portable per-file verification bundle;
+      # signing never modifies the hashed bytes.
+      - name: Sign bundle binaries (keyless Sigstore)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          for f in apohara-agentguard-* agentguard-proxy-*; do
+            case "$f" in
+              *.sha256|*.cdx.json|*.sigstore.json) continue ;;
+            esac
+            cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+          done
+          ls -1 ./*.sigstore.json
+
       - name: Upload release bundle (for maintainer review — NOT auto-published)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
