@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "apohara-agentguard",
   "displayName": "apohara-agentguard",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Deterministic, offline, no-model safety hook + local seccomp+Landlock sandbox + input firewall for Claude Code.",
   "author": {
     "name": "Pablo (SuarezPM)",

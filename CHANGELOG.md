@@ -5,6 +5,43 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-08-26
+
+### Fixed
+
+- **Gate decodes `printf` hex-escape payloads piped to a shell** (hexesc):
+  `printf '\x…' | sh` smuggling — where every byte of a destructive command
+  arrives as a hex escape and the payload only materializes inside the spawned
+  shell — is now normalized before scanning; the perturbation benchmark holds
+  100% mean detection with the false-positive rate unchanged.
+- **WorkspaceWrite sandbox allows `vfork`**: GCC's collect2 linker driver
+  spawns its children via `vfork`, which the default-deny seccomp profile did
+  not list, so link steps died under enforcement. The empirical sandbox
+  baseline (`tests/sandbox_build_e2e.rs`: `cargo build` / `node -e` /
+  `go run` exit 0) is preserved as the non-regression gate.
+
+### Added
+
+- **Reverse-shell community pack ships as a release asset**
+  (`agentguard-packs.tar.gz`): the release bundle carries the flat
+  `packs-community/*.toml` set with its own SHA256SUMS entry, and
+  `packaging/install.sh` fetches, path-validates (no absolute paths, no `..`
+  components), and extracts it into `$PREFIX/packs` — opt-in packs install
+  alongside the binary without cloning the repo.
+- **Public benchmark campaign results documented**
+  ([BENCHMARK.md](BENCHMARK.md)): external campaign #1 recorded —
+  perturbation-class mean detection at 100%, false-positive rate unchanged.
+
+### Changed
+
+- **Single-source release versioning** (`scripts/sync-version.sh`): the
+  Cargo.toml `[package]` version propagates to the plugin manifest,
+  marketplace listing, installer default, npm wrapper, and npx launcher —
+  idempotent, loud on any missing pattern. `packaging/plugin.json` had
+  drifted to 0.1.0; it now tracks the crate version like every other surface
+  (`tests/readme_sync.rs::version_sync_across_manifests` asserts the same
+  invariant from the Rust side).
+
 ## [0.4.0] - 2026-08-23
 
 ### Added
@@ -210,7 +247,8 @@ safety layer for AI coding agents: one Rust binary, no network at scan time.
 - **Dual license**: MIT OR Apache-2.0; third-party licenses enumerated in
   `THIRD-PARTY-LICENSES` and gated by `cargo deny check licenses`.
 
-[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.1.0...v0.2.0
