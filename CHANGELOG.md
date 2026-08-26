@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-08-26
+
+### Added
+
+- Firewall: Unicode normalization suite U1-U4 (strip ANSI/bidi/tag → NFKC → skeleton 136 pares, [normalized-match] marking)
+- Firewall: Parametric URL exfiltration detector (sev 7/8/9, no regex ReDoS-safe)
+- Proxy: Graduated modes --mode enforce|filter-only|audit-only + banner
+- Proxy: Request-id anti-spoofing (opaque relay-minted ids, pending/recent TTL, -32002 saturation)
+- Proxy: Per-tool rug-pull detection (descriptor hashes, fold collisions, --drift-granularity session|tool)
+- Proxy: Atomic pin-store persistence (flock RMW + dir fsync, 0600)
+- Harness: Unified --harness contract (5 hosts) + windsurf/cursor/antigravity adapters (8 hosts total)
+
+### Fixed
+
+- B1 char-boundary clamp on URL cap (U+00E9 multibyte panic)
+- B2 verbatim client responses (server-initiated requests)
+- B3 empty-attribution drift escalation
+- B4 U+034F CGJ invisibility
+- Harness: fallback ox->muse-spark via /responses (deepseek banned)
+
+### Measured
+
+- QuasarNix: 100% mean perturbations (0 regression, hexesc 100%, FPR 4.18e-2)
+- hook_latency: benign p50 1.413µs / blocked 2.214µs / injection 862ns
+- MCPTox ON+policy muse-spark: strict 16.9% ASR (221/1305, FP 0.84% 3/357) / conservative 18.9% (247/1306, FP 0%) — clean single-model (1+2 Error transport residual)
+
 ## [0.4.1] - 2026-08-26
 
 ### Fixed
@@ -247,7 +273,8 @@ safety layer for AI coding agents: one Rust binary, no network at scan time.
 - **Dual license**: MIT OR Apache-2.0; third-party licenses enumerated in
   `THIRD-PARTY-LICENSES` and gated by `cargo deny check licenses`.
 
-[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.2.0...v0.3.0
