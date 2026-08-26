@@ -217,7 +217,7 @@ also unchanged: same operating point, same known false-positive classes.
 Closes backlog item #4 for the MCP transport proxy. The ON-default condition had
 already confirmed default-allow behavior on MCPTox (ASR 26.3% = OFF). This run adds
 an **ad-hoc TOML policy written with knowledge of the corpus** — deliberate overfit,
-declared up front: 21 per-tool rules over patternable arguments (sensitive paths,
+declared up front: 24 rules across 17 tools over patternable arguments (sensitive paths,
 sentinel UIDs, credential search, the malicious domain, SQL exfil/DoS, destructive
 tools by name, injection in the `code`/`task` keys). It is a **measured best-case
 reference** of what a deterministic transport proxy achieved *here* — not a proven

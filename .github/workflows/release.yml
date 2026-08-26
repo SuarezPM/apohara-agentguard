@@ -164,10 +164,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          # Both declared [[bin]] targets ship in every bundle: cargo-binstall
-          # hard-fails the install if any bin of the crate is missing from the
-          # resolved package (BinFileNotFound), so agentguard-proxy rides
-          # with the main binary under the same <bin>-<target> naming.
+          # Both declared [[bin]] targets ship in every bundle: agentguard-proxy
+          # rides with the main binary under the same <bin>-<target> naming so
+          # direct-download and tap channels can fetch it standalone.
           cp "target/${{ matrix.target }}/release/apohara-agentguard${{ matrix.ext }}" \
              "dist/apohara-agentguard-${{ matrix.target }}${{ matrix.ext }}"
           cp "target/${{ matrix.target }}/release/agentguard-proxy${{ matrix.ext }}" \

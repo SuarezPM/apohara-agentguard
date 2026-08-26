@@ -38,8 +38,8 @@ Expected bundle contents:
 * v0.4.1 baseline (12 files): 7 × `apohara-agentguard-<triple>[.exe]`,
   `plugin.json`, `hooks.json`, `THIRD-PARTY-LICENSES`,
   `agentguard-packs.tar.gz`, `SHA256SUMS`
-* from v0.5 on (34 files): the above plus 7 × `agentguard-proxy-<triple>[.exe]`
-  (required by cargo-binstall metadata), 1 × `apohara-agentguard.cdx.json`
+* from v0.5 on (34 files): the above plus 7 × `agentguard-proxy-<triple>[.exe]`,
+  1 × `apohara-agentguard.cdx.json`
   (CycloneDX SBOM), and one `.sigstore.json` keyless signature per binary (14).
 
 ## 3. Tag the exact reviewed SHA, then create the GitHub Release
