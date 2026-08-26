@@ -22,8 +22,21 @@
 //! posture. [`scan_surface`] (US-008, C1) wraps it with per-surface posture —
 //! which surfaces may BLOCK, which are WARN-only, and which obtain their content
 //! out-of-band via [`refetch`] before scanning.
-
+//!
+//! # Staged Unicode normalization (FASE 5-A, Feature A)
+//!
+//! ASCII-oriented rules miss payloads dressed up with terminal escapes,
+//! zero-width/bidi characters, compatibility forms (`ｉｇｎore`, 𝐢𝐠𝐧) or
+//! homoglyph lookalikes (`іgnore` with a Cyrillic і). When the raw scan finds
+//! NOTHING, [`normalize`] escalates through U1..U4 (escape strip → invisible
+//! strip → NFKC-subset compat fold → mixed-script confusable skeleton); if the
+//! text actually changed, it is rescanned and any hit is reported with a
+//! `[normalized-match]` marker. Normalization NEVER blocks by itself: a Block
+//! always requires a pattern hit on one of the two passes. Defaults ON with
+//! no config keys this phase (F6 evaluates toggles).
+//!
 mod djl;
+mod normalize;
 mod owasp;
 pub mod refetch;
 mod two_stage;
@@ -184,15 +197,25 @@ impl PreMatch {
 /// via [`severity_to_tier`] with the supplied [`Thresholds`]. The `reason`
 /// names the highest-severity matching rule for traceability.
 ///
+/// Two-pass flow (FASE 5-A): the raw text is scored first; only when that
+/// finds nothing AND staged normalization (U1..U4) actually changed the text
+/// is the normalized form scored, with hits marked `[normalized-match]`.
+/// Normalization alone never produces a verdict.
+///
 /// Surface-agnostic: it scores text only. Per-surface posture (which surfaces may
 /// BLOCK vs WARN, and out-of-band fetching) lives in [`scan_surface`].
 pub fn scan_content(text: &str, thresholds: &Thresholds) -> Verdict {
-    let mut top: Option<(&'static str, u8)> = None;
-    let mut consider = |id: &'static str, sev: u8| {
-        if top.is_none_or(|(_, s)| sev > s) {
-            top = Some((id, sev));
-        }
-    };
+    two_pass_scan(text, thresholds)
+}
+
+/// One scoring pass over `text`: max severity across the regex rule set.
+/// `None` = clean.
+///
+/// Mirrors the original single-pass aggregation: strictly-greater severities
+/// replace the current top (ties keep the first hit), so behavior for raw
+/// scans is byte-identical to pre-FASE-5A.
+fn score_once(text: &str) -> Option<(u8, String)> {
+    let mut top: Option<(u8, String)> = None;
 
     // Single pre-match pass over the direct-regex DJL + OWASP patterns AND the
     // broad stage-1 gates of the two-stage rules. Each candidate rule is
@@ -203,25 +226,51 @@ pub fn scan_content(text: &str, thresholds: &Thresholds) -> Verdict {
         // lookaround-equivalent post-validator before scoring. For every other
         // entry the pre-match hit IS the rule match.
         if !hit.two_stage || two_stage::matches(hit.id, text) {
-            consider(hit.id, hit.severity);
+            let better = top.as_ref().is_none_or(|(sev, _)| hit.severity > *sev);
+            if better {
+                top = Some((
+                    hit.severity,
+                    format!(
+                        "firewall rule {} matched (severity {})",
+                        hit.id, hit.severity
+                    ),
+                ));
+            }
         }
     });
 
-    match top {
-        None => Verdict::allow(),
-        Some((id, sev)) => {
-            let reason = format!("firewall rule {id} matched (severity {sev})");
-            // `severity_to_tier` returns only Allow/Warn/Block by design —
-            // `Ask` is a POLICY decision, not a severity-tier mapping. v0.3
-            // F3' sub-step: severity_to_tier is UNCHANGED for Ask.
-            match severity_to_tier(sev, thresholds) {
-                Tier::Block => Verdict::block(reason),
-                Tier::Warn => Verdict::warn(reason),
-                Tier::Allow => Verdict::allow(),
-                Tier::Ask => unreachable!("severity_to_tier never returns Ask"),
-            }
+    top
+}
+
+/// Map a scoring result to a [`Verdict`], tagging second-pass hits.
+fn verdict_from(hit: (u8, String), thresholds: &Thresholds, normalized_match: bool) -> Verdict {
+    let (sev, mut reason) = hit;
+    if normalized_match {
+        reason.push_str(" [normalized-match]");
+    }
+    // `severity_to_tier` returns only Allow/Warn/Block by design —
+    // `Ask` is a POLICY decision, not a severity-tier mapping.
+    match severity_to_tier(sev, thresholds) {
+        Tier::Block => Verdict::block(reason),
+        Tier::Warn => Verdict::warn(reason),
+        Tier::Allow => Verdict::allow(),
+        Tier::Ask => unreachable!("severity_to_tier never returns Ask"),
+    }
+}
+
+/// Shared engine behind [`scan_content`]: raw pass first,
+/// then — only if clean and normalization changed something — one normalized
+/// rescan tagged `[normalized-match]`.
+fn two_pass_scan(text: &str, thresholds: &Thresholds) -> Verdict {
+    if let Some(hit) = score_once(text) {
+        return verdict_from(hit, thresholds, false);
+    }
+    if let Cow::Owned(normalized) = normalize::pipeline(text) {
+        if let Some(hit) = score_once(&normalized) {
+            return verdict_from(hit, thresholds, true);
         }
     }
+    Verdict::allow()
 }
 
 /// The payload a surface delivers to the firewall.
