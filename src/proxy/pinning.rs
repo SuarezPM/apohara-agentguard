@@ -31,9 +31,19 @@
 //! re-pinning is scoped to the exact server invocation IN ONE PROJECT
 //! DIRECTORY: the same command string from a different cwd is a different
 //! upstream with its own first-sighting alarm, and argv element boundaries
-//! can never collide. The file is written 0600 (unix) and fsync'd before the
-//! atomic rename. Format version 2; a legacy v1 store is treated as absent
-//! (entries re-recorded with a stderr note), never trusted.
+//! can never collide.
+//!
+//! Durability & multi-process posture: every read-modify-write runs under an
+//! EXCLUSIVE `flock` on a sibling `.mcp-pins.lock` file (Linux, via `nix`;
+//! other platforms degrade to the atomic-rename-only posture, documented in
+//! [`PinLock`]), and the store is RE-READ inside the critical section, so two
+//! proxy instances racing on one host can never clobber each other's pins.
+//! Writes go through a 0600 tempfile in the SAME directory + `sync_all` +
+//! atomic rename + best-effort parent-directory fsync. A crash mid-write can
+//! only leave either the old or the new file — never a torn document — and a
+//! torn/corrupt file makes [`PinStore::load`] fail LOUDLY (quarantine-grade),
+//! never silently reset. Format version 3; legacy stores are treated as
+//! absent (entries re-recorded with a stderr note), never trusted.
 //!
 //! ## Pre-seeded expectation
 //!
@@ -67,6 +77,74 @@ use sha2::{Digest, Sha256};
 /// stderr note. Re-recording is the safe direction — TOFU first-sighting
 /// alarms re-fire, they never silently pass.
 const STORE_VERSION: u32 = 3;
+
+/// Sibling lock file guarding concurrent read-modify-writes of the store
+/// (multi-instance hosts spawn several proxies against one config dir).
+///
+/// On Linux the guard holds a [`nix::fcntl::Flock`] over a sibling
+/// `.mcp-pins.lock` fd; dropping it releases the lock.
+struct PinLock {
+    #[cfg(target_os = "linux")]
+    _lock: Option<nix::fcntl::Flock<std::fs::File>>,
+    // Non-Linux: no kernel advisory lock without extra deps; atomic rename
+    // alone carries consistency (see [`PinLock::acquire`]).
+    #[cfg(not(target_os = "linux"))]
+    _marker: (),
+}
+
+impl PinLock {
+    /// Acquire an EXCLUSIVE cross-process lock for the store directory.
+    ///
+    /// **Linux** uses `flock(LOCK_EX)` via the safe `nix::fcntl::Flock`
+    /// wrapper. `flock` locks are tied to the open file description, so
+    /// separate processes (and separate opens in one process) serialize
+    /// correctly. EINTR is retried.
+    ///
+    /// **Other platforms**: degrades to atomic-rename-only consistency (each
+    /// writer produces a complete file; last rename wins, possibly dropping a
+    /// racing peer's fresh entry). Documented residual, acceptable off the
+    /// primary Linux target.
+    fn acquire(dir: &Path) -> Result<Self, String> {
+        fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+        let path = dir.join(".mcp-pins.lock");
+        #[cfg(target_os = "linux")]
+        {
+            use nix::fcntl::{Flock, FlockArg};
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .mode(0o600)
+                .open(&path)
+                .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
+            let lock = loop {
+                match Flock::lock(file, FlockArg::LockExclusive) {
+                    Ok(l) => break l,
+                    Err((f, nix::errno::Errno::EINTR)) => file = f,
+                    Err((_, e)) => {
+                        return Err(format!(
+                            "locking {} (concurrent proxy instance?): {e}",
+                            path.display()
+                        ))
+                    }
+                }
+            };
+            Ok(Self { _lock: Some(lock) })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
+            Ok(Self { _marker: () })
+        }
+    }
+}
 
 /// Domain-separation tag prefixed to the upstream identity key material so
 /// hashed argv/cwd bytes can never be confused with another encoding.
@@ -370,16 +448,28 @@ impl PinStore {
             }
         }
 
-        // 2. Store logic. Any store-level failure is fail-closed. A legacy
-        //    store (v1/v2) is treated as ABSENT (its entries are never
-        //    trusted); re-recording carries a loud note instead.
+        // 2. Store logic. Any store-level failure is fail-closed. The whole
+        //    read-modify-write runs under the cross-process lock and the
+        //    document is RE-READ inside the critical section, so a concurrent
+        //    proxy instance can never clobber our merge (or ours theirs).
+        //    A legacy store (v1/v2) is treated as ABSENT (its entries are
+        //    never trusted); re-recording carries a loud note instead.
+        let actual_tools = tool_descriptor_hashes(tools_result);
+        let Some(dir) = self.path.parent() else {
+            return PinVerdict::StoreUnavailable {
+                reason: format!("pin store path has no parent: {}", self.path.display()),
+            };
+        };
+        let _lock = match PinLock::acquire(dir) {
+            Ok(l) => l,
+            Err(reason) => return PinVerdict::StoreUnavailable { reason },
+        };
         let (mut doc, legacy_note) = match self.load() {
             Ok(pair) => pair,
             Err(reason) => return PinVerdict::StoreUnavailable { reason },
         };
         let key = hash_hex(upstream_identity.as_bytes());
         let now = unix_now();
-        let actual_tools = tool_descriptor_hashes(tools_result);
         if let Some(entry) = doc.pins.iter_mut().find(|e| e.upstream_cmd_hash == key) {
             if entry.tools_hash == actual {
                 entry.last_verified = now;
@@ -476,12 +566,13 @@ impl PinStore {
         }
     }
 
-    /// Atomically-ish persist the store: write temp + rename in the same
-    /// directory so a crash never leaves a truncated pin file behind.
+    /// Atomically persist the store: 0600 tempfile in the SAME directory +
+    /// fsync of the file + atomic rename + best-effort fsync of the parent
+    /// directory. A crash at ANY point leaves either the old or the new
+    /// complete file — never a torn document.
     ///
-    /// Hardening (remediation N2): the temp file is created with mode 0600
-    /// (unix — no permission window at umask-derived modes) and fsync'd
-    /// before the rename, matching the durability care of the audit sink.
+    /// Caller contract: the [`PinLock`] for this directory must be held (the
+    /// rename must not race another process's read-modify-write cycle).
     fn store(&self, doc: &PinStoreDoc) -> Result<(), String> {
         use std::io::Write as _;
         let dir = self
@@ -518,7 +609,31 @@ impl PinStore {
         fs::rename(&tmp, &self.path).map_err(|e| {
             let _ = fs::remove_file(&tmp);
             format!("renaming pin store into place: {e}")
-        })
+        })?;
+        // Durability of the RENAME itself: fsync the parent directory so a
+        // post-crash boot never loses the pointer to the freshly written
+        // pins. Best-effort with a loud note: filesystems that reject
+        // directory fsync would otherwise brick the store, and losing the
+        // rename degrades to a STALE pin file — the safe direction (TOFU
+        // re-record), never corruption.
+        #[cfg(unix)]
+        match fs::File::open(dir).map_err(|e| format!("opening {}: {e}", dir.display())) {
+            Ok(d) => {
+                if let Err(e) = d.sync_all() {
+                    eprintln!(
+                        "agentguard-proxy: note: parent-dir fsync of pin store \
+                         failed ({e}); last-write durability is best-effort"
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "agentguard-proxy: note: cannot open pin-store dir for fsync ({e}); \
+                     last-write durability is best-effort"
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1095,6 +1210,123 @@ mod tests {
         let v = store.verify_or_record("srv", &tools_result(&[("t", "d")]), None);
         assert!(matches!(v, PinVerdict::Recorded { .. }), "{v:?}");
         assert!(store.path().exists(), "store file created");
+    }
+
+    // ---- atomic persistence (FASE 5-B mechanism 4) -------------------------
+
+    #[test]
+    fn concurrent_writers_never_corrupt_the_store() {
+        // Simulates multi-instance hosts: many PinStore handles on the SAME
+        // path racing read-modify-write cycles. flock serializes the RMW and
+        // the document is re-read under the lock, so every insert survives
+        // and the file is always valid JSON.
+        let base = TempBase::new("concurrent");
+        let path = base.0.clone();
+        const THREADS: usize = 6;
+        const ITERS: usize = 8;
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|t| {
+                let thread_path = path.clone();
+                std::thread::spawn(move || {
+                    let store = PinStore::open(thread_path);
+                    for _ in 0..ITERS {
+                        // Fixed manifest per identity: repeated verification
+                        // must MATCH, never drift (that would be a real
+                        // mismatch verdict, not a concurrency artifact).
+                        let r = tools_result(&[("tool", "stable description")]);
+                        let identity = format!("upstream-{t}");
+                        let v = store.verify_or_record(&identity, &r, None);
+                        assert!(
+                            matches!(v, PinVerdict::Recorded { .. } | PinVerdict::Matched { .. }),
+                            "thread {t}: unexpected verdict {v:?}"
+                        );
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("writer thread");
+        }
+
+        // The final store must parse cleanly with EXACTLY one entry per
+        // distinct upstream — no lost updates, no torn documents.
+        let store = PinStore::open(&base.0);
+        let stored: Value =
+            serde_json::from_str(&fs::read_to_string(store.path()).expect("read final store"))
+                .expect("final store must be valid JSON");
+        assert_eq!(stored["version"], 3);
+        let pins = stored["pins"].as_array().expect("pins array");
+        assert_eq!(pins.len(), THREADS, "no lost/clobbered entries: {stored}");
+        let mut keys: Vec<&str> = pins
+            .iter()
+            .map(|p| p["upstream_cmd_hash"].as_str().unwrap())
+            .collect();
+        keys.sort_unstable();
+        let n = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), n, "duplicate upstream entries");
+
+        // No temp files may leak past a completed run.
+        let leftovers: Vec<_> = fs::read_dir(&base.0)
+            .expect("dir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(".mcp-pins.json.tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp files leaked: {leftovers:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn crash_mid_write_leaves_a_loud_failure_never_silence() {
+        // A truncated pin file (crash between create and rename in a NAIVE
+        // writer, or disk-full during any write) must fail LOUDLY as a
+        // quarantine-grade StoreUnavailable — never silently reset to empty.
+        let base = TempBase::new("truncated");
+        let store = PinStore::open(&base.0);
+        fs::create_dir_all(store.path().parent().unwrap()).expect("dir");
+        let full = serde_json::json!({
+            "version": 3,
+            "pins": [{
+                "upstream_cmd_hash": hash_hex(b"srv"),
+                "tools_hash": hash_hex(b"manifest"),
+                "tool_hashes": {"echo": hash_hex(b"descriptor")},
+                "first_seen": 1,
+                "last_verified": 1
+            }]
+        });
+        let text = serde_json::to_string_pretty(&full).expect("serialize");
+        // Cut the document roughly in half.
+        let cut = &text[..text.len() / 2];
+        fs::write(store.path(), cut).expect("write truncated");
+
+        let v = store.verify_or_record("srv", &tools_result(&[("t", "d")]), None);
+        match &v {
+            PinVerdict::StoreUnavailable { reason } => {
+                assert!(reason.contains("parsing"), "loud parse error: {reason}");
+            }
+            other => panic!("truncated store must fail closed, got {other:?}"),
+        }
+        assert!(v.is_quarantine());
+    }
+
+    #[test]
+    fn lock_file_is_created_as_sibling_marker() {
+        let base = TempBase::new("lockfile");
+        let store = PinStore::open(&base.0);
+        let v = store.verify_or_record("srv", &tools_result(&[("t", "d")]), None);
+        assert!(matches!(v, PinVerdict::Recorded { .. }), "{v:?}");
+        // The lock lives NEXT TO THE STORE FILE (its parent dir), not at the
+        // config base.
+        let lock_path = base.0.join("agentguard").join(".mcp-pins.lock");
+        assert!(lock_path.exists(), "sibling lock marker expected");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&lock_path).expect("stat").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "lock file must not be world-readable");
+        }
     }
 
     #[test]
