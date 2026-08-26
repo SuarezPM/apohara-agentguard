@@ -233,16 +233,24 @@ fn strip_terminal_escapes(text: &str) -> Option<String> {
 /// text direction without any visual trace:
 /// - zero-width: U+200B..U+200D (ZWSP/ZWNJ/ZWJ), U+FEFF (BOM/ZWNBSP),
 ///   U+00AD (soft hyphen);
+/// - combining grapheme joiner: U+034F (remediation B4 — it is not
+///   alphabetic, so [`AlphaWords`] splits a word around it and the U4
+///   homoglyph fold never sees the mixed-script word; ONE invisible char
+///   defeated the whole pipeline. Point fix only: treating every Mn
+///   combining mark as intra-word is FP-risky and stays F6 work);
 /// - bidi controls: U+200E..U+200F (LRM/RLM — same concealment class as the
 ///   spec'd ranges, added deliberately), U+202A..U+202E, U+2066..U+2069;
 /// - word joiners: U+2060..U+2064;
 /// - tag characters: U+E0000..U+E007F.
 ///
-/// Fast path: all targets share only four UTF-8 lead bytes {C2, E2, EF, F3};
-/// absence of all four proves a clean haystack (pure ASCII and Latin-1
-/// accents like `café` exit immediately).
+/// Fast path: all targets share only five UTF-8 lead bytes {C2, CD, E2, EF,
+/// F3} (U+034F encodes as `CD 8F`); absence of all five proves a clean
+/// haystack (pure ASCII and Latin-1 accents like `café` exit immediately).
 fn strip_invisibles(text: &str) -> Option<String> {
-    if !text.bytes().any(|b| matches!(b, 0xC2 | 0xE2 | 0xEF | 0xF3)) {
+    if !text
+        .bytes()
+        .any(|b| matches!(b, 0xC2 | 0xCD | 0xE2 | 0xEF | 0xF3))
+    {
         return None;
     }
     let first = text
@@ -259,6 +267,8 @@ fn is_invisible(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
+            | '\u{034F}' // COMBINING GRAPHEME JOINER (remediation B4; full
+                         // Mn-category scope deliberately deferred to F6)
             | '\u{200B}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
@@ -860,6 +870,16 @@ mod tests {
             strip_terminal_escapes("charset \u{1b}(Bdesignator").as_deref(),
             Some("charset designator")
         );
+    }
+
+    #[test]
+    fn u2_strips_combining_grapheme_joiner() {
+        // Remediation B4: U+034F is invisible AND non-alphabetic, so it used
+        // to split words for AlphaWords and dodge the U4 fold entirely.
+        assert_eq!(strip_invisibles("ig\u{34F}nore").as_deref(), Some("ignore"));
+        // The fast path must fire on the `CD` lead byte alone.
+        assert_eq!(strip_invisibles("\u{34F}").as_deref(), Some(""));
+        assert_eq!(strip_invisibles("plain"), None);
     }
 
     #[test]

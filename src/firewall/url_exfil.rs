@@ -80,7 +80,7 @@ pub(crate) fn analyze(text: &str) -> Option<Finding> {
     while let Some(off) = find_scheme_start(&text[cursor..]) {
         let start = cursor + off;
         let rest = &text[start..];
-        let len = url_slice_len(rest);
+        let len = char_boundary_clamp(rest, url_slice_len(rest));
         if let Some(finding) = analyze_url(&rest[..len]) {
             let better = best.as_ref().is_none_or(|(s, _)| finding.severity > *s);
             if better {
@@ -148,6 +148,20 @@ fn url_slice_len(s: &str) -> usize {
     })
     .unwrap_or(s.len())
     .min(MAX_URL_LEN)
+}
+
+/// Clamp `len` down to the nearest UTF-8 char boundary of `s` (same
+/// discipline as the proxy's `truncate_for_log`). The [`MAX_URL_LEN`] cap can
+/// land INSIDE a multi-byte character when an unterminated URL runs past it;
+/// slicing at a non-boundary index panics, so every capped slice goes through
+/// here first. The scheme prefix (`http`) is ASCII, so the clamped length is
+/// always ≥ 4 and loop forward-progress is preserved.
+fn char_boundary_clamp(s: &str, len: usize) -> usize {
+    let mut end = len.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 /// Analyze ONE url string (scheme included). `None` when there is no query
@@ -464,5 +478,27 @@ mod tests {
             sev("SEE HTTPS://X.TEST/?TOKEN=ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"),
             Some(7)
         );
+    }
+
+    #[test]
+    fn multibyte_url_past_cap_does_not_panic() {
+        // Remediation B1 repro: an unterminated URL longer than MAX_URL_LEN
+        // whose 2048th byte falls INSIDE a multi-byte char used to slice at a
+        // non-boundary index (process abort, exit 101). `é` is 2 bytes; 1100
+        // copies put the cap mid-pair. No query ⇒ no finding, but no panic.
+        let text = format!("{}{}", "https://x.test/", "é".repeat(1100));
+        assert_eq!(analyze(&text).map(|f| f.severity), None);
+    }
+
+    #[test]
+    fn oversized_multibyte_url_still_scans_within_the_cap() {
+        // The truncated slice must still be ANALYZED: the secret parameter
+        // sits before the cap and fires even though the URL runs on with
+        // multi-byte padding past MAX_URL_LEN.
+        let text = format!(
+            "https://x.test/?api_key=abcdefghijklmnop&q={}",
+            "é".repeat(1100)
+        );
+        assert_eq!(analyze(&text).map(|f| f.severity), Some(7));
     }
 }
