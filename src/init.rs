@@ -1257,6 +1257,9 @@ fn atomic_write(path: &Path, payload: &[u8]) -> Result<(), InitError> {
 #[cfg(test)]
 mod doctor_surface_tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static XDG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_home(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1309,6 +1312,15 @@ mod doctor_surface_tests {
 
     #[test]
     fn installed_home_reports_every_host_wired() {
+        // Hermetic guard: `run()` reads `$XDG_CONFIG_HOME` from the process
+        // env while `diagnose_hosts()` takes it explicitly. Without isolation
+        // the two diverge when the runner's env has `XDG_CONFIG_HOME` set
+        // (CI failure: opencode NotInstalled vs Wired). Hold a global lock
+        // and force the unset/empty ⇒ `<home>/.config` fallback for both.
+        let _lock = XDG_ENV_LOCK.lock().unwrap();
+        let saved_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+
         let home = temp_home("installed");
         let results =
             run(&home, Path::new(&exe_marker()), Mode::Install, true).expect("init install");
@@ -1350,6 +1362,11 @@ mod doctor_surface_tests {
             assert_eq!(state_of(&wiring, host), &WiringState::Wired, "{host}");
         }
         let _ = std::fs::remove_dir_all(&home);
+
+        match saved_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
     }
 
     #[test]

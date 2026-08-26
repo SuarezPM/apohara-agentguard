@@ -11,3 +11,4 @@
 #
 # Current entries: ZERO. Every test must run; add an entry only with a
 # written justification reviewed in the PR.
+tests/firewall_micro_bench.rs|ad-hoc timing harness; run explicitly with --ignored --nocapture (not a gate)

@@ -332,7 +332,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo cyclonedx
+          cargo cyclonedx --format json --spec-version 1.5
           f="$(find . -name 'apohara-agentguard.cdx.json' ! -path './.git/*' | head -n 1)"
           if [ -z "$f" ]; then
             echo "::error::cargo-cyclonedx produced no apohara-agentguard.cdx.json" >&2
