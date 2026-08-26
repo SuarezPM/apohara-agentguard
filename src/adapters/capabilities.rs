@@ -116,6 +116,45 @@ pub fn capabilities_for(host: HostId, os: TargetOs) -> Capabilities {
             sandbox_available: linux_sandbox,
             ..base
         },
+        HostId::Windsurf => Capabilities {
+            can_block: true, // pre_run_command / pre_mcp_tool_use, exit 2 + stderr reason
+            // No ask flow is documented for the hook transport: Ask→Deny
+            // via degrade() (consistent with the Codex treatment).
+            can_ask: false,
+            can_rewrite: false,
+            can_add_context: false, // stderr carries deny reasons only
+            fail_closed_exit: 2,    // exit 2 IS the block signal (stderr = reason)
+            sandbox_available: linux_sandbox,
+            ..base
+        },
+        HostId::Cursor => Capabilities {
+            can_block: true, // beforeShellExecution / beforeMCPExecution deny JSON
+            // Documented upstream quirk: an "ask" permission reply is IGNORED
+            // by the host. Encoding can_ask=false routes every Ask through
+            // degrade() into an explicit Deny with a "requires human
+            // approval" message — never a silently-ignored ask.
+            can_ask: false,
+            can_rewrite: false,
+            can_add_context: false,
+            // The verdict lives in the stdout JSON body; exit 0 ALWAYS (a
+            // non-zero exit would be read as a hook crash, not as a deny).
+            fail_closed_exit: 0,
+            sandbox_available: linux_sandbox,
+            ..base
+        },
+        HostId::Antigravity => Capabilities {
+            can_block: true, // PreToolUse plugin reply {"allow_tool": false}
+            // No ask channel in the plugin hook contract: Ask→Deny via
+            // degrade().
+            can_ask: false,
+            can_rewrite: false,
+            can_add_context: false,
+            // Deny is signaled IN the JSON body with exit 0; a non-zero exit
+            // is treated by the host as a hook failure.
+            fail_closed_exit: 0,
+            sandbox_available: linux_sandbox,
+            ..base
+        },
         HostId::McpGateway => Capabilities {
             can_block: true,       // refuse `tools/call` at the proxy
             can_ask: false,        // proxy cannot prompt: Ask→Deny via degrade()

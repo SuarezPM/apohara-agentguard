@@ -26,6 +26,20 @@ pub enum HostId {
     KiloCode,
     /// Kitty-Code — library-embed path-dep (~ns), Landlock-unified sandbox.
     KittyCode,
+    /// Windsurf (`pre_run_command` / `pre_mcp_tool_use` hooks): block =
+    /// exit 2 + reason on stderr; no ask/rewrite/context channels.
+    Windsurf,
+    /// Cursor (`beforeShellExecution` / `beforeMCPExecution` hooks):
+    /// the verdict travels in the stdout JSON body
+    /// (`{"permission":"deny", ...}`) with exit 0 ALWAYS; no ask flow
+    /// (documented: an "ask" reply is ignored upstream, so Ask degrades
+    /// to Deny).
+    Cursor,
+    /// Antigravity CLI plugin (`PreToolUse` claude-like payload, plugin
+    /// drop-in dir): deny = `{"allow_tool": false, "deny_reason": …}` with
+    /// exit 0 (a non-zero exit is read as a HOOK failure there); no ask
+    /// channel.
+    Antigravity,
     /// Universal MCP gateway proxy — the fallback for uncovered hosts.
     McpGateway,
     /// ACP (`session/request_permission`) — RESERVED, V5-E only.

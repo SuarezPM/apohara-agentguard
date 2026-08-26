@@ -10,9 +10,10 @@ use std::process::ExitCode;
 use apohara_agentguard::audit::{self, AuditRecord};
 use apohara_agentguard::config::Config;
 use apohara_agentguard::hook;
+use apohara_agentguard::hook::Harness;
 use apohara_agentguard::init::{self, InitError, Mode, Outcome};
 use apohara_agentguard::sandbox::{PermissionTier, SandboxRequest, SandboxRunner};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
 #[command(name = "apohara-agentguard", version, about)]
@@ -32,8 +33,12 @@ struct Cli {
 enum Command {
     /// Print the apohara-agentguard version.
     Version,
-    /// Run as a Claude Code hook (reads stdin JSON, emits a decision).
-    Hook,
+    /// Run as an agent harness hook (reads stdin JSON, emits a decision).
+    /// The `--harness` flag selects the wire contract: `claude` (default,
+    /// byte-identical to the pre-0.5 behavior, also correct for Codex),
+    /// `windsurf`, `cursor`, or `antigravity` — each with its own stdin
+    /// normalization and response shaping over the SAME decision pipeline.
+    Hook(HookArgs),
     /// Run a command inside the local seccomp + Landlock sandbox.
     Sandbox(SandboxArgs),
     /// Scan stdin content through the input firewall (prints a verdict).
@@ -77,6 +82,41 @@ enum Command {
 struct CheckArgs {
     /// The command to evaluate against the gate.
     command: String,
+}
+
+/// Arguments of the `hook` subcommand.
+#[derive(Args)]
+struct HookArgs {
+    /// Which harness wire contract to speak on stdin/stdout. The default
+    /// (`claude`) is byte-identical to the pre-0.5 single-harness behavior
+    /// (and covers Codex, whose hook format mirrors Claude's).
+    #[arg(long, value_enum, default_value_t = HarnessArg::Claude)]
+    harness: HarnessArg,
+}
+
+/// CLI mirror of [`Harness`] for clap's value-enum parsing (`kebab-case`
+/// names: `--harness windsurf`). Mapped 1:1 onto the lib enum; a unit test
+/// pins every variant against `Harness::from_name` so the two lists cannot
+/// drift.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum HarnessArg {
+    Claude,
+    Codex,
+    Windsurf,
+    Cursor,
+    Antigravity,
+}
+
+impl From<HarnessArg> for Harness {
+    fn from(a: HarnessArg) -> Harness {
+        match a {
+            HarnessArg::Claude => Harness::Claude,
+            HarnessArg::Codex => Harness::Codex,
+            HarnessArg::Windsurf => Harness::Windsurf,
+            HarnessArg::Cursor => Harness::Cursor,
+            HarnessArg::Antigravity => Harness::Antigravity,
+        }
+    }
 }
 
 #[derive(Args)]
@@ -134,7 +174,7 @@ fn main() -> ExitCode {
             println!("apohara-agentguard {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Hook => run_hook(cli.policy.as_deref()),
+        Command::Hook(args) => run_hook(args.harness, cli.policy.as_deref()),
         Command::Sandbox(args) => run_sandbox(args),
         Command::Scan => run_scan(cli.policy.as_deref()),
         Command::Check(args) => run_check(args, cli.policy.as_deref()),
@@ -180,11 +220,16 @@ fn load_config_fail_closed(subcommand: &str) -> Config {
     }
 }
 
-/// Read all of stdin, run the hook, print the stdout JSON (if any), and exit
-/// with the returned code. On a blocking exit (code 2) the decision JSON is
-/// printed to stdout AND the reason is mirrored to stderr (belt-and-suspenders:
-/// exit 2 + stderr is the effective block signal even if JSON is ignored).
-fn run_hook(cli_policy: Option<&std::path::Path>) -> ExitCode {
+/// Read all of stdin, run the hook for the selected harness, print the
+/// stdout JSON (if any), mirror the harness's stderr line (if any), and exit
+/// with the returned code.
+///
+/// The `claude`/`codex` paths keep the historical belt-and-suspenders shape:
+/// on a blocking exit (code 2) the decision JSON is printed to stdout AND
+/// mirrored to stderr (exit 2 + stderr is the effective block signal even if
+/// JSON is ignored). Windsurf blocks through that same stderr channel; Cursor
+/// and Antigravity keep exit 0 with their verdict carried in the JSON body.
+fn run_hook(harness: HarnessArg, cli_policy: Option<&std::path::Path>) -> ExitCode {
     let mut stdin_json = String::new();
     if std::io::stdin().read_to_string(&mut stdin_json).is_err() {
         // Fail OPEN: an unreadable stdin must not block the user's tool.
@@ -193,17 +238,16 @@ fn run_hook(cli_policy: Option<&std::path::Path>) -> ExitCode {
 
     let mut config = load_config_fail_closed("hook");
     apply_policy_override(&mut config, cli_policy);
-    let (stdout_json, code) = hook::run(&stdin_json, &config);
+    let em = hook::harness::run(harness.into(), &stdin_json, &config);
 
-    if let Some(json) = stdout_json {
-        if code == 2 {
-            // Mirror to stderr: on exit 2 the harness feeds stderr to Claude.
-            eprintln!("{json}");
-        }
+    if let Some(line) = &em.stderr {
+        eprintln!("{line}");
+    }
+    if let Some(json) = &em.stdout {
         println!("{json}");
     }
 
-    ExitCode::from(code as u8)
+    ExitCode::from(em.exit.clamp(0, 255) as u8)
 }
 
 /// Render an operator-facing verdict reason for the terminal.
@@ -720,6 +764,36 @@ mod tests {
     // Tests compose the gate + policy engine directly to verify the
     // `ask` subcommand's verdict logic (the helper functions
     // mirror `run_ask` line-by-line).
+
+    #[test]
+    fn harness_arg_variants_match_the_lib_name_table() {
+        // Anti-drift pin: every clap value-enum variant must map onto a lib
+        // `Harness` reachable through the SAME kebab-case name that
+        // `--harness` accepts (and vice versa).
+        let args = [
+            crate::HarnessArg::Claude,
+            crate::HarnessArg::Codex,
+            crate::HarnessArg::Windsurf,
+            crate::HarnessArg::Cursor,
+            crate::HarnessArg::Antigravity,
+        ];
+        assert_eq!(
+            args.len(),
+            apohara_agentguard::hook::harness::NAMES.len(),
+            "the CLI enum and the lib name table must stay in lockstep"
+        );
+        for a in args {
+            let name = clap::ValueEnum::to_possible_value(&a)
+                .expect("value enum variant has a name")
+                .get_name()
+                .to_string();
+            assert_eq!(
+                apohara_agentguard::hook::Harness::from_name(&name),
+                Some(a.into()),
+                "--harness {name} must resolve to its lib variant"
+            );
+        }
+    }
 
     /// Run `run_ask` with `cli_policy = None` (the default-TOML invariant:
     /// the engine is a no-op combine, and the result is byte-identical

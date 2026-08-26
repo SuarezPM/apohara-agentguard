@@ -7,6 +7,10 @@
 //! - [`dispatch`] — event routing: kill-switch checks, `PreToolUse` /
 //!   `PostToolUse` / `UserPromptSubmit` / `SessionStart` routing, and policy
 //!   composition (max-severity-wins).
+//! - [`harness`] — the multi-harness contract (FASE 4): per-harness stdin
+//!   parsers + emitters over the SAME dispatch core (`--harness windsurf /
+//!   cursor / antigravity`; `claude`/`codex` stay on [`dispatch::run`] for
+//!   byte-identical default behavior).
 //! - [`canary_hook`] — SessionStart sentinel seeding + PostToolUse canary scan.
 //! - [`pathguard_hook`] — Read/Write/Edit path-guard integration points.
 //! - [`canary`] — the canary token primitive (generate/persist/read).
@@ -20,6 +24,7 @@
 //!   content scan (BLOCK-capable).
 //! - `UserPromptSubmit` / `PostToolUse` + `Bash` -> firewall scans, WARN-only.
 
+pub mod harness;
 pub mod pathguard;
 
 mod canary;
@@ -35,6 +40,7 @@ pub use crate::contract;
 
 // Public API surface of the hook subsystem.
 pub use dispatch::{run, run_with_source};
+pub use harness::{Emission, Harness};
 // The tier-rank ordering is pinned by verdict.rs's precedence-matrix test via
 // this crate-internal path.
 #[cfg(test)]

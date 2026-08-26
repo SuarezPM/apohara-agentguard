@@ -436,8 +436,105 @@ fn capabilities_matrix_matches_plan_1_3_per_host_and_os() {
             exit: 0,
             sandbox: false,
         },
+        // FASE 4 (v0.5.0-SHIP) harness rows. Windsurf blocks via exit 2 +
+        // stderr; Cursor/Antigravity signal denial IN the response body with
+        // exit 0 ALWAYS (a non-zero exit reads as a hook failure there).
+        Row {
+            host: HostId::Windsurf,
+            os: TargetOs::Linux,
+            block: true,
+            ask: false,
+            rewrite: false,
+            ctx: false,
+            exit: 2,
+            sandbox: true,
+        },
+        Row {
+            host: HostId::Windsurf,
+            os: TargetOs::MacOS,
+            block: true,
+            ask: false,
+            rewrite: false,
+            ctx: false,
+            exit: 2,
+            sandbox: false,
+        },
+        Row {
+            host: HostId::Windsurf,
+            os: TargetOs::Windows,
+            block: true,
+            ask: false,
+            rewrite: false,
+            ctx: false,
+            exit: 2,
+            sandbox: false,
+        },
+        Row {
+            host: HostId::Cursor,
+            os: TargetOs::Linux,
+            block: true,
+            ask: false, // documented upstream: "ask" replies are ignored
+            rewrite: false,
+            ctx: false,
+            exit: 0, // verdict lives in the JSON body
+            sandbox: true,
+        },
+        Row {
+            host: HostId::Cursor,
+            os: TargetOs::MacOS,
+            block: true,
+            ask: false,
+            rewrite: false,
+            ctx: false,
+            exit: 0,
+            sandbox: false,
+        },
+        Row {
+            host: HostId::Cursor,
+            os: TargetOs::Windows,
+            block: true,
+            ask: false,
+            rewrite: false,
+            ctx: false,
+            exit: 0,
+            sandbox: false,
+        },
+        Row {
+            host: HostId::Antigravity,
+            os: TargetOs::Linux,
+            block: true,
+            ask: false,
+            rewrite: false,
+            ctx: false,
+            exit: 0, // non-zero exit = hook failure for its plugin loader
+            sandbox: true,
+        },
+        Row {
+            host: HostId::Antigravity,
+            os: TargetOs::MacOS,
+            block: true,
+            ask: false,
+            rewrite: false,
+            ctx: false,
+            exit: 0,
+            sandbox: false,
+        },
+        Row {
+            host: HostId::Antigravity,
+            os: TargetOs::Windows,
+            block: true,
+            ask: false,
+            rewrite: false,
+            ctx: false,
+            exit: 0,
+            sandbox: false,
+        },
     ];
-    assert_eq!(rows.len(), 7 * 3, "matrix coverage: every host on every OS");
+    assert_eq!(
+        rows.len(),
+        10 * 3,
+        "matrix coverage: every host on every OS"
+    );
     for r in &rows {
         let c = capabilities_for(r.host, r.os);
         assert_eq!(c.host, r.host, "{r:?}: host echoed");
@@ -460,6 +557,12 @@ fn degrade_ask_becomes_deny_on_every_cannot_ask_host() {
         HostId::OpenCode,
         HostId::KiloCode,
         HostId::McpGateway,
+        // FASE 4: no ask flow on any of the new hook transports — Cursor's
+        // "ask" replies are ignored upstream, so the deny mapping is the only
+        // honest degradation.
+        HostId::Windsurf,
+        HostId::Cursor,
+        HostId::Antigravity,
     ] {
         for os in [TargetOs::Linux, TargetOs::MacOS, TargetOs::Windows] {
             let caps = capabilities_for(host, os);

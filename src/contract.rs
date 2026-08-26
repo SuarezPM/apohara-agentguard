@@ -314,7 +314,12 @@ fn is_blocking_event(event: &str) -> bool {
 /// ASCII before the reason reaches the agent. Neutralization runs BEFORE the
 /// cap so the emitted payload is never over the cap even when rewriting
 /// expands the text.
-fn cap_reason(reason: &str) -> String {
+///
+/// `pub(crate)` (not private) because the multi-harness emitters
+/// (`hook::harness`) route THEIR free-text fields (`user_message`,
+/// `deny_reason`, stderr lines) through this same choke point — one
+/// neutralize+cap discipline for every transport.
+pub(crate) fn cap_reason(reason: &str) -> String {
     let neutralized = neutralize(reason);
     let reason: &str = neutralized.as_ref();
     if reason.len() <= MAX_CONTEXT_BYTES {

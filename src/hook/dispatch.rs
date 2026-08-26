@@ -113,12 +113,45 @@ fn read_env_disable() -> EnvDisable {
     }
 }
 
+/// Shared dispatch core for every transport (Claude/Codex via
+/// [`run_with_source`] and the non-Claude harnesses via
+/// [`super::harness`]): kill-switch check → per-event dispatch → audit.
+///
+/// Deliberately does NOT emit: each transport shapes its own response
+/// (`contract::emit` for Claude/Codex, per-harness emitters otherwise).
+/// The kill-switch short-circuits to [`Verdict::allow`] BEFORE any
+/// evaluation, mirroring the ordering in [`run_with_source`].
+pub(crate) fn evaluate_verdict(
+    input: &HookInput,
+    config: &Config,
+    src: &dyn ContentSource,
+) -> Verdict {
+    let env_disabled = read_env_disable();
+    if kill_switch_active(config, &env_disabled) {
+        return Verdict::allow();
+    }
+    let (verdict, policy_fingerprint) = dispatch(input, config, src, &env_disabled);
+    // Best-effort audit, verdict-isolated (never alters `verdict`). Allow is
+    // not logged. Same discipline as the Claude path in `run_with_source`.
+    audit_decision(input, &verdict, config, policy_fingerprint.as_deref());
+    verdict
+}
+
 /// Whether the WHOLE-PROCESS kill-switch is engaged: the legacy all-off flag
 /// (`config.disable`) or `AGENTGUARD_DISABLE=1`/`true`. A granular component
 /// list (e.g. `gate,firewall`) does NOT trigger this — those are bypassed
 /// per-surface in [`dispatch`] while enabled components still fire.
 fn kill_switch_active(config: &Config, env_disabled: &EnvDisable) -> bool {
     config.disable || env_disabled.all
+}
+
+/// One-call kill-switch probe for the non-Claude harness entry point
+/// ([`super::harness::run`]): reads the process env and applies
+/// [`kill_switch_active`]. Kept here so the anti-self-disarm ordering
+/// (env read BEFORE any parsing) lives in exactly one module.
+pub(crate) fn kill_switch_engaged(config: &Config) -> bool {
+    let env_disabled = read_env_disable();
+    kill_switch_active(config, &env_disabled)
 }
 
 /// Route a parsed input to the right evaluator and return its [`Verdict`]
