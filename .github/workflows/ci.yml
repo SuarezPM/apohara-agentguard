@@ -263,7 +263,11 @@ jobs:
                      --test gate_evasions --test gate_normalize --test danger_warning \
                      --test codex_hook --test audit --test check_cli \
                      --test example_config_parses --test hook_config --test readme_sync \
-                     --test config_failclosed --test eval_harness --test mcp_stdio
+                     --test config_failclosed --test eval_harness --test mcp_stdio \
+                     --test adapters_contract --test audit_chain --test community_packs \
+                     --test doctor_cli --test firewall_micro_bench --test firewall_unicode_url \
+                     --test harness_cli --test init_cli --test mcp_corpus \
+                     --test mirror_benchmark --test proxy_e2e --test shim_contract --test tightening
           # sandbox_offlinux only exists (and matters) off Linux.
           if [ "${{ runner.os }}" != "Linux" ]; then
             cargo test --test sandbox_offlinux
@@ -334,5 +338,9 @@ jobs:
             --test codex_hook --test audit --test check_cli \
             --test example_config_parses --test hook_config --test readme_sync \
             --test config_failclosed --test eval_harness --test mcp_stdio \
+            --test adapters_contract --test audit_chain --test community_packs \
+            --test doctor_cli --test firewall_micro_bench --test firewall_unicode_url \
+            --test harness_cli --test init_cli --test mcp_corpus \
+            --test mirror_benchmark --test proxy_e2e --test shim_contract --test tightening \
             | tee coverage-summary.txt
           cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
