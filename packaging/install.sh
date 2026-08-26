@@ -23,13 +23,22 @@
 # glibc and musl Linux builds are both published since v0.3; libc detection
 # selects between them.
 #
+# Zero-touch wiring (default ON): after the binary is verified and placed,
+# the installer detects supported agent hosts and runs `<bin> init --yes`
+# automatically, so the hook gates from the shadows with NO second manual
+# step. This step is FAIL-OPEN for the installer UX: the binary is already
+# installed at that point, so a wiring failure only warns. Opt out with
+# AGENTGUARD_NO_INIT=1 or by passing --no-init as the first argument.
+#
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh
+#   install.sh --no-init          # skip the automatic host wiring
 #
 # Env overrides:
 #   AGENTGUARD_VERSION        release tag to install (default: pinned by VERSION below)
 #   AGENTGUARD_DOWNLOAD_BASE  artifact base URL (default: GitHub release)
 #   AGENTGUARD_PREFIX         install dir (default: ~/.local/share/apohara-agentguard)
+#   AGENTGUARD_NO_INIT        set to 1 to skip the automatic host wiring
 
 set -eu
 
@@ -199,6 +208,74 @@ EOF
   tar -xzf "$packs_archive" -C "$packs_dest"
 }
 
+# --- Zero-touch host wiring. -------------------------------------------------
+# Detect supported agent hosts and auto-run `<bin> init --yes` so the hook
+# starts gating immediately — install once, act from the shadows. Host
+# detection mirrors init's own path resolution ($XDG_CONFIG_HOME respected
+# for the OpenCode/Kilo plugin dirs). Fail-open BY DESIGN for the installer
+# UX: at this point the binary is installed and verified, so a wiring failure
+# only warns and points at the manual command; it must never turn a verified
+# install into an installer error.
+#
+# Opt-out: AGENTGUARD_NO_INIT=1 or `--no-init` as the FIRST argument.
+# Sets the global `protected` variable (space-separated host labels) so the
+# final summary can report the real state.
+auto_wire() {
+  bin="$1"
+  first_arg="${2:-}"
+  protected=""
+
+  if [ "${AGENTGUARD_NO_INIT:-0}" = "1" ] || [ "$first_arg" = "--no-init" ]; then
+    printf 'apohara-agentguard: automatic wiring skipped (--no-init).\n' >&2
+    printf "apohara-agentguard: run '%s init' when ready.\n" "$bin" >&2
+    return 0
+  fi
+
+  config_root="${XDG_CONFIG_HOME:-${HOME}/.config}"
+  hosts=""
+  if [ -f "${HOME}/.claude/settings.json" ]; then hosts="${hosts}claude-code "; fi
+  if [ -f "${HOME}/.codex/hooks.json" ]; then hosts="${hosts}codex-code "; fi
+  if [ -d "${config_root}/opencode" ]; then hosts="${hosts}opencode "; fi
+  if [ -d "${config_root}/kilo" ]; then hosts="${hosts}kilo "; fi
+  if [ -d "${HOME}/.kitty-code" ]; then hosts="${hosts}kitty-code "; fi
+
+  if [ -z "$hosts" ]; then
+    printf "apohara-agentguard: no supported agent config found — run '%s init --yes' after installing a supported coding agent.\n" "$bin" >&2
+    return 0
+  fi
+
+  printf 'apohara-agentguard: detected agent host(s): %s — wiring hooks automatically\n' "${hosts% }" >&2
+  if ! init_out="$("$bin" init --yes 2>&1)"; then
+    printf 'apohara-agentguard: warning: automatic wiring FAILED (the binary itself IS installed and verified).\n' >&2
+    printf "apohara-agentguard: run '%s init --yes' manually to wire your agents.\n" "$bin" >&2
+    return 0
+  fi
+  if [ -n "$init_out" ]; then
+    printf '%s\n' "$init_out" >&2
+  fi
+  protected="${hosts% }"
+  printf 'apohara-agentguard: Wired: %s. Restart your agents.\n' "$protected" >&2
+}
+
+# --- Final summary: reflects the REAL post-install state. --------------------
+print_summary() {
+  cat >&2 <<EOF
+apohara-agentguard: install complete.
+
+Protected hosts: ${protected:-none}
+Binary: ${bin_path}
+Health check: ${bin_path} doctor
+
+Community rule packs extracted under ${PREFIX}/packs (when present in the
+release). Enable them with a [community_packs] block in your agentguard config:
+  [community_packs]
+  enabled = ["reverse-shell"]
+  dir = "${PREFIX}/packs"
+
+Emergency kill-switch: export AGENTGUARD_DISABLE=1 to bypass the gate.
+EOF
+}
+
 main() {
   triple="$(detect_triple)"
   expected="$(checksum_for_triple "$triple")"
@@ -208,10 +285,14 @@ main() {
   bin_path="${bin_dir}/apohara-agentguard"
 
   # Idempotent fast path: a binary that already matches this version's
-  # checksum means nothing to do — no re-download, no rewrite.
+  # checksum means nothing to download or rewrite — but the zero-touch
+  # wiring still runs (init is idempotent + self-healing, so re-running the
+  # installer also heals any stale wiring from a relocated binary).
   if [ -e "$bin_path" ] &&
     [ "$(sha256_of "$bin_path" 2>/dev/null || true)" = "$expected" ]; then
     printf 'apohara-agentguard: already installed (v%s, checksum ok)\n' "$VERSION" >&2
+    auto_wire "$bin_path" "${1:-}"
+    print_summary
     return 0
   fi
 
@@ -267,24 +348,10 @@ Remove ${PREFIX}/packs/agentguard-packs.tar.gz if you want to retry the install.
     printf 'apohara-agentguard: installed community rule packs at %s\n' "${PREFIX}/packs" >&2
   fi
 
-  cat >&2 <<EOF
-apohara-agentguard: install complete.
+  # --- Zero-touch host wiring (fail-open; see auto_wire). ---------------------
+  auto_wire "$bin_path" "${1:-}"
 
-To enable the hook in Claude Code, install apohara-agentguard as a plugin pointing at:
-  ${PREFIX}
-
-Or add the hook config to your settings.json (~/.claude/settings.json),
-substituting ${PREFIX} for \${CLAUDE_PLUGIN_ROOT} in:
-  ${PREFIX}/hooks.json
-
-Community rule packs extracted under ${PREFIX}/packs (when present in the
-release). Enable them with a [community_packs] block in your agentguard config:
-  [community_packs]
-  enabled = ["reverse-shell"]
-  dir = "${PREFIX}/packs"
-
-Emergency kill-switch: export AGENTGUARD_DISABLE=1 to bypass the gate.
-EOF
+  print_summary
 }
 
 main "$@"
