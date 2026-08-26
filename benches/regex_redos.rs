@@ -21,7 +21,7 @@
 
 use std::time::{Duration, Instant};
 
-use apohara_agentguard::firewall::scan_content;
+use apohara_agentguard::firewall::{scan_content, scan_output};
 use apohara_agentguard::verdict::Thresholds;
 
 /// Generous absolute cap for a single ~2 KB scan. Release-mode cost is ~tens of
@@ -45,6 +45,12 @@ fn inputs(n: usize) -> Vec<(&'static str, String)> {
         ("many_dashed_nums", "1-1-1-1-1-1-1-1 ".repeat(n / 16)),
         // Injection-prefix spam pressures the prompt-injection alternations.
         ("nested_ignore", "ignore ".repeat(n / 7)),
+        // FASE 5-A: URL-query spam exercises the linear (regex-free) URL
+        // parameter extractor plus the normalization fast-path probes.
+        (
+            "url_query_spam",
+            "https://t.example/p?k=v&j=w ".repeat(n / 28),
+        ),
     ]
 }
 
@@ -96,6 +102,21 @@ fn main() {
         assert!(
             ratio < 12.0,
             "ReDoS guard: {label} scaled {ratio:.1}x for a 4x input (super-linear); expected ~4x"
+        );
+    }
+
+    // --- FASE 5-A: scan_output URL-exfil path on adversarial query spam ----
+    // The detector is regex-free by construction; this pins its absolute cost
+    // so a future rewrite cannot reintroduce backtracking.
+    for size in [small, big] {
+        let spam = "https://t.example/p?a=1&".repeat(size / 8);
+        let start = Instant::now();
+        let _ = scan_output(&spam, &thresholds);
+        let elapsed = start.elapsed();
+        println!("  [{size:>6}] scan_output url_spam : {elapsed:?}");
+        assert!(
+            elapsed < MAX,
+            "ReDoS guard: scan_output on {size}-unit url_spam took {elapsed:?} (>= {MAX:?})"
         );
     }
 
