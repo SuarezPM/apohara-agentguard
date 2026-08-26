@@ -176,6 +176,25 @@ fetch_optional() {
   opt_tmp=""
 }
 
+# extract_packs_safely validates every archived path BEFORE extracting
+# anything: absolute paths, any ".." component, empty names, and option-looking
+# entries are rejected, so a hostile tarball can never write outside <dest>.
+# Our pack tarball carries flat "<name>.toml" entries only; anything else
+# fails validation and the caller aborts the install.
+extract_packs_safely() {
+  packs_archive="$1"
+  packs_dest="$2"
+  while IFS= read -r entry || [ -n "$entry" ]; do
+    [ -n "$entry" ] || continue
+    case "$entry" in
+      /* | *'..'* | -*) return 1 ;;
+    esac
+  done <<EOF
+$(tar -tzf "$packs_archive")
+EOF
+  tar -xzf "$packs_archive" -C "$packs_dest"
+}
+
 main() {
   triple="$(detect_triple)"
   expected="$(checksum_for_triple "$triple")"
@@ -230,6 +249,20 @@ main() {
   fetch_optional "${BASE_URL}/plugin.json" "${PREFIX}/plugin.json"
   fetch_optional "${BASE_URL}/hooks.json" "${PREFIX}/hooks.json"
 
+  # --- Community rule packs (optional release asset). -------------------------
+  # Fetched non-fatally like the manifests above; extracted only after every
+  # archived path passes validation (extract_packs_safely), so a missing
+  # asset or an older release simply skips the packs.
+  printf 'apohara-agentguard: fetching community rule packs\n' >&2
+  mkdir -p "${PREFIX}/packs"
+  fetch_optional "${BASE_URL}/agentguard-packs.tar.gz" "${PREFIX}/packs/agentguard-packs.tar.gz"
+  if [ -f "${PREFIX}/packs/agentguard-packs.tar.gz" ]; then
+    extract_packs_safely "${PREFIX}/packs/agentguard-packs.tar.gz" "${PREFIX}/packs" ||
+      err "community packs tarball failed path validation; refusing to extract it.
+Remove ${PREFIX}/packs/agentguard-packs.tar.gz if you want to retry the install."
+    printf 'apohara-agentguard: installed community rule packs at %s\n' "${PREFIX}/packs" >&2
+  fi
+
   cat >&2 <<EOF
 apohara-agentguard: install complete.
 
@@ -239,6 +272,12 @@ To enable the hook in Claude Code, install apohara-agentguard as a plugin pointi
 Or add the hook config to your settings.json (~/.claude/settings.json),
 substituting ${PREFIX} for \${CLAUDE_PLUGIN_ROOT} in:
   ${PREFIX}/hooks.json
+
+Community rule packs extracted under ${PREFIX}/packs (when present in the
+release). Enable them with a [community_packs] block in your agentguard config:
+  [community_packs]
+  enabled = ["reverse-shell"]
+  dir = "${PREFIX}/packs"
 
 Emergency kill-switch: export AGENTGUARD_DISABLE=1 to bypass the gate.
 EOF

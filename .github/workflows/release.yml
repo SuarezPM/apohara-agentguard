@@ -311,6 +311,11 @@ jobs:
           # Plugin manifests ride with the bundle so installs can register
           # hooks without a second fetch (checkout provides them).
           cp -f packaging/plugin.json packaging/hooks.json release/
+          # Community rule packs ship as one tarball with FLAT *.toml entries,
+          # so install.sh can extract opt-in packs straight into $PREFIX/packs
+          # (the loader scans one flat directory) without cloning the repo
+          # (checkout provides packs-community/).
+          (cd packs-community && tar -czf ../release/agentguard-packs.tar.gz *.toml)
           cd release
           : > SHA256SUMS
           for f in apohara-agentguard-*; do
@@ -320,6 +325,11 @@ jobs:
               shasum -a 256 "$f" >> SHA256SUMS
             fi
           done
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum agentguard-packs.tar.gz >> SHA256SUMS
+          else
+            shasum -a 256 agentguard-packs.tar.gz >> SHA256SUMS
+          fi
           echo "----- SHA256SUMS -----"
           cat SHA256SUMS
       - name: Upload release bundle (for maintainer review — NOT auto-published)
