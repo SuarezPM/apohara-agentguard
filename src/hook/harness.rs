@@ -342,9 +342,16 @@ fn emit_windsurf(decision: &Decision) -> Emission {
             stderr: Some(crate::contract::cap_reason(reason)),
             exit: 0,
         },
-        Decision::Ask { .. } => {
-            // Unreachable after degrade() on a can_ask=false host.
-            unreachable!("windsurf cannot ask: degrade() maps Ask to Deny")
+        Decision::Ask { reason, .. } => {
+            // Defensive: degrade() maps Ask to Deny on this can_ask=false host,
+            // so this arm should be dead. Render it as a hard deny instead of
+            // panicking — a hook panic exits 101, which no host reads as a
+            // block signal (that would fail open by accident).
+            Emission {
+                stdout: None,
+                stderr: Some(crate::contract::cap_reason(reason)),
+                exit: 2,
+            }
         }
         Decision::Deny { reason, .. } => Emission {
             stdout: None,
@@ -373,8 +380,19 @@ fn emit_cursor(was_ask: bool, decision: &Decision) -> Emission {
     match decision {
         Decision::Allow => Emission::none(),
         Decision::Warn { .. } => Emission::none(),
-        Decision::Ask { .. } => {
-            unreachable!("cursor cannot ask: degrade() maps Ask to Deny")
+        Decision::Ask { reason, .. } => {
+            // Defensive mirror of the Deny arm (with approval note): degrade()
+            // makes this dead on a can_ask=false host, but a panic here would
+            // exit 101 — which no host reads as a block (fail-open by accident).
+            let composed = format!("{reason} (blocked pending human approval)");
+            Emission {
+                stdout: Some(
+                    json!({ "permission": "deny", "user_message": crate::contract::cap_reason(&composed) })
+                        .to_string(),
+                ),
+                stderr: None,
+                exit: 0,
+            }
         }
         Decision::Deny { reason, .. } => {
             // Compose BEFORE capping so the approval note can never push the
@@ -421,8 +439,21 @@ fn emit_antigravity(decision: &Decision) -> Emission {
     match decision {
         Decision::Allow => Emission::none(),
         Decision::Warn { .. } => Emission::none(),
-        Decision::Ask { .. } => {
-            unreachable!("antigravity cannot ask: degrade() maps Ask to Deny")
+        Decision::Ask { reason, .. } => {
+            // Defensive mirror of the Deny arm: degrade() makes this dead on a
+            // can_ask=false host; render hard-deny instead of panicking (exit
+            // 101 reads as hook failure = fail-open by accident).
+            Emission {
+                stdout: Some(
+                    json!({
+                        "allow_tool": false,
+                        "deny_reason": crate::contract::cap_reason(reason),
+                    })
+                    .to_string(),
+                ),
+                stderr: None,
+                exit: 0,
+            }
         }
         Decision::Deny { reason, .. } | Decision::Rewrite { reason, .. } => Emission {
             stdout: Some(

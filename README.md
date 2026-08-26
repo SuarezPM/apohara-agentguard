@@ -254,6 +254,9 @@ Where the hook contract actually ships today, stated plainly:
 
 An auto-wiring command (`agentguard init`) detects supported installs (Claude Code, OpenAI Codex, OpenCode, Kilo Code, kitty-code, Windsurf, Cursor, Antigravity) and appends the hook configuration (`agentguard init --yes` to apply, plain `init` dry-runs, `--undo` removes immediately — no confirmation prompt).
 
+> [!NOTE]
+> **Windows:** the Windsurf/Cursor wiring entries assume the host executes hook commands through a POSIX-compatible shell (single-quote escaping). On native Windows without WSL, verify your harness's shell semantics after `init` — or wire those hosts from WSL. Claude Code / Codex / Antigravity entries are unaffected.
+
 ---
 
 ## 🗺️ Roadmap
