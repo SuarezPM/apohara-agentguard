@@ -669,6 +669,128 @@ fn proxy_e2e_uppercase_preseed_pin_matches() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// 13. Graduated modes (FASE 5-B mechanism 1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn proxy_e2e_audit_only_passes_blockable_call_but_logs_would_block() {
+    // REQUIRED smoke: in audit-only mode a call the gates would deny reaches
+    // the upstream (proven by the mock log) while the would-block lands on
+    // stderr. Nothing is enforced; exit is clean.
+    let env = Env::new("audit-only");
+    let upstream = env.upstream();
+    let mut args: Vec<&str> = vec!["--mode", "audit-only", "--"];
+    args.extend(upstream.iter().map(String::as_str));
+
+    let danger = call_req(3, "shell", serde_json::json!({"command":"rm -rf /"}));
+    let s = run_session(&env, &args, &[], &[init_req(), danger]);
+
+    assert!(s.status.success(), "audit-only never fails the session");
+    assert!(
+        s.stderr.contains("mode: audit-only"),
+        "startup banner expected; stderr={}",
+        s.stderr
+    );
+    assert!(
+        s.stderr.contains("WOULD-BLOCK"),
+        "would-block must be logged; stderr={}",
+        s.stderr
+    );
+    assert!(
+        !s.stderr.contains("BLOCKED tools/call"),
+        "must not claim an enforced block; stderr={}",
+        s.stderr
+    );
+    // The dangerous call REACHED upstream (that is what audit-only means).
+    let log = read_log(&env);
+    assert!(
+        log.iter().any(|l| l.contains("rm -rf")),
+        "audit-only must forward the denied call; log={log:?}"
+    );
+}
+
+#[test]
+fn proxy_e2e_filter_only_forwards_denied_call_and_filters_drifted_manifest() {
+    let env = Env::new("filter-only");
+    let tools_a = env.root.join("tools_a.json");
+    let tools_b = env.root.join("tools_b.json");
+    std::fs::write(
+        &tools_a,
+        r#"[{"name":"echo","description":"original","inputSchema":{"type":"object"}}]"#,
+    )
+    .expect("tools_a");
+    std::fs::write(
+        &tools_b,
+        r#"[{"name":"echo","description":"TAMPERED — evil instructions","inputSchema":{"type":"object"}}]"#,
+    )
+    .expect("tools_b");
+
+    let upstream = env.upstream();
+    let upstream_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = vec!["--mode", "filter-only", "--"];
+    args.extend(upstream_refs);
+
+    // Run 1 records the honest manifest.
+    let first = run_session(
+        &env,
+        &args,
+        &[("MOCK_TOOLS_FILE", tools_a.to_str().unwrap())],
+        &[init_req(), list_req()],
+    );
+    assert!(first.status.success(), "stderr={}", first.stderr);
+
+    // Run 2: drift filters the list, but a denied call STILL flows and the
+    // session exits clean (no quarantine-grade outcome in filter-only).
+    let danger = call_req(3, "shell", serde_json::json!({"command":"rm -rf /"}));
+    let second = run_session(
+        &env,
+        &args,
+        &[("MOCK_TOOLS_FILE", tools_b.to_str().unwrap())],
+        &[init_req(), list_req(), danger],
+    );
+    assert!(
+        second.stderr.contains("FILTERED"),
+        "filter event must be logged; stderr={}",
+        second.stderr
+    );
+    let filtered_list = second.by_id(2);
+    assert_eq!(filtered_list["result"]["tools"], serde_json::json!([]));
+    let blocked = second.by_id(3);
+    assert!(
+        blocked.get("result").is_some() && blocked["result"]["isError"] == false,
+        "denied call must be FORWARDED (isError=false from mock), got {blocked}"
+    );
+    let log = read_log(&env);
+    assert!(
+        log.iter().any(|l| l.contains("rm -rf")),
+        "filter-only never blocks calls; log={log:?}"
+    );
+    assert!(second.status.success(), "stderr={}", second.stderr);
+}
+
+#[test]
+fn proxy_e2e_enforce_remains_default_mode() {
+    // Default posture guard: without --mode the banner says enforce and a
+    // denied call is actually blocked.
+    let env = Env::new("default-mode");
+    let upstream = env.upstream();
+    let upstream_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = vec!["--"];
+    args.extend(upstream_refs);
+
+    let danger = call_req(3, "shell", serde_json::json!({"command":"rm -rf /"}));
+    let s = run_session(&env, &args, &[], &[init_req(), danger]);
+    assert!(s.stderr.contains("mode: enforce"), "stderr={}", s.stderr);
+    let blocked = s.by_id(3);
+    assert_eq!(blocked["result"]["isError"], true);
+    let log = read_log(&env);
+    assert!(
+        !log.iter().any(|l| l.contains("rm -rf")),
+        "enforce must block; log={log:?}"
+    );
+}
+
 #[test]
 fn proxy_e2e_warm_latency_median_under_120ms() {
     let env = Env::new("latency");

@@ -4,11 +4,17 @@
 //!
 //! ```text
 //! agentguard-proxy [--exec] [--policy <path>] [--pin sha256:<hex>]
+//!                  [--mode <enforce|filter-only|audit-only>]
 //!                  [--max-line-bytes <n>] -- <server-cmd> <args…>
 //! ```
 //!
 //! (`--exec` and `--` are interchangeable spellings for the same thing: the
 //! rest of the command line is the REAL server, spawned as a child.)
+//!
+//! Enforcement is graduated via `--mode`: `enforce` (default) filters drifted
+//! manifests and blocks denied calls; `filter-only` filters but never blocks;
+//! `audit-only` only logs would-block/would-filter events. A startup banner
+//! (`mode: <name>`) lands on stderr in every session.
 //!
 //! Exit codes:
 //! - `0`  — clean session (client EOF, upstream exited successfully).
@@ -25,7 +31,7 @@ use clap::Parser;
 
 use apohara_agentguard::proxy::framing::DEFAULT_MAX_LINE_BYTES;
 use apohara_agentguard::proxy::gate::Gates;
-use apohara_agentguard::proxy::relay::{run, RelayConfig, RelayOutcome};
+use apohara_agentguard::proxy::relay::{run, RelayConfig, RelayMode, RelayOutcome};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -51,6 +57,13 @@ struct Args {
     /// the `AGENTGUARD_PIN` env var. A mismatch quarantines the session.
     #[arg(long, value_name = "SHA256:<HEX>")]
     pin: Option<String>,
+
+    /// Enforcement mode: `enforce` filters manifests and blocks denied calls
+    /// (default); `filter-only` filters tools/list but never blocks
+    /// tools/call; `audit-only` blocks and filters nothing, logging every
+    /// would-block / would-filter to stderr.
+    #[arg(long, value_enum, default_value_t = RelayMode::Enforce)]
+    mode: RelayMode,
 
     /// Maximum accepted NDJSON line size in bytes (fail-closed above it).
     #[arg(long, value_name = "BYTES", default_value_t = DEFAULT_MAX_LINE_BYTES)]
@@ -98,6 +111,7 @@ fn main() -> ExitCode {
         max_line_bytes: args.max_line_bytes,
         expected_pin,
         pin_base: None, // resolve via XDG_CONFIG_HOME / HOME (fail-closed if neither is set)
+        mode: args.mode,
     };
 
     match run(cfg, &gates) {

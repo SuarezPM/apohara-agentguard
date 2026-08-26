@@ -24,6 +24,26 @@
 //!   stderr. `notifications/tools/list_changed` invalidates the verified
 //!   generation so the next manifest re-verifies.
 //!
+//! ## Graduated enforcement modes ([`RelayMode`])
+//!
+//! The same decision pipeline runs in every mode; only the ACTION taken on a
+//! negative decision differs:
+//!
+//! - `enforce` (default) — today's behavior verbatim: drifted manifests are
+//!   replaced and the session quarantined; denied calls are blocked.
+//! - `filter-only` — `tools/list` filtering (pin verification + manifest
+//!   replacement) still applies, but a call the gates would block is
+//!   FORWARDED and the would-block is logged loudly on stderr instead.
+//! - `audit-only` — nothing is filtered or blocked: drifted manifests reach
+//!   the client VERBATIM and denied calls flow upstream; every would-block /
+//!   would-filter is logged to stderr.
+//!
+//! Modes govern CONTENT policy (gate + pins) only. Transport-integrity
+//! defenses (fail-closed framing, request-id anti-spoofing) stay ON in every
+//! mode — an audit proxy must not downgrade the channel itself. A startup
+//! banner (`mode: <name>` on stderr) makes the active posture visible in
+//! captured logs.
+//!
 //! Fail-closed rules (pinned from the V4-B research notes):
 //! - Non-JSON line from EITHER side ⇒ loud stderr log + terminate non-zero.
 //!   Never silently skipped.
@@ -32,7 +52,9 @@
 //!
 //! Exit mapping ([`RelayOutcome`]): clean end ⇒ 0, session quarantined ⇒ 2,
 //! internal/protocol failure ⇒ 74 (EX_IOERR, matching the existing MCP
-//! surface's convention).
+//! surface's convention). Quarantine-grade outcomes only map to exit 2 in
+//! `enforce` mode — the other modes never enter the enforced-quarantine
+//! state by definition.
 //!
 //! ## Ordering & the in-flight window (documented posture)
 //!
@@ -65,6 +87,34 @@ use crate::proxy::pinning::{
 /// Pinned replacement reason for a drifted manifest (spec-exact wording).
 const DRIFT_REASON: &str = "tool manifest drift — pin mismatch";
 
+/// Graduated enforcement mode for the relay (see the module docs).
+///
+/// The decision pipeline is identical in every mode; the mode only chooses
+/// between ACT and LOG on a negative decision. Default is `enforce` —
+/// today's behavior, byte-for-byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum RelayMode {
+    /// Filter drifted manifests and block denied calls (default).
+    #[default]
+    Enforce,
+    /// Filter `tools/list` per policy/pins but NEVER block `tools/call`;
+    /// would-blocks are logged to stderr.
+    FilterOnly,
+    /// Filter nothing, block nothing; log every would-block / would-filter.
+    AuditOnly,
+}
+
+impl RelayMode {
+    /// Canonical lowercase name used by the startup banner and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RelayMode::Enforce => "enforce",
+            RelayMode::FilterOnly => "filter-only",
+            RelayMode::AuditOnly => "audit-only",
+        }
+    }
+}
+
 /// Everything the relay needs to run. Injectable fields (`pin_base`) keep
 /// tests off the real config directory.
 #[derive(Debug, Clone)]
@@ -79,6 +129,21 @@ pub struct RelayConfig {
     /// Config base dir override for the pin store; `None` resolves via
     /// `$XDG_CONFIG_HOME` then `$HOME/.config`.
     pub pin_base: Option<std::path::PathBuf>,
+    /// Enforcement mode (default [`RelayMode::Enforce`]).
+    #[doc(hidden)]
+    pub mode: RelayMode,
+}
+
+impl Default for RelayConfig {
+    fn default() -> Self {
+        Self {
+            server: Vec::new(),
+            max_line_bytes: crate::proxy::framing::DEFAULT_MAX_LINE_BYTES,
+            expected_pin: None,
+            pin_base: None,
+            mode: RelayMode::Enforce,
+        }
+    }
 }
 
 /// How the relay session ended; the binary maps these to exit codes.
@@ -97,8 +162,10 @@ pub enum RelayOutcome {
 /// Shared mutable session state between the relay threads.
 #[derive(Default)]
 struct Shared {
+    /// Graduated enforcement mode (fixed for the session lifetime).
+    mode: RelayMode,
     /// Set once a quarantine-grade pin verdict fires; blocks every later
-    /// `tools/call`.
+    /// `tools/call`. Only ever set in [`RelayMode::Enforce`].
     quarantined: AtomicBool,
     quarantine_reason: Mutex<Option<String>>,
     /// First fatal error observed by any thread (protocol/I/O).
@@ -212,6 +279,14 @@ pub fn run(cfg: RelayConfig, gates: &Gates) -> RelayOutcome {
     let store = PinStore::open(base);
     let mut pin_gate = PinGate::new(store, upstream_identity.clone(), cfg.expected_pin.clone());
 
+    // Startup banner: the active posture must be visible in captured logs.
+    eprintln!("agentguard-proxy: mode: {}", cfg.mode.as_str());
+
+    let shared = Arc::new(Shared {
+        mode: cfg.mode,
+        ..Shared::default()
+    });
+
     let mut child = match std::process::Command::new(&cfg.server[0])
         .args(&cfg.server[1..])
         .stdin(std::process::Stdio::piped())
@@ -226,7 +301,7 @@ pub fn run(cfg: RelayConfig, gates: &Gates) -> RelayOutcome {
     let child_stdout = child.stdout.take().expect("child stdout piped");
     let child_stderr = child.stderr.take().expect("child stderr piped");
 
-    let shared = Arc::new(Shared::default());
+    // ---- child handle + outbound writer -----------------------------------
     // The child handle sits behind a mutex so any thread can fail-closed
     // kill it during teardown.
     let child = Arc::new(Mutex::new(child));
@@ -234,7 +309,6 @@ pub fn run(cfg: RelayConfig, gates: &Gates) -> RelayOutcome {
         let _ = child.lock().expect("child mutex").kill();
     };
 
-    // ---- outbound writer: sole owner of the client-side stdout lock -------
     let (tx_out, rx_out) = mpsc::channel::<String>();
     let writer_shared = Arc::clone(&shared);
     let writer = thread::spawn(move || {
@@ -453,18 +527,33 @@ fn handle_client_line(
             let _ = tx_in.send(line.to_string());
             return None;
         }
-        // Deny: synthesize the response locally; NEVER forward upstream.
-        eprintln!(
-            "agentguard-proxy: BLOCKED tools/call `{tool_name}`: {}",
-            decision.reason
-        );
-        if has_id {
-            let _ = tx_out.send(blocked_response(
-                msg.get("id").unwrap_or(&Value::Null),
-                &decision.reason,
-            ));
-        }
-        return None;
+        // Negative decision: the mode decides between ACT (synthesize the
+        // blocked response, never forward) and LOG (forward + loud
+        // would-block on stderr).
+        return match shared.mode {
+            RelayMode::Enforce => {
+                eprintln!(
+                    "agentguard-proxy: BLOCKED tools/call `{tool_name}`: {}",
+                    decision.reason
+                );
+                if has_id {
+                    let _ = tx_out.send(blocked_response(
+                        msg.get("id").unwrap_or(&Value::Null),
+                        &decision.reason,
+                    ));
+                }
+                None
+            }
+            mode => {
+                eprintln!(
+                    "agentguard-proxy: WOULD-BLOCK (mode {}) tools/call `{tool_name}`: {}",
+                    mode.as_str(),
+                    decision.reason
+                );
+                let _ = tx_in.send(line.to_string());
+                None
+            }
+        };
     }
 
     if method == Some("tools/list") && has_id {
@@ -519,22 +608,39 @@ fn handle_upstream_line(
                         PinVerdict::Mismatch { .. } => DRIFT_REASON.to_string(),
                         other => other.reason(),
                     };
-                    eprintln!(
-                        "agentguard-proxy: QUARANTINE: {} — blocking all further tools/call",
-                        verdict.reason()
-                    );
-                    shared.quarantine(reason.clone());
-                    let replacement = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": {
-                            "tools": [],
-                            "quarantined": true,
-                            "reason": crate::neutralize_reason(&reason),
+                    // The mode decides between ACT (enforce: quarantine +
+                    // replace; filter-only: replace but keep calls flowing)
+                    // and LOG (audit-only: forward the manifest verbatim).
+                    return match shared.mode {
+                        RelayMode::Enforce => {
+                            eprintln!(
+                                "agentguard-proxy: QUARANTINE: {} — blocking all further tools/call",
+                                verdict.reason()
+                            );
+                            shared.quarantine(reason.clone());
+                            let _ = tx_out.send(quarantined_manifest_response(id, &reason));
+                            None
                         }
-                    });
-                    let _ = tx_out.send(replacement.to_string());
-                    return None;
+                        RelayMode::FilterOnly => {
+                            eprintln!(
+                                "agentguard-proxy: FILTERED (mode filter-only): {} — \
+                                 manifest filtered, tools/call NOT blocked",
+                                verdict.reason()
+                            );
+                            let _ = tx_out.send(quarantined_manifest_response(id, &reason));
+                            None
+                        }
+                        RelayMode::AuditOnly => {
+                            eprintln!(
+                                "agentguard-proxy: WOULD-FILTER (mode audit-only): {}",
+                                verdict.reason()
+                            );
+                            // Nothing is filtered: the drifted manifest
+                            // reaches the client exactly as upstream sent it.
+                            let _ = tx_out.send(line.to_string());
+                            None
+                        }
+                    };
                 }
                 eprintln!("agentguard-proxy: {}", verdict.reason());
                 // Verified: forward the response verbatim.
@@ -553,6 +659,22 @@ fn handle_upstream_line(
     // Everything else forwards verbatim.
     let _ = tx_out.send(line.to_string());
     None
+}
+
+/// Build the replacement tools/list response the relay sends INSTEAD of a
+/// quarantine-grade manifest: an empty tool list flagged `quarantined` with
+/// the neutralized reason, under the request's original id.
+fn quarantined_manifest_response(id: &Value, reason: &str) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": {
+            "tools": [],
+            "quarantined": true,
+            "reason": crate::neutralize_reason(reason),
+        }
+    })
+    .to_string()
 }
 
 /// Cap hostile/garbage payload excerpts in stderr diagnostics.
@@ -583,6 +705,25 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).expect("mkdir");
         (dir.clone(), PinStore::open(dir))
+    }
+
+    fn test_gates() -> Gates {
+        Gates {
+            config: crate::config::Config::default(),
+            policy: crate::policy::engine::PolicySet::default(),
+        }
+    }
+
+    fn shared_in_mode(mode: RelayMode) -> Shared {
+        Shared {
+            mode,
+            ..Shared::default()
+        }
+    }
+
+    fn dangerous_call() -> String {
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"shell","arguments":{"command":"rm -rf /"}}}"#
+            .to_string()
     }
 
     fn manifest(desc: &str) -> Value {
@@ -799,5 +940,142 @@ mod tests {
         assert!(s.len() < 250, "{}", s.len());
         assert!(s.ends_with("[truncated]"));
         assert_eq!(truncate_for_log("short"), "short");
+    }
+
+    // ---- graduated modes (FASE 5-B mechanism 1) ----------------------------
+
+    #[test]
+    fn relay_mode_names_are_canonical() {
+        assert_eq!(RelayMode::Enforce.as_str(), "enforce");
+        assert_eq!(RelayMode::FilterOnly.as_str(), "filter-only");
+        assert_eq!(RelayMode::AuditOnly.as_str(), "audit-only");
+        // Default is enforce: today's behavior is untouchable.
+        assert_eq!(RelayMode::default(), RelayMode::Enforce);
+        assert_eq!(RelayConfig::default().mode, RelayMode::Enforce);
+    }
+
+    #[test]
+    fn filter_only_never_blocks_a_denied_call_but_still_filters_lists() {
+        let shared = shared_in_mode(RelayMode::FilterOnly);
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+        let gates = test_gates();
+
+        // A call the gates deny FORWARDS upstream in filter-only mode.
+        assert!(handle_client_line(&dangerous_call(), &shared, &tx_in, &tx_out, &gates).is_none());
+        let forwarded = rx_in.recv().expect("denied call must forward");
+        let v: Value = serde_json::from_str(&forwarded).unwrap();
+        assert_eq!(v["id"], 2, "same request reaches upstream");
+        assert!(rx_out.try_recv().is_err(), "no synthesized response");
+
+        // The session quarantine flag must never be set in this mode: the
+        // quarantined-call branch below stays unreachable.
+        assert!(!shared.quarantined.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn audit_only_never_blocks_a_denied_call() {
+        let shared = shared_in_mode(RelayMode::AuditOnly);
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+        let gates = test_gates();
+
+        assert!(handle_client_line(&dangerous_call(), &shared, &tx_in, &tx_out, &gates).is_none());
+        assert!(rx_in.recv().is_ok(), "audit-only forwards everything");
+        assert!(rx_out.try_recv().is_err());
+    }
+
+    #[test]
+    fn filter_only_replaces_drifted_manifest_without_session_quarantine() {
+        let (_dir, store) = temp_store("filter-drift");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = shared_in_mode(RelayMode::FilterOnly);
+        let (tx_out, rx_out) = mpsc::channel();
+
+        // Record the honest manifest first.
+        pin_gate.on_list_response(&manifest("orig"));
+
+        // Drifted manifest on a tracked list id ⇒ replaced with the empty
+        // filtered manifest, but the SESSION must stay un-quarantined.
+        let drifted = json!({
+            "jsonrpc": "2.0", "id": 2,
+            "result": { "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }
+        });
+        shared
+            .pending_lists
+            .lock()
+            .unwrap()
+            .insert(json!(2).to_string());
+        let line = drifted.to_string();
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        let replaced = rx_out.recv().expect("filtered replacement");
+        let v: Value = serde_json::from_str(&replaced).unwrap();
+        assert_eq!(v["result"]["tools"], json!([]));
+        assert_eq!(v["result"]["quarantined"], true);
+        assert!(
+            !shared.quarantined.load(Ordering::SeqCst),
+            "filter-only must NOT raise the session quarantine flag"
+        );
+    }
+
+    #[test]
+    fn audit_only_forwards_drifted_manifest_verbatim_with_would_log() {
+        let (_dir, store) = temp_store("audit-drift");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = shared_in_mode(RelayMode::AuditOnly);
+        let (tx_out, rx_out) = mpsc::channel();
+
+        pin_gate.on_list_response(&manifest("orig"));
+
+        let drifted = json!({
+            "jsonrpc": "2.0", "id": 3,
+            "result": { "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }
+        });
+        shared
+            .pending_lists
+            .lock()
+            .unwrap()
+            .insert(json!(3).to_string());
+        let line = drifted.to_string();
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        assert_eq!(
+            rx_out.recv().expect("verbatim forward"),
+            line,
+            "audit-only must not touch the manifest bytes"
+        );
+        assert!(!shared.quarantined.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn enforce_mode_still_blocks_denied_calls_and_quarantines() {
+        // Guard against accidental mode drift: the default path keeps
+        // today's semantics exactly.
+        let shared = shared_in_mode(RelayMode::Enforce);
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+        let gates = test_gates();
+
+        assert!(handle_client_line(&dangerous_call(), &shared, &tx_in, &tx_out, &gates).is_none());
+        assert!(rx_in.try_recv().is_err(), "enforce must not forward");
+        let resp = rx_out.recv().expect("synthesized block");
+        let v: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["result"]["isError"], true);
+
+        // Upstream drift still raises the session quarantine in enforce.
+        let (_dir, store) = temp_store("enforce-drift");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        pin_gate.on_list_response(&manifest("orig"));
+        let drifted = json!({
+            "jsonrpc": "2.0", "id": 4,
+            "result": { "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }
+        });
+        shared
+            .pending_lists
+            .lock()
+            .unwrap()
+            .insert(json!(4).to_string());
+        let line = drifted.to_string();
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(shared.quarantined.load(Ordering::SeqCst));
     }
 }
