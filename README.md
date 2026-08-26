@@ -247,9 +247,12 @@ Where the hook contract actually ships today, stated plainly:
 | **Claude Code** | Supported today | Ships as a plugin: manifest + hook config wire `apohara-agentguard hook` to `PreToolUse` / `PostToolUse` / `UserPromptSubmit` ([packaging/plugin.json](packaging/plugin.json), [packaging/hooks.json](packaging/hooks.json)). |
 | **OpenAI Codex** | Hook contract supported | Codex's `PreToolUse` payload is snake_case and identical to what the hook already parses; camelCase field spellings are accepted as aliases. Bash-command protection works identically; Codex's `apply_patch` edit tool is **not** mapped to the path-guard yet, so treat Codex wiring as Bash protection today. |
 | **OpenCode · Kilo Code · Kitty-Code** | Supported (v0.4) | OpenCode and Kilo Code run a plugin shim that spawns the binary per call, fail-closed; Kitty-Code takes the library-embed route (path dependency, ~µs per check), a failsafe augmenting its built-in Guard. |
+| **Windsurf** | Supported (v0.5) | `agentguard hook --harness windsurf` on `pre_run_command` / `pre_mcp_tool_use`: command-shaped calls hit the Bash gate; blocking is exit 2 + reason on stderr. |
+| **Cursor** | Supported (v0.5) | `--harness cursor` on `beforeShellExecution` / `beforeMCPExecution`; the verdict travels in the stdout JSON (`permission: deny`) with exit 0 always. Cursor ignores `"ask"` replies, so every ask-grade verdict degrades to an explicit deny marked "requires human approval". |
+| **Antigravity** | Supported (v0.5) | Plugin drop-in (`~/.gemini/antigravity-cli/plugins/agentguard/`) speaking a claude-like PreToolUse contract; deny = `{"allow_tool": false, "deny_reason": …}` with exit 0 (its loader treats non-zero exits as hook failures). |
 | **MCP gateway** | Supported (v0.4) | Ships as `agentguard-proxy`: TOFU SHA-256 pinning of the server's tool manifest with quarantine-on-drift; deliberate default-allow for ungoverned calls, with policy rules + a command/script deep check enforcing on governed ones. |
 
-An auto-wiring command (`agentguard init`) detects supported installs (Claude Code, OpenAI Codex, OpenCode, Kilo Code, kitty-code) and appends the hook configuration (`agentguard init --yes` to apply, plain `init` dry-runs, `--undo` removes immediately — no confirmation prompt).
+An auto-wiring command (`agentguard init`) detects supported installs (Claude Code, OpenAI Codex, OpenCode, Kilo Code, kitty-code, Windsurf, Cursor, Antigravity) and appends the hook configuration (`agentguard init --yes` to apply, plain `init` dry-runs, `--undo` removes immediately — no confirmation prompt).
 
 ---
 
@@ -273,6 +276,7 @@ An auto-wiring command (`agentguard init`) detects supported installs (Claude Co
 
 ### v0.5+ — Polish, depth, honest opt-ins
 
+- [x] **Multi-harness hook contract** — one decision pipeline behind per-host fronts: `hook --harness windsurf|cursor|antigravity` (Claude/Codex stay on the canonical envelope, default byte-identical), with `init` wiring and `doctor` coverage for all eight hosts.
 - [x] **Community policy / plugin packs** — shipped in v0.4 (TOML format, fail-closed loader, 3 examples).
 - **MiniBERT semantic-classifier tier** — **DESCOPED** (cou-1 review cut it: supply-chain surface + perpetual weight maintenance for an informational function; revisits only on real demand).
 - **eBPF / BPF-LSM enforcement** — **NO-GO (documented)** for the default build; the five GO-flip conditions live in the decision record ([docs/ebpf-spike-go-nogo.md](docs/ebpf-spike-go-nogo.md)).

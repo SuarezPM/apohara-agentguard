@@ -50,6 +50,7 @@
 //! `${CLAUDE_PLUGIN_ROOT}` deliberately does NOT work in Claude Code's
 //! `settings.json`, so the ABSOLUTE path of the running binary is written.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use serde_json::{json, Map, Value};
@@ -62,6 +63,18 @@ const CLAUDE_DIR: &str = ".claude";
 const CLAUDE_FILE: &str = "settings.json";
 const CODEX_DIR: &str = ".codex";
 const CODEX_FILE: &str = "hooks.json";
+
+// --- FASE 4 (v0.5.0) JSON-hook + drop-in hosts ------------------------------
+
+/// `~/.codeium/windsurf/hooks.json` (user scope).
+const WINDSURF_DIR: &str = ".codeium";
+const WINDSURF_SUBDIR: &str = "windsurf";
+/// `~/.cursor/hooks.json`.
+const CURSOR_DIR: &str = ".cursor";
+/// Antigravity plugin drop-in dir (we OWN this directory's hooks.json).
+const ANTIGRAVITY_PLUGIN_DIR: &str = ".gemini/antigravity-cli/plugins/agentguard";
+/// Config file name shared by the three FASE-4 hosts.
+const HOOKS_JSON_FILE: &str = "hooks.json";
 
 // --- Drop-in hosts (opencode / kilo / kitty-code) ---------------------------
 
@@ -104,6 +117,39 @@ use crate::adapters::codex::{
     CODEX_DESCRIPTION, CODEX_PRE_TOOL_USE_MATCHER, HOOK_TIMEOUT, SPAWN_ARGS,
 };
 
+/// Generate the EXACT `hooks.json` document `init` writes into OUR
+/// antigravity plugin directory (`~/.gemini/antigravity-cli/plugins/agentguard/`).
+///
+/// Antigravity is claude-like (`PreToolUse` + `{tool_name, tool_input}`), so
+/// the document uses the nested matcher-group envelope with the canonical
+/// spawn args plus `--harness antigravity`. Because the whole file is ours,
+/// install/undo/doctor manage it by exact content equality — this generator
+/// is the single source shared by all three (and by the contract tests).
+pub fn antigravity_plugin_document(exe: &Path) -> String {
+    let doc = json!({
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": ANTIGRAVITY_MATCHER,
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": exe.to_string_lossy(),
+                            "args": ["hook", "--harness", "antigravity"],
+                            "timeout": HOOK_TIMEOUT,
+                        }
+                    ]
+                }
+            ]
+        }
+    });
+    // serde_json serialization of a Value cannot fail.
+    let mut out =
+        serde_json::to_string_pretty(&doc).expect("antigravity doc serialization is infallible");
+    out.push('\n');
+    out
+}
+
 /// Event groups wired per host: `(event key, matcher)`. A `None` matcher is
 /// omitted (Claude Code's UserPromptSubmit takes no matcher).
 const CLAUDE_GROUPS: &[(&str, Option<&str>)] = &[
@@ -115,6 +161,25 @@ const CLAUDE_GROUPS: &[(&str, Option<&str>)] = &[
     ("UserPromptSubmit", None),
 ];
 const CODEX_GROUPS: &[(&str, Option<&str>)] = &[("PreToolUse", Some(CODEX_PRE_TOOL_USE_MATCHER))];
+
+/// Windsurf hook events (ASSUMPTION documented: the researched wire format
+/// exposes these two pre-action events at user scope; entries are flat
+/// `{command}` objects, so no matchers are written — a catch-all entry is the
+/// tolerant shape and the gate itself decides what to evaluate).
+const WINDSURF_GROUPS: &[(&str, Option<&str>)] =
+    &[("pre_run_command", None), ("pre_mcp_tool_use", None)];
+
+/// Cursor hook events (flat per-event command arrays; no matcher channel on
+/// these two events in the researched format).
+const CURSOR_GROUPS: &[(&str, Option<&str>)] =
+    &[("beforeShellExecution", None), ("beforeMCPExecution", None)];
+
+/// Antigravity is claude-like (`PreToolUse` + `{tool_name, tool_input}`), so
+/// it gets the SAME matcher surface as the Claude wiring. ASSUMPTION: its
+/// plugin `hooks.json` accepts the nested matcher-group document; if the
+/// loader proves stricter, only [`antigravity_plugin_document`] needs to
+/// change (the file is ours by exact content).
+const ANTIGRAVITY_MATCHER: &str = "Bash|Read|Write|Edit|WebFetch|WebSearch";
 
 /// What `init` should do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,15 +271,39 @@ pub fn run(
             host: "claude-code",
             dir: base_home.join(CLAUDE_DIR),
             file_name: CLAUDE_FILE,
+            shape: WireShape::Groups,
             groups: CLAUDE_GROUPS,
+            harness_arg: None,
             sets_description: false,
         },
         HostSpec {
             host: "codex-code",
             dir: base_home.join(CODEX_DIR),
             file_name: CODEX_FILE,
+            shape: WireShape::Groups,
             groups: CODEX_GROUPS,
+            harness_arg: None,
             sets_description: true,
+        },
+        // FASE 4 hosts. Windsurf nests under ~/.codeium/windsurf (user
+        // scope); cursor is the flat ~/.cursor/hooks.json.
+        HostSpec {
+            host: "windsurf",
+            dir: base_home.join(WINDSURF_DIR).join(WINDSURF_SUBDIR),
+            file_name: HOOKS_JSON_FILE,
+            shape: WireShape::Flat,
+            groups: WINDSURF_GROUPS,
+            harness_arg: Some("windsurf"),
+            sets_description: false,
+        },
+        HostSpec {
+            host: "cursor",
+            dir: base_home.join(CURSOR_DIR),
+            file_name: HOOKS_JSON_FILE,
+            shape: WireShape::Flat,
+            groups: CURSOR_GROUPS,
+            harness_arg: Some("cursor"),
+            sets_description: false,
         },
     ];
 
@@ -230,13 +319,17 @@ pub fn run(
     let kilo_guide = crate::adapters::kilo::veto_guide();
     let opencode_plugins = plugins_dir(base_home, xdg_config_home.as_deref(), OPENCODE_APP);
     let kilo_plugins = plugins_dir(base_home, xdg_config_home.as_deref(), KILO_APP);
+    // Antigravity: a plugin DIRECTORY we own outright — its hooks.json is
+    // generated from the current exe (so exact-content equality doubles as
+    // staleness detection, mirroring the JSON hosts' refresh semantics).
+    let antigravity_dir = base_home.join(ANTIGRAVITY_PLUGIN_DIR);
     let dropin_plans = [
         plan_dropin_host(
             "opencode",
             &opencode_plugins,
             &[DropInFile {
                 path: opencode_plugins.join(SHIM_FILE_NAME),
-                content: OPENCODE_SHIM,
+                content: Cow::Borrowed(OPENCODE_SHIM),
             }],
             mode,
         )?,
@@ -246,17 +339,26 @@ pub fn run(
             &[
                 DropInFile {
                     path: kilo_plugins.join(SHIM_FILE_NAME),
-                    content: OPENCODE_SHIM,
+                    content: Cow::Borrowed(OPENCODE_SHIM),
                 },
                 DropInFile {
                     path: xdg_config_dir(base_home, xdg_config_home.as_deref(), KILO_APP)
                         .join(KILO_GUIDE_FILE_NAME),
-                    content: kilo_guide,
+                    content: Cow::Borrowed(kilo_guide),
                 },
             ],
             mode,
         )?,
         plan_kitty_host(base_home, mode)?,
+        plan_dropin_host(
+            "antigravity",
+            &antigravity_dir,
+            &[DropInFile {
+                path: antigravity_dir.join(HOOKS_JSON_FILE),
+                content: Cow::Owned(antigravity_plugin_document(exe)),
+            }],
+            mode,
+        )?,
     ];
 
     // Phase 3 — persist, in host order.
@@ -299,8 +401,28 @@ struct HostSpec {
     host: &'static str,
     dir: PathBuf,
     file_name: &'static str,
+    shape: WireShape,
     groups: &'static [(&'static str, Option<&'static str>)],
+    /// `Some("windsurf")` etc. when the spawned command must carry
+    /// `hook --harness <name>`; `None` for the legacy `hook`-only hosts.
+    harness_arg: Option<&'static str>,
     sets_description: bool,
+}
+
+/// Where our inner-hook commands live inside a host's `hooks` document.
+///
+/// Both shapes coexist in the marker walkers (a document is scanned
+/// shape-agnostically so a hand-mixed file can never hide our entries):
+/// - [`WireShape::Groups`]: claude/codex nested matcher groups —
+///   `hooks.<event>[].hooks[].command` holds the bare exe path.
+/// - [`WireShape::Flat`]: windsurf/cursor flat per-event arrays —
+///   `hooks.<event>[].command` holds the FULL spawn line
+///   (`<exe> hook --harness <name>`), because those runners execute the
+///   entry as one shell string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireShape {
+    Groups,
+    Flat,
 }
 
 struct HostPlan {
@@ -311,10 +433,13 @@ struct HostPlan {
 
 // --- Drop-in hosts (opencode / kilo / kitty-code) ---------------------------
 
-/// One reserved-name artifact we manage by exact content equality.
+/// One reserved-name artifact we manage by exact content equality. `content`
+/// is a `Cow` because most artifacts are embedded constants, while the
+/// antigravity plugin document is GENERATED from the current exe path.
+#[derive(Clone)]
 struct DropInFile {
     path: PathBuf,
-    content: &'static str,
+    content: Cow<'static, str>,
 }
 
 /// The persistence plan for one drop-in host.
@@ -377,12 +502,12 @@ fn plan_dropin_host(
     let mut all_exact = true;
 
     for file in files {
-        match read_exact(&file.path, file.content)? {
+        match read_exact(&file.path, &file.content)? {
             Exactness::Exact => {
                 if mode == Mode::Uninstall {
                     removes.push(DropInFile {
                         path: file.path.clone(),
-                        content: file.content,
+                        content: file.content.clone(),
                     });
                 }
             }
@@ -394,7 +519,7 @@ fn plan_dropin_host(
                     // self-heal in place.
                     writes.push(DropInFile {
                         path: file.path.clone(),
-                        content: file.content,
+                        content: file.content.clone(),
                     });
                 } // uninstall: never delete a hand-edited artifact
             }
@@ -404,7 +529,7 @@ fn plan_dropin_host(
                 if mode == Mode::Install {
                     writes.push(DropInFile {
                         path: file.path.clone(),
-                        content: file.content,
+                        content: file.content.clone(),
                     });
                 }
             }
@@ -467,7 +592,7 @@ fn plan_kitty_host(base_home: &Path, mode: Mode) -> Result<DropInPlan, InitError
     let writes = if mode == Mode::Install && matches!(outcome, Outcome::Scaffolded { .. }) {
         vec![DropInFile {
             path: path.clone(),
-            content: KITTY_SCAFFOLD,
+            content: Cow::Borrowed(KITTY_SCAFFOLD),
         }]
     } else {
         Vec::new()
@@ -475,7 +600,7 @@ fn plan_kitty_host(base_home: &Path, mode: Mode) -> Result<DropInPlan, InitError
     let removes = match &outcome {
         Outcome::Unwired { .. } => vec![DropInFile {
             path: path.clone(),
-            content: KITTY_SCAFFOLD,
+            content: Cow::Borrowed(KITTY_SCAFFOLD),
         }],
         _ => Vec::new(),
     };
@@ -525,23 +650,34 @@ fn plan_host(spec: &HostSpec, exe: &Path, mode: Mode) -> Result<HostPlan, InitEr
             if let Some(mut root) = root {
                 if is_wired(&root) {
                     // Marker present. AlreadyWired ONLY when every
-                    // marker-matched command already equals the current exe;
+                    // marker-matched entry already equals what the current
+                    // exe expects (nested: bare exe; flat: full spawn line);
                     // otherwise the wiring points at a stale/relocated binary
                     // (silent protection loss) and is refreshed IN PLACE.
                     let exe_str = exe.to_string_lossy().into_owned();
-                    if marker_commands(&root).iter().all(|c| c == &exe_str) {
+                    let stale = marker_sites(&root).iter().any(|(is_flat, cmd)| {
+                        *cmd != expected_command(*is_flat, &exe_str, spec.harness_arg)
+                    });
+                    if !stale {
                         return Ok(HostPlan {
                             new_value: None,
                             outcome: Outcome::AlreadyWired,
                         });
                     }
-                    let updated = refresh_marker_commands(&mut root, &exe_str);
+                    let updated = refresh_marker_commands(&mut root, &exe_str, spec.harness_arg);
                     return Ok(HostPlan {
                         new_value: Some(root),
                         outcome: Outcome::Refreshed { updated },
                     });
                 }
-                wire_host(&mut root, spec.groups, exe, spec.sets_description);
+                wire_host(
+                    &mut root,
+                    spec.groups,
+                    exe,
+                    spec.shape,
+                    spec.harness_arg,
+                    spec.sets_description,
+                );
                 return Ok(HostPlan {
                     new_value: Some(root),
                     outcome: Outcome::Wired {
@@ -557,7 +693,14 @@ fn plan_host(spec: &HostSpec, exe: &Path, mode: Mode) -> Result<HostPlan, InitEr
                 obj.insert("hooks".into(), json!({}));
                 Value::Object(obj)
             };
-            wire_host(&mut root, spec.groups, exe, spec.sets_description);
+            wire_host(
+                &mut root,
+                spec.groups,
+                exe,
+                spec.shape,
+                spec.harness_arg,
+                spec.sets_description,
+            );
             Ok(HostPlan {
                 new_value: Some(root),
                 outcome: Outcome::Wired {
@@ -621,47 +764,121 @@ fn parse_config(path: &Path, bytes: &[u8]) -> Result<Value, InitError> {
 
 /// True when any inner hook's `command` carries our marker.
 fn is_wired(root: &Value) -> bool {
-    !marker_commands(root).is_empty()
+    !marker_sites(root).is_empty()
 }
 
-/// The `command` strings of every marker-matched inner hook.
-fn marker_commands(root: &Value) -> Vec<&str> {
-    inner_hooks(root)
-        .filter_map(|h| h.get("command").and_then(Value::as_str))
-        .filter(|c| c.contains(MARKER))
-        .collect()
-}
-
-/// Rewrite the `command` of every marker-matched inner hook IN PLACE to
-/// `exe` (args / timeout / matchers / user hooks untouched). Returns how
-/// many entries were rewritten.
-fn refresh_marker_commands(root: &mut Value, exe: &str) -> usize {
-    let Some(obj) = root.as_object_mut() else {
-        return 0;
+/// Every `(is_flat, command)` pair carried by a marker-matched entry of ours,
+/// scanning BOTH document shapes:
+/// - nested matcher group: `hooks.<event>[].hooks[].command` (claude/codex);
+/// - flat per-event entry: `hooks.<event>[].command` (windsurf/cursor).
+///
+/// A group item is recognized by carrying a `hooks` array; anything else with
+/// a string `command` is treated as a flat entry. Non-conforming shapes
+/// contribute nothing.
+fn marker_sites(root: &Value) -> Vec<(bool, &str)> {
+    let mut out = Vec::new();
+    let Some(hooks) = root.get("hooks").and_then(Value::as_object) else {
+        return out;
     };
-    let Some(hooks) = obj.get_mut("hooks").and_then(Value::as_object_mut) else {
+    for event_val in hooks.values() {
+        let Some(arr) = event_val.as_array() else {
+            continue;
+        };
+        for item in arr {
+            if let Some(inner) = item.get("hooks").and_then(Value::as_array) {
+                for h in inner {
+                    if let Some(c) = h.get("command").and_then(Value::as_str) {
+                        if c.contains(MARKER) {
+                            out.push((false, c));
+                        }
+                    }
+                }
+            } else if let Some(c) = item.get("command").and_then(Value::as_str) {
+                if c.contains(MARKER) {
+                    out.push((true, c));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The full spawn line for one FLAT entry (`windsurf` / `cursor`): those
+/// runners execute the entry as ONE shell string, so the harness flag rides
+/// inside it. The exe path is shell-quoted when needed so spaces cannot split
+/// the invocation.
+fn flat_command_line(exe: &str, harness: &str) -> String {
+    format!("{} hook --harness {}", quote_shell_token(exe), harness)
+}
+
+/// POSIX sh single-quote-when-needed wrapper. Paths made of common safe
+/// characters stay verbatim (the overwhelmingly common case), everything else
+/// gets the classic `'\''` escape — deterministic both at write and at
+/// staleness-comparison time.
+fn quote_shell_token(s: &str) -> String {
+    let safe = s
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+'));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// The command string one of OUR entries must carry right now: bare exe for
+/// nested-group entries (args live in the sibling `args` field), the full
+/// quoted spawn line for flat entries.
+fn expected_command(is_flat: bool, exe_str: &str, harness: Option<&str>) -> String {
+    match (is_flat, harness) {
+        (true, Some(h)) => flat_command_line(exe_str, h),
+        _ => exe_str.to_string(),
+    }
+}
+
+/// Rewrite every marker-matched entry IN PLACE to what the CURRENT exe
+/// expects (args / timeout / matchers / user hooks untouched). Returns how
+/// many entries were rewritten.
+fn refresh_marker_commands(root: &mut Value, exe: &str, harness: Option<&str>) -> usize {
+    let Some(hooks) = root
+        .as_object_mut()
+        .and_then(|o| o.get_mut("hooks"))
+        .and_then(Value::as_object_mut)
+    else {
         return 0;
     };
     let mut updated = 0;
-    for group_arr in hooks.values_mut() {
-        let Some(arr) = group_arr.as_array_mut() else {
+    for event_val in hooks.values_mut() {
+        let Some(arr) = event_val.as_array_mut() else {
             continue;
         };
-        for group in arr {
-            let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                continue;
-            };
-            for h in inner {
-                let is_ours = h
+        for item in arr.iter_mut() {
+            if let Some(inner) = item.get_mut("hooks").and_then(Value::as_array_mut) {
+                // Nested group: command holds the bare exe.
+                for h in inner.iter_mut() {
+                    let is_ours = h
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| c.contains(MARKER));
+                    if is_ours {
+                        if let Some(Value::String(cmd)) = h.get_mut("command") {
+                            *cmd = exe.to_string();
+                            updated += 1;
+                        }
+                    }
+                }
+            } else {
+                // Flat entry: command holds the full spawn line.
+                let is_ours = item
                     .get("command")
                     .and_then(Value::as_str)
                     .is_some_and(|c| c.contains(MARKER));
-                if !is_ours {
-                    continue;
-                }
-                if let Some(Value::String(cmd)) = h.get_mut("command") {
-                    *cmd = exe.to_string();
-                    updated += 1;
+                if is_ours {
+                    let fresh = expected_command(true, exe, harness);
+                    if let Some(Value::String(cmd)) = item.get_mut("command") {
+                        *cmd = fresh;
+                        updated += 1;
+                    }
                 }
             }
         }
@@ -682,27 +899,16 @@ fn remove_stamped_description(root: &mut Value) -> bool {
     obj.remove("description").is_some()
 }
 
-/// Iterate every inner hook object across all event arrays under `"hooks"`.
-/// Non-conforming shapes contribute nothing (they are left untouched by both
-/// install and undo).
-fn inner_hooks(root: &Value) -> impl Iterator<Item = &Value> {
-    root.get("hooks")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flat_map(|hooks| hooks.values())
-        .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(|group| group.get("hooks"))
-        .filter_map(Value::as_array)
-        .flatten()
-}
-
-/// Append our matcher groups to the existing `hooks` table (get-or-create at
-/// every level; existing user content is never touched).
+/// Append our event entries to the existing `hooks` table (get-or-create at
+/// every level; existing user content is never touched). The entry SHAPE
+/// follows [`WireShape`]: nested matcher groups for claude/codex, flat
+/// per-event command objects for windsurf/cursor.
 fn wire_host(
     root: &mut Value,
     groups: &[(&str, Option<&str>)],
     exe: &Path,
+    shape: WireShape,
+    harness_arg: Option<&'static str>,
     set_description_if_absent: bool,
 ) {
     let exe_str = exe.to_string_lossy().into_owned();
@@ -716,13 +922,18 @@ fn wire_host(
         let arr = hooks_obj
             .entry((*event).to_string())
             .or_insert_with(|| json!([]));
+        let entry = match shape {
+            WireShape::Groups => hook_group(*matcher, &exe_str),
+            WireShape::Flat => flat_hook_entry(&exe_str, harness_arg),
+        };
         arr.as_array_mut()
             .expect("event value validated as array")
-            .push(hook_group(*matcher, &exe_str));
+            .push(entry);
     }
 }
 
-/// One matcher-group entry: `{"matcher": ..., "hooks": [inner]}`.
+/// One nested matcher-group entry: `{"matcher": ..., "hooks": [inner]}` with
+/// the canonical spawn envelope (`args`/`timeout` siblings).
 fn hook_group(matcher: Option<&str>, exe: &str) -> Value {
     let mut group = Map::new();
     if let Some(m) = matcher {
@@ -740,9 +951,25 @@ fn hook_group(matcher: Option<&str>, exe: &str) -> Value {
     Value::Object(group)
 }
 
-/// Remove every marker-matched inner hook; prune groups whose inner `hooks`
+/// One FLAT per-event entry (`windsurf` / `cursor`): a single shell-string
+/// `command` carrying `hook --harness <name>`, plus the shared timeout.
+fn flat_hook_entry(exe: &str, harness: Option<&str>) -> Value {
+    let line = match harness {
+        Some(h) => flat_command_line(exe, h),
+        // Defensive: a flat entry without a harness arg degrades to the bare
+        // legacy invocation rather than to a malformed line.
+        None => quote_shell_token(exe),
+    };
+    json!({
+        "command": line,
+        "timeout": HOOK_TIMEOUT,
+    })
+}
+
+/// Remove every marker-matched entry across BOTH shapes: nested inner hooks
+/// and flat per-event command objects. Prunes groups whose inner `hooks`
 /// array became empty and event keys whose arrays became empty. Returns the
-/// number of inner hooks removed. Everything else is left untouched.
+/// number of entries removed. Everything else is left untouched.
 fn unwire_host(root: &mut Value) -> usize {
     let mut removed = 0;
     let Some(obj) = root.as_object_mut() else {
@@ -756,18 +983,28 @@ fn unwire_host(root: &mut Value) -> usize {
         let Some(arr) = hooks.get_mut(&event).and_then(Value::as_array_mut) else {
             continue;
         };
-        arr.retain_mut(|group| {
-            let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                return true; // non-conforming group: leave untouched
-            };
-            let before = inner.len();
-            inner.retain(|h| {
-                !h.get("command")
-                    .and_then(Value::as_str)
-                    .is_some_and(|c| c.contains(MARKER))
-            });
-            removed += before - inner.len();
-            !inner.is_empty()
+        arr.retain_mut(|item| {
+            if let Some(inner) = item.get_mut("hooks").and_then(Value::as_array_mut) {
+                // Nested matcher group.
+                let before = inner.len();
+                inner.retain(|h| {
+                    !h.get("command")
+                        .and_then(Value::as_str)
+                        .is_some_and(|c| c.contains(MARKER))
+                });
+                removed += before - inner.len();
+                !inner.is_empty()
+            } else if item
+                .get("command")
+                .and_then(Value::as_str)
+                .is_some_and(|c| c.contains(MARKER))
+            {
+                // Flat entry that is ours.
+                removed += 1;
+                false
+            } else {
+                true // non-conforming / user entry: leave untouched
+            }
         });
         if arr.is_empty() {
             hooks.remove(&event);
@@ -819,7 +1056,7 @@ pub struct HostWiring {
     pub state: WiringState,
 }
 
-/// Observe the wiring state of all five hosts against `base_home`, writing
+/// Observe the wiring state of all EIGHT hosts against `base_home`, writing
 /// nothing (`doctor`). Same path resolution as [`run`] — including
 /// `$XDG_CONFIG_HOME`, passed EXPLICITLY so this core stays hermetic like
 /// the rest of the module.
@@ -828,14 +1065,37 @@ pub fn diagnose_hosts(
     xdg_config_home: Option<&std::ffi::OsStr>,
     exe: &Path,
 ) -> Vec<HostWiring> {
-    let mut out = Vec::with_capacity(5);
+    let mut out = Vec::with_capacity(8);
 
     // JSON-hook hosts: classify by parsing the config and scanning markers.
-    for (host, path) in [
-        ("claude-code", base_home.join(CLAUDE_DIR).join(CLAUDE_FILE)),
-        ("codex-code", base_home.join(CODEX_DIR).join(CODEX_FILE)),
+    // Flat-entry hosts (windsurf/cursor) compare against their full spawn
+    // line; nested hosts against the bare exe.
+    for (host, path, harness) in [
+        (
+            "claude-code",
+            base_home.join(CLAUDE_DIR).join(CLAUDE_FILE),
+            None,
+        ),
+        (
+            "codex-code",
+            base_home.join(CODEX_DIR).join(CODEX_FILE),
+            None,
+        ),
+        (
+            "windsurf",
+            base_home
+                .join(WINDSURF_DIR)
+                .join(WINDSURF_SUBDIR)
+                .join(HOOKS_JSON_FILE),
+            Some("windsurf"),
+        ),
+        (
+            "cursor",
+            base_home.join(CURSOR_DIR).join(HOOKS_JSON_FILE),
+            Some("cursor"),
+        ),
     ] {
-        let state = json_wiring_state(&path, exe);
+        let state = json_wiring_state(&path, exe, harness);
         out.push(HostWiring { host, path, state });
     }
 
@@ -863,15 +1123,28 @@ pub fn diagnose_hosts(
         state,
     });
 
+    // Antigravity: our plugin hooks.json is generated from the current exe,
+    // so exact-content equality IS the staleness check.
+    let antigravity_hooks = base_home.join(ANTIGRAVITY_PLUGIN_DIR).join(HOOKS_JSON_FILE);
+    let doc = antigravity_plugin_document(exe);
+    let state = dropin_wiring_state(&[(&antigravity_hooks, doc.as_str())]);
+    out.push(HostWiring {
+        host: "antigravity",
+        path: antigravity_hooks.clone(),
+        state,
+    });
+
     let kitty_policy = plan_kitty_wiring(base_home);
     out.push(kitty_policy);
     out
 }
 
-/// Classify one JSON-hook host config (`claude-code`, `codex-code`) without
-/// modifying it. Reuses the SAME parse validation ([`parse_config`]) and
-/// marker scan ([`is_wired`] / [`marker_commands`]) as install.
-fn json_wiring_state(path: &Path, exe: &Path) -> WiringState {
+/// Classify one JSON-hook host config (`claude-code`, `codex-code`,
+/// `windsurf`, `cursor`) without modifying it. Reuses the SAME parse
+/// validation ([`parse_config`]) and marker scan ([`is_wired`] /
+/// [`marker_sites`]) as install. `harness` is the flat-entry spawn-line
+/// suffix (`Some("windsurf")`) or `None` for nested-envelope hosts.
+fn json_wiring_state(path: &Path, exe: &Path, harness: Option<&str>) -> WiringState {
     match std::fs::read(path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => WiringState::NotInstalled,
         Err(e) => WiringState::Corrupt(e.to_string()),
@@ -889,10 +1162,10 @@ fn json_wiring_state(path: &Path, exe: &Path) -> WiringState {
                 return WiringState::NotInstalled;
             }
             let exe_str = exe.to_string_lossy();
-            if marker_commands(&root)
+            let fresh = marker_sites(&root)
                 .iter()
-                .all(|c| *c == exe_str.as_ref())
-            {
+                .all(|(is_flat, c)| *c == expected_command(*is_flat, exe_str.as_ref(), harness));
+            if fresh {
                 WiringState::Wired
             } else {
                 WiringState::Stale
@@ -1014,12 +1287,15 @@ mod doctor_surface_tests {
     fn empty_home_reports_all_hosts_not_installed() {
         let home = temp_home("empty");
         let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
-        assert_eq!(wiring.len(), 5);
+        assert_eq!(wiring.len(), 8);
         for host in [
             "claude-code",
             "codex-code",
+            "windsurf",
+            "cursor",
             "opencode",
             "kilo",
+            "antigravity",
             "kitty-code",
         ] {
             assert_eq!(
@@ -1036,25 +1312,39 @@ mod doctor_surface_tests {
         let home = temp_home("installed");
         let results =
             run(&home, Path::new(&exe_marker()), Mode::Install, true).expect("init install");
-        assert_eq!(results.len(), 5);
+        assert_eq!(results.len(), 8);
 
-        // The exe marker alone makes JSON hosts STALE (commands != marker
-        // string) — diagnose must agree with init's refresh semantics.
+        // The exe marker alone makes exe-bearing hosts STALE (their commands
+        // / generated docs embed the marker plus flags/suffixes != the bare
+        // relocated path) — diagnose must agree with init's refresh
+        // semantics. Antigravity's plugin document embeds the absolute exe,
+        // so it staleness-checks like a JSON host.
         let wiring = diagnose_hosts(&home, None, Path::new("/real/path/apohara-agentguard"));
-        for host in ["claude-code", "codex-code"] {
+        for host in [
+            "claude-code",
+            "codex-code",
+            "windsurf",
+            "cursor",
+            "antigravity",
+        ] {
             assert_eq!(state_of(&wiring, host), &WiringState::Stale, "{host}");
         }
         for host in ["opencode", "kilo", "kitty-code"] {
             assert_eq!(state_of(&wiring, host), &WiringState::Wired, "{host}");
         }
 
-        // Diagnosing with the EXACT marker string as exe ⇒ Wired everywhere.
+        // Diagnosing with the EXACT marker string as exe ⇒ Wired everywhere
+        // (flat entries compare against the FULL regenerated spawn line,
+        // which matches what init wrote from the same exe).
         let wiring = diagnose_hosts(&home, None, Path::new(&exe_marker()));
         for host in [
             "claude-code",
             "codex-code",
+            "windsurf",
+            "cursor",
             "opencode",
             "kilo",
+            "antigravity",
             "kitty-code",
         ] {
             assert_eq!(state_of(&wiring, host), &WiringState::Wired, "{host}");

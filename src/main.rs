@@ -58,8 +58,9 @@ enum Command {
     /// Audit-trail operations on the local JSONL log.
     Audit(AuditArgs),
     /// Detect supported agent hosts (Claude Code, OpenAI Codex, OpenCode,
-    /// Kilo Code, kitty-code) and wire the apohara-agentguard hook into
-    /// their configs / plugin dirs (append-only, idempotent). WITHOUT
+    /// Kilo Code, kitty-code, Windsurf, Cursor, Antigravity) and wire the
+    /// apohara-agentguard hook into their configs / plugin dirs (append-only,
+    /// idempotent). WITHOUT
     /// `--yes` this is a DRY-RUN: it prints the planned changes and modifies
     /// nothing. `--undo` removes previously-installed wiring instead
     /// (applied immediately — the flag IS the consent). A corrupt host
@@ -68,7 +69,7 @@ enum Command {
     /// Diagnose installation health: binary identity, config loadability,
     /// policy parseability, data-directory writability (MCP pin store +
     /// audit log), per-host wiring status (wired / stale / not installed
-    /// across all five hosts), and a best-effort Landlock capability probe.
+    /// across all eight hosts), and a best-effort Landlock capability probe.
     /// Exit 0 when everything is PASS/WARN; exit 1 on any FAIL.
     /// `--json` emits the same report as structured JSON.
     Doctor {

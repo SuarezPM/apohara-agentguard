@@ -561,6 +561,10 @@ fn install_leaves_no_temp_files_behind() {
         ".config/opencode/plugins",
         ".config/kilo/plugins",
         ".kitty-code",
+        // FASE 4 hosts.
+        ".codeium/windsurf",
+        ".cursor",
+        ".gemini/antigravity-cli/plugins/agentguard",
     ] {
         let entries = std::fs::read_dir(home.join(subdir))
             .unwrap_or_else(|e| panic!("read {subdir}: {e}"))
@@ -870,8 +874,8 @@ fn kitty_pre_existing_user_policy_is_never_touched() {
 }
 
 #[test]
-fn dry_run_lists_all_five_hosts_without_writing_anything() {
-    let home = temp_dir("dryrun-five-hosts");
+fn dry_run_lists_all_eight_hosts_without_writing_anything() {
+    let home = temp_dir("dryrun-eight-hosts");
     let out = run_init(&home, &["init"]);
     assert_eq!(
         out.status.code(),
@@ -886,6 +890,9 @@ fn dry_run_lists_all_five_hosts_without_writing_anything() {
         "opencode",
         "kilo",
         "kitty-code",
+        "windsurf",
+        "cursor",
+        "antigravity",
     ] {
         assert!(stdout.contains(host), "dry-run must list {host}: {stdout}");
     }
@@ -895,12 +902,252 @@ fn dry_run_lists_all_five_hosts_without_writing_anything() {
         ".config/opencode",
         ".config/kilo",
         ".kitty-code",
+        ".codeium",
+        ".cursor",
+        ".gemini",
     ] {
         assert!(
             !home.join(artifact).exists(),
             "dry-run must not create {artifact}"
         );
     }
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+// ---------------------------------------------------------------------------
+// (i) FASE 4: windsurf / cursor / antigravity hosts
+// ---------------------------------------------------------------------------
+
+/// The full flat spawn line `init` must write for a flat-entry host.
+fn expected_flat_command(harness: &str) -> String {
+    format!("{} hook --harness {harness}", expected_exe())
+}
+
+#[test]
+fn fresh_windsurf_install_writes_flat_event_arrays_idempotent_undo() {
+    let home = temp_dir("windsurf-fresh");
+    let cfg_path = home.join(".codeium/windsurf/hooks.json");
+
+    let out = run_init(&home, &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("windsurf: wired"), "{stdout}");
+
+    let cfg = read_json(&cfg_path);
+    let hooks = cfg["hooks"].as_object().expect("hooks table");
+    assert_eq!(hooks.len(), 2, "{hooks:?}");
+    // Flat entries: the command IS the full spawn line (no matcher groups).
+    for event in ["pre_run_command", "pre_mcp_tool_use"] {
+        let arr = hooks[event].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "{event}");
+        let entry = &arr[0];
+        assert!(
+            entry.get("hooks").is_none(),
+            "{event}: windsurf entries are FLAT, not nested groups"
+        );
+        assert_eq!(entry["command"], expected_flat_command("windsurf"));
+    }
+
+    // Idempotent re-run.
+    let out2 = run_init(&home, &["init", "--yes"]);
+    assert_eq!(out2.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("windsurf: already wired"),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+
+    // Undo removes our flat entries and prunes the emptied events.
+    let out3 = run_init(&home, &["init", "--undo"]);
+    assert_eq!(out3.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out3.stdout).contains("windsurf: unwired"),
+        "{}",
+        String::from_utf8_lossy(&out3.stdout)
+    );
+    let raw = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(!raw.contains("apohara-agentguard"), "{raw}");
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn windsurf_user_hooks_survive_and_stale_paths_self_heal() {
+    let home = temp_dir("windsurf-mixed");
+    let dir = home.join(".codeium/windsurf");
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg_path = dir.join("hooks.json");
+
+    // User content + our wiring pointing at a relocated binary.
+    let stale_exe = "/nonexistent/bin/apohara-agentguard-0.4.1";
+    std::fs::write(
+        &cfg_path,
+        serde_json::json!({
+            "hooks": {
+                "pre_run_command": [
+                    { "command": format!("{stale_exe} hook --harness windsurf") },
+                ],
+                "pre_mcp_tool_use": [
+                    { "command": "/usr/bin/user-tool", "timeout": 5 },
+                ],
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = run_init(&home, &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("windsurf: refreshed"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let cfg = read_json(&cfg_path);
+    let arr = cfg["hooks"]["pre_run_command"].as_array().unwrap();
+    assert_eq!(arr.len(), 1, "refresh rewrites IN PLACE, no duplicates");
+    assert_eq!(arr[0]["command"], expected_flat_command("windsurf"));
+    // Marker-present wiring takes the REFRESH path (never duplicate groups),
+    // so the user's own MCP entry is left exactly as it was.
+    let mcp = cfg["hooks"]["pre_mcp_tool_use"].as_array().unwrap();
+    assert_eq!(mcp.len(), 1, "user entries are never duplicated onto");
+    assert_eq!(mcp[0]["command"], "/usr/bin/user-tool");
+
+    // After the refresh a re-run is a clean AlreadyWired.
+    let out2 = run_init(&home, &["init", "--yes"]);
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("windsurf: already wired"),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn fresh_cursor_install_wires_both_events_lifecycle_complete() {
+    let home = temp_dir("cursor-fresh");
+    let cfg_path = home.join(".cursor/hooks.json");
+
+    let out = run_init(&home, &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("cursor: wired"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let cfg = read_json(&cfg_path);
+    for event in ["beforeShellExecution", "beforeMCPExecution"] {
+        let arr = cfg["hooks"][event].as_array().expect("event array");
+        assert_eq!(arr.len(), 1, "{event}");
+        assert_eq!(arr[0]["command"], expected_flat_command("cursor"));
+    }
+
+    // Idempotent re-run; then undo removes ours and prunes empties.
+    let out2 = run_init(&home, &["init", "--yes"]);
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("cursor: already wired"),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+    let out3 = run_init(&home, &["init", "--undo"]);
+    assert!(
+        String::from_utf8_lossy(&out3.stdout).contains("cursor: unwired"),
+        "{}",
+        String::from_utf8_lossy(&out3.stdout)
+    );
+    let raw = std::fs::read_to_string(&cfg_path).unwrap();
+    assert!(!raw.contains("apohara-agentguard"), "{raw}");
+    let cfg2 = read_json(&cfg_path);
+    let hooks = cfg2["hooks"].as_object().unwrap();
+    assert!(hooks.is_empty() || cfg2.get("hooks").is_none());
+
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[test]
+fn antigravity_plugin_drop_in_is_exact_content_managed_and_self_heals() {
+    let home = temp_dir("antigravity-fresh");
+    let plugin_dir = home.join(".gemini/antigravity-cli/plugins/agentguard");
+    let cfg_path = plugin_dir.join("hooks.json");
+
+    // Fresh install: the generated document is written verbatim.
+    let out = run_init(&home, &["init", "--yes"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("antigravity: wired"),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let expected = apohara_agentguard::init::antigravity_plugin_document(std::path::Path::new(
+        &expected_exe(),
+    ));
+    assert_eq!(std::fs::read_to_string(&cfg_path).unwrap(), expected);
+    let doc: Value = serde_json::from_str(&expected).unwrap();
+    assert_eq!(
+        doc["hooks"]["PreToolUse"][0]["matcher"],
+        "Bash|Read|Write|Edit|WebFetch|WebSearch"
+    );
+    assert_eq!(
+        doc["hooks"]["PreToolUse"][0]["hooks"][0]["args"],
+        json!(["hook", "--harness", "antigravity"])
+    );
+
+    // Idempotent re-run: exact content ⇒ already wired, byte-identical.
+    let out2 = run_init(&home, &["init", "--yes"]);
+    assert!(
+        String::from_utf8_lossy(&out2.stdout).contains("antigravity: already wired"),
+        "{}",
+        String::from_utf8_lossy(&out2.stdout)
+    );
+
+    // Divergent content (relocated exe) self-heals in place on install.
+    std::fs::write(&cfg_path, "{\"hooks\":{}}").unwrap();
+    let out3 = run_init(&home, &["init", "--yes"]);
+    assert!(
+        String::from_utf8_lossy(&out3.stdout).contains("antigravity: refreshed"),
+        "{}",
+        String::from_utf8_lossy(&out3.stdout)
+    );
+    assert_eq!(std::fs::read_to_string(&cfg_path).unwrap(), expected);
+
+    // Undo removes OUR file only when its content matches exactly.
+    let out4 = run_init(&home, &["init", "--undo"]);
+    assert!(
+        String::from_utf8_lossy(&out4.stdout).contains("antigravity: unwired"),
+        "{}",
+        String::from_utf8_lossy(&out4.stdout)
+    );
+    assert!(!cfg_path.exists());
+    let out5 = run_init(&home, &["init", "--undo"]);
+    assert!(
+        String::from_utf8_lossy(&out5.stdout).contains("antigravity: nothing to undo"),
+        "{}",
+        String::from_utf8_lossy(&out5.stdout)
+    );
 
     let _ = std::fs::remove_dir_all(&home);
 }

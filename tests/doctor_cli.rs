@@ -72,12 +72,15 @@ fn doctor_after_init_reports_wired_hosts_and_exits_zero() {
     );
     let text = stdout_of(&out);
     assert!(text.starts_with("apohara-agentguard doctor"), "{text}");
-    // Every host row present AND passing.
+    // Every host row present AND passing (all EIGHT hosts, FASE 4).
     for host in [
         "claude-code",
         "codex-code",
+        "windsurf",
+        "cursor",
         "opencode",
         "kilo",
+        "antigravity",
         "kitty-code",
     ] {
         let needle = format!("PASS wiring/{host}");
@@ -134,8 +137,11 @@ fn doctor_json_shape_is_stable_and_ok_on_a_wired_install() {
     for host in [
         "claude-code",
         "codex-code",
+        "windsurf",
+        "cursor",
         "opencode",
         "kilo",
+        "antigravity",
         "kitty-code",
     ] {
         let want = format!("wiring/{host}");
