@@ -465,23 +465,77 @@ fn proxy_e2e_dangerous_command_call_blocked_and_never_forwarded() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn proxy_e2e_benign_call_forwarded_byte_identical() {
+fn proxy_e2e_benign_call_payload_preserved_except_reminted_id() {
+    // Anti-spoofing contract (FASE 5-B): the upstream receives the client's
+    // EXACT bytes except the id member, which is replaced by a relay-minted
+    // opaque `agp-<hex>` id. Spacing, key order and payload survive verbatim;
+    // the CLIENT still sees its original id on the response.
     let env = Env::new("byte-identical");
     let upstream = env.upstream();
     let up_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
     let mut args: Vec<&str> = vec!["--"];
     args.extend(up_refs);
 
-    // Deliberately unusual spacing/key order: the proxy must not rewrite.
+    // Deliberately unusual spacing/key order outside the id span.
     let raw = r#"{"jsonrpc":"2.0","id":7,  "method":"tools/call","params":{"name":"echo","arguments":{"value":"keep my bytes"}}}"#;
     let s = run_session(&env, &args, &[], &[raw.to_string()]);
 
     assert!(s.status.success(), "stderr={}", s.stderr);
     let log = read_log(&env);
+    let last: String = log.last().cloned().expect("upstream saw the call");
+    let v: Value = serde_json::from_str(&last).expect("valid json upstream");
+    let pid = v["id"]
+        .as_str()
+        .expect("proxied id is a string")
+        .to_string();
+    assert!(
+        pid.starts_with("agp-") && pid.len() == 4 + 32,
+        "opaque relay-minted id expected, got {pid}"
+    );
     assert_eq!(
-        log.last().map(String::as_str),
-        Some(raw),
-        "upstream must receive the exact bytes the client sent"
+        last,
+        format!(
+            r#"{{"jsonrpc":"2.0","id":"{pid}",  "method":"tools/call","params":{{"name":"echo","arguments":{{"value":"keep my bytes"}}}}}}"#
+        ),
+        "everything outside the id span must be byte-identical"
+    );
+}
+
+#[test]
+fn proxy_e2e_client_sees_original_ids_and_upstream_only_proxy_ids() {
+    // Full anti-spoofing round trip through the real binary: responses carry
+    // the CLIENT's ids; the mock log proves upstream only ever saw agp-*.
+    let env = Env::new("id-namespace");
+    let upstream = env.upstream();
+    let up_refs: Vec<&str> = upstream.iter().map(String::as_str).collect();
+    let mut args: Vec<&str> = vec!["--"];
+    args.extend(up_refs);
+
+    let s = run_session(
+        &env,
+        &args,
+        &[],
+        &[
+            init_req(),
+            list_req(),
+            call_req(3, "echo", serde_json::json!({"value":"x"})),
+        ],
+    );
+    assert!(s.status.success(), "stderr={}", s.stderr);
+    // Client-side: original ids everywhere.
+    for (i, want) in [1_i64, 2, 3].iter().enumerate() {
+        assert_eq!(s.stdout[i]["id"], serde_json::json!(want), "{i}");
+    }
+    // Upstream side: NEVER a bare client id; always the opaque namespace.
+    let log = read_log(&env);
+    assert!(
+        !log.iter()
+            .any(|l| l.contains(r#""id":1"#) || l.contains(r#""id":3"#)),
+        "client ids must never reach upstream; log={log:?}"
+    );
+    assert!(
+        log.iter().all(|l| l.contains("agp-")),
+        "every upstream line carries a relay-minted id; log={log:?}"
     );
 }
 

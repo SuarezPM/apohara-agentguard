@@ -69,7 +69,6 @@
 //! whole session, which breaks streaming semantics. This mirrors SSH TOFU:
 //! the first verification moment bounds what was already on the wire.
 
-use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -82,6 +81,9 @@ use crate::proxy::framing::{write_line, LineReader, MAX_LINE_EXCEEDED};
 use crate::proxy::gate::{blocked_response, evaluate_tool_call, Gates};
 use crate::proxy::pinning::{
     default_config_base, tools_hash, upstream_identity, PinStore, PinVerdict,
+};
+use crate::proxy::spoof::{
+    classify_response_id, splice_span, top_level_id_span, IdRewriter, IdSpan, RegisterError,
 };
 
 /// Pinned replacement reason for a drifted manifest (spec-exact wording).
@@ -170,8 +172,9 @@ struct Shared {
     quarantine_reason: Mutex<Option<String>>,
     /// First fatal error observed by any thread (protocol/I/O).
     fatal: Mutex<Option<String>>,
-    /// Ids of forwarded `tools/list` requests awaiting their response.
-    pending_lists: Mutex<HashSet<String>>,
+    /// Anti-spoofing id table: proxied request ids minted by the relay
+    /// (see [`crate::proxy::spoof`]).
+    ids: Mutex<IdRewriter>,
 }
 
 impl Shared {
@@ -474,7 +477,8 @@ pub fn run(cfg: RelayConfig, gates: &Gates) -> RelayOutcome {
 /// Classify + act on one line arriving FROM THE CLIENT.
 ///
 /// Returns `Some(fatal)` for fail-closed protocol violations (garbage /
-/// oversized handled by the caller's framing layer; here: non-JSON).
+/// oversized handled by the caller's framing layer; here: non-JSON and
+/// ambiguous duplicate top-level `id` members).
 fn handle_client_line(
     line: &str,
     shared: &Shared,
@@ -493,8 +497,20 @@ fn handle_client_line(
         }
     };
 
+    // Anti-spoofing span analysis happens BEFORE anything else: an ambiguous
+    // (duplicated) top-level id makes parser-dependent behavior unavoidable,
+    // which is exactly what a transport attacker wants — refuse the session.
+    let id_span = top_level_id_span(line);
+    if id_span == IdSpan::Ambiguous {
+        return Some(format!(
+            "ambiguous client line: duplicate top-level \"id\" member: {}",
+            truncate_for_log(line)
+        ));
+    }
+    // Old synthesized-response semantics preserved: a null id gets no reply.
+    let has_replyable_id = matches!(msg.get("id"), Some(v) if !v.is_null());
+
     let method = msg.get("method").and_then(Value::as_str);
-    let has_id = msg.get("id").map(|v| !v.is_null()).unwrap_or(false);
 
     if method == Some("tools/call") {
         // Session quarantine blocks ALL subsequent calls.
@@ -504,7 +520,7 @@ fn handle_client_line(
                 .unwrap_or_else(|| "session quarantined".to_string());
             let text = format!("session quarantined: {reason}");
             eprintln!("agentguard-proxy: blocked quarantined tools/call: {text}");
-            if has_id {
+            if has_replyable_id {
                 let _ = tx_out.send(blocked_response(
                     msg.get("id").unwrap_or(&Value::Null),
                     &text,
@@ -524,8 +540,15 @@ fn handle_client_line(
             .unwrap_or(Value::Null);
         let decision = evaluate_tool_call(&tool_name, &args, gates);
         if decision.allowed {
-            let _ = tx_in.send(line.to_string());
-            return None;
+            return forward_with_proxied_id(
+                line,
+                id_span,
+                msg.get("id").unwrap_or(&Value::Null),
+                false,
+                shared,
+                tx_in,
+                tx_out,
+            );
         }
         // Negative decision: the mode decides between ACT (synthesize the
         // blocked response, never forward) and LOG (forward + loud
@@ -536,7 +559,7 @@ fn handle_client_line(
                     "agentguard-proxy: BLOCKED tools/call `{tool_name}`: {}",
                     decision.reason
                 );
-                if has_id {
+                if has_replyable_id {
                     let _ = tx_out.send(blocked_response(
                         msg.get("id").unwrap_or(&Value::Null),
                         &decision.reason,
@@ -550,31 +573,116 @@ fn handle_client_line(
                     mode.as_str(),
                     decision.reason
                 );
-                let _ = tx_in.send(line.to_string());
-                None
+                forward_with_proxied_id(
+                    line,
+                    id_span,
+                    msg.get("id").unwrap_or(&Value::Null),
+                    false,
+                    shared,
+                    tx_in,
+                    tx_out,
+                )
             }
         };
     }
 
-    if method == Some("tools/list") && has_id {
-        // Track the id so the child-reader recognizes the response.
-        if let Some(id) = msg.get("id") {
-            shared
-                .pending_lists
-                .lock()
-                .expect("pending mutex")
-                .insert(id.to_string());
+    // Everything else forwards — with its id re-minted if it is a request.
+    forward_with_proxied_id(
+        line,
+        id_span,
+        msg.get("id").unwrap_or(&Value::Null),
+        method == Some("tools/list"),
+        shared,
+        tx_in,
+        tx_out,
+    )
+}
+
+/// Forward one client line upstream through the anti-spoofing gate: a
+/// request WITH an id gets a relay-minted opaque id (raw span spliced);
+/// notifications pass byte-identical. Registration failures degrade to a
+/// locally-synthesized answer (-32002 overloaded / fail-closed RNG denial)
+/// and NEVER forward.
+fn forward_with_proxied_id(
+    line: &str,
+    id_span: IdSpan,
+    host_id_value: &Value,
+    is_tools_list: bool,
+    shared: &Shared,
+    tx_in: &mpsc::Sender<String>,
+    tx_out: &mpsc::Sender<String>,
+) -> Option<String> {
+    let span = match id_span {
+        // Notification (no id member): nothing to protect, forward verbatim.
+        IdSpan::Absent => {
+            let _ = tx_in.send(line.to_string());
+            return None;
+        }
+        // Callers pre-filter this; kept exhaustive for safety.
+        IdSpan::Ambiguous => {
+            return Some(format!(
+                "ambiguous client line: duplicate top-level \"id\" member: {}",
+                truncate_for_log(line)
+            ))
+        }
+        IdSpan::Found(s, e) => (s, e),
+    };
+    // The client's EXACT bytes become the restore payload (full precision
+    // for ids beyond float range).
+    let host_raw = line[span.0..span.1].to_string();
+    let quoted_proxy_id = {
+        let mut ids = shared.ids.lock().expect("id mutex");
+        ids.register(host_raw, is_tools_list)
+    };
+    match quoted_proxy_id {
+        Ok(quoted) => {
+            let _ = tx_in.send(splice_span(line, span, &quoted));
+            None
+        }
+        Err(RegisterError::Overloaded) => {
+            eprintln!(
+                "agentguard-proxy: OVERLOAD: {} in-flight proxied requests — \
+                 answering -32002 without forwarding",
+                crate::proxy::spoof::MAX_PENDING_REQUESTS
+            );
+            let _ = tx_out.send(overloaded_response(host_id_value));
+            None
+        }
+        Err(RegisterError::RngUnavailable(e)) => {
+            // Fail-closed: no trustworthy id material ⇒ the request is
+            // denied, never forwarded with predictable ids.
+            eprintln!(
+                "agentguard-proxy: secure randomness unavailable ({e}) — \
+                 denying request fail-closed"
+            );
+            let denied = format!("internal error: secure randomness unavailable ({e})");
+            let _ = tx_out.send(blocked_response(host_id_value, &denied));
+            None
         }
     }
+}
 
-    // Everything else forwards verbatim (byte-identical line).
-    let _ = tx_in.send(line.to_string());
-    None
+/// JSON-RPC error response used when the pending-id table saturates: the
+/// request is NOT forwarded upstream.
+const OVERLOAD_CODE: i64 = -32002;
+
+fn overloaded_response(id: &Value) -> String {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {
+            "code": OVERLOAD_CODE,
+            "message": "agentguard-proxy overloaded: too many in-flight proxied requests"
+        }
+    })
+    .to_string()
 }
 
 /// Classify + act on one line arriving FROM THE UPSTREAM.
 ///
-/// Returns `Some(fatal)` for fail-closed protocol violations.
+/// Returns `Some(fatal)` for fail-closed protocol violations. Response lines
+/// whose id does not sit EXACTLY in the pending table (unknown, replayed,
+/// foreign-format) are silently-dropped-with-warning — never forwarded.
 fn handle_upstream_line(
     line: &str,
     pin_gate: &mut PinGate,
@@ -591,90 +699,149 @@ fn handle_upstream_line(
         }
     };
 
-    // tools/list response?
-    if msg.get("result").is_some() {
-        if let Some(id) = msg.get("id") {
-            let key = id.to_string();
-            let was_tracked = shared
-                .pending_lists
-                .lock()
-                .expect("pending mutex")
-                .remove(&key);
-            if was_tracked {
-                let verdict = pin_gate.on_list_response(msg.get("result").expect("checked"));
-                if verdict.is_quarantine() {
-                    let reason = match &verdict {
-                        // Spec-exact wording for plain drift.
-                        PinVerdict::Mismatch { .. } => DRIFT_REASON.to_string(),
-                        other => other.reason(),
-                    };
-                    // The mode decides between ACT (enforce: quarantine +
-                    // replace; filter-only: replace but keep calls flowing)
-                    // and LOG (audit-only: forward the manifest verbatim).
-                    return match shared.mode {
-                        RelayMode::Enforce => {
-                            eprintln!(
-                                "agentguard-proxy: QUARANTINE: {} — blocking all further tools/call",
-                                verdict.reason()
-                            );
-                            shared.quarantine(reason.clone());
-                            let _ = tx_out.send(quarantined_manifest_response(id, &reason));
-                            None
-                        }
-                        RelayMode::FilterOnly => {
-                            eprintln!(
-                                "agentguard-proxy: FILTERED (mode filter-only): {} — \
-                                 manifest filtered, tools/call NOT blocked",
-                                verdict.reason()
-                            );
-                            let _ = tx_out.send(quarantined_manifest_response(id, &reason));
-                            None
-                        }
-                        RelayMode::AuditOnly => {
-                            eprintln!(
-                                "agentguard-proxy: WOULD-FILTER (mode audit-only): {}",
-                                verdict.reason()
-                            );
-                            // Nothing is filtered: the drifted manifest
-                            // reaches the client exactly as upstream sent it.
-                            let _ = tx_out.send(line.to_string());
-                            None
-                        }
-                    };
-                }
-                eprintln!("agentguard-proxy: {}", verdict.reason());
-                // Verified: forward the response verbatim.
-                let _ = tx_out.send(line.to_string());
+    // Server-initiated messages (notifications AND server→client requests):
+    // they never answer a proxied request and never touch the id table.
+    if msg.get("method").is_some() {
+        // Manifest-generation invalidation.
+        if msg.get("method").and_then(Value::as_str) == Some("notifications/tools/list_changed") {
+            pin_gate.on_list_changed();
+            eprintln!(
+                "agentguard-proxy: tools/list_changed — pin will re-verify on next tools/list"
+            );
+        }
+        let _ = tx_out.send(line.to_string());
+        return None;
+    }
+
+    // Response-shaped (result or error present)?
+    if msg.get("result").is_some() || msg.get("error").is_some() {
+        let proxy_id = match classify_response_id(&msg) {
+            Ok(Some(pid)) => pid,
+            Ok(None) => {
+                // A result/error without any id cannot be correlated to a
+                // proxied request: fail-closed drop.
+                eprintln!(
+                    "agentguard-proxy: DROPPED upstream result/error without id (anti-spoofing)"
+                );
                 return None;
             }
+            Err(reason) => {
+                eprintln!(
+                    "agentguard-proxy: DROPPED upstream response ({reason}): {}",
+                    truncate_for_log(line)
+                );
+                return None;
+            }
+        };
+
+        let resolved = shared.ids.lock().expect("id mutex").resolve(&proxy_id);
+        let Some(entry) = resolved else {
+            let label = if shared
+                .ids
+                .lock()
+                .expect("id mutex")
+                .recently_consumed(&proxy_id)
+            {
+                "REPLAYED (already answered)"
+            } else {
+                "UNKNOWN (never minted)"
+            };
+            eprintln!("agentguard-proxy: DROPPED upstream response — id {proxy_id} is {label}");
+            return None;
+        };
+
+        // Locate the id span ON THE RESPONSE LINE for restoration. The parse
+        // above guarantees an id exists, so only ambiguity can bite here —
+        // and ambiguity fails the session rather than guessing.
+        let span = match top_level_id_span(line) {
+            IdSpan::Found(s, e) => (s, e),
+            other => {
+                return Some(format!(
+                    "unrestorable upstream response id (span={other:?}): {}",
+                    truncate_for_log(line)
+                ))
+            }
+        };
+
+        // tools/list RESULT goes through the pin pipeline.
+        if entry.is_tools_list && msg.get("result").is_some() {
+            let verdict = pin_gate.on_list_response(msg.get("result").expect("checked"));
+            if verdict.is_quarantine() {
+                let reason = match &verdict {
+                    // Spec-exact wording for plain drift.
+                    PinVerdict::Mismatch { .. } => DRIFT_REASON.to_string(),
+                    other => other.reason(),
+                };
+                // The mode decides between ACT (enforce: quarantine +
+                // replace; filter-only: replace but keep calls flowing)
+                // and LOG (audit-only: forward the manifest verbatim).
+                return match shared.mode {
+                    RelayMode::Enforce => {
+                        eprintln!(
+                            "agentguard-proxy: QUARANTINE: {} — blocking all further tools/call",
+                            verdict.reason()
+                        );
+                        shared.quarantine(reason.clone());
+                        let _ =
+                            tx_out.send(quarantined_manifest_response(&entry.host_id_raw, &reason));
+                        None
+                    }
+                    RelayMode::FilterOnly => {
+                        eprintln!(
+                            "agentguard-proxy: FILTERED (mode filter-only): {} — \
+                             manifest filtered, tools/call NOT blocked",
+                            verdict.reason()
+                        );
+                        let _ =
+                            tx_out.send(quarantined_manifest_response(&entry.host_id_raw, &reason));
+                        None
+                    }
+                    RelayMode::AuditOnly => {
+                        eprintln!(
+                            "agentguard-proxy: WOULD-FILTER (mode audit-only): {}",
+                            verdict.reason()
+                        );
+                        // Nothing is filtered: the drifted manifest reaches
+                        // the client with its ORIGINAL id, bytes otherwise
+                        // untouched.
+                        let _ = tx_out.send(splice_span(line, span, &entry.host_id_raw));
+                        None
+                    }
+                };
+            }
+            eprintln!("agentguard-proxy: {}", verdict.reason());
         }
+
+        // Verified / non-pin response: restore the HOST id and forward.
+        let _ = tx_out.send(splice_span(line, span, &entry.host_id_raw));
+        return None;
     }
 
-    // Manifest-generation invalidation.
-    if msg.get("method").and_then(Value::as_str) == Some("notifications/tools/list_changed") {
-        pin_gate.on_list_changed();
-        eprintln!("agentguard-proxy: tools/list_changed — pin will re-verify on next tools/list");
-    }
-
-    // Everything else forwards verbatim.
+    // Neither method-bearing nor response-bearing (e.g. bare junk object
+    // that is valid JSON): forwards, as today.
     let _ = tx_out.send(line.to_string());
     None
 }
 
 /// Build the replacement tools/list response the relay sends INSTEAD of a
 /// quarantine-grade manifest: an empty tool list flagged `quarantined` with
-/// the neutralized reason, under the request's original id.
-fn quarantined_manifest_response(id: &Value, reason: &str) -> String {
-    serde_json::json!({
+/// the neutralized reason. `host_id_raw` (the client's original id BYTES) is
+/// spliced in so even exotic id shapes survive the replacement intact.
+fn quarantined_manifest_response(host_id_raw: &str, reason: &str) -> String {
+    let tpl = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": id,
+        "id": 0,
         "result": {
             "tools": [],
             "quarantined": true,
             "reason": crate::neutralize_reason(reason),
         }
     })
-    .to_string()
+    .to_string();
+    match top_level_id_span(&tpl) {
+        IdSpan::Found(s, e) => splice_span(&tpl, (s, e), host_id_raw),
+        _ => tpl, // unreachable: the template always carries "id": 0
+    }
 }
 
 /// Cap hostile/garbage payload excerpts in stderr diagnostics.
@@ -694,6 +861,7 @@ fn truncate_for_log(line: &str) -> String {
 mod tests {
     use super::*;
     use crate::proxy::pinning::PinStore;
+    use crate::proxy::spoof::PROXY_ID_PREFIX;
     use serde_json::json;
 
     fn temp_store(tag: &str) -> (std::path::PathBuf, PinStore) {
@@ -728,6 +896,36 @@ mod tests {
 
     fn manifest(desc: &str) -> Value {
         json!({ "tools": [ {"name": "echo", "description": desc, "inputSchema": {"type": "object"}} ] })
+    }
+
+    /// Push a client tools/list request (raw id text `id_raw`) through
+    /// `handle_client_line`; returns the line the upstream would receive and
+    /// the minted proxy id.
+    fn send_client_list(
+        shared: &Shared,
+        tx_in: &mpsc::Sender<String>,
+        rx_in: &mpsc::Receiver<String>,
+        tx_out: &mpsc::Sender<String>,
+        id_raw: &str,
+    ) -> (String, String) {
+        let line =
+            format!(r#"{{"jsonrpc":"2.0","id":{id_raw},"method":"tools/list","params":{{}}}}"#);
+        assert!(
+            handle_client_line(&line, shared, tx_in, tx_out, &test_gates()).is_none(),
+            "list requests never fatal"
+        );
+        let upstream_line = rx_in.recv().expect("forwarded list request");
+        let IdSpan::Found(s, e) = top_level_id_span(&upstream_line) else {
+            panic!("proxied id span")
+        };
+        let proxy_id = upstream_line[s..e].trim_matches('"').to_string();
+        assert!(proxy_id.starts_with(crate::proxy::spoof::PROXY_ID_PREFIX));
+        (upstream_line, proxy_id)
+    }
+
+    /// Build an upstream response line carrying `proxy_id` with `result`.
+    fn upstream_response(proxy_id: &str, result: Value) -> String {
+        json!({"jsonrpc":"2.0","id":proxy_id,"result":result}).to_string()
     }
 
     #[test]
@@ -778,22 +976,33 @@ mod tests {
     }
 
     #[test]
-    fn client_line_classification_gates_calls_and_tracks_lists() {
+    fn client_line_classification_gates_calls_and_reids_requests() {
         let shared = Shared::default();
         let (tx_in, rx_in) = mpsc::channel();
         let (tx_out, rx_out) = mpsc::channel();
-        let gates = Gates {
-            config: crate::config::Config::default(),
-            policy: crate::policy::engine::PolicySet::default(),
-        };
+        let gates = test_gates();
 
-        // Benign request forwards verbatim.
+        // Benign request forwards WITH a re-minted proxy id (anti-spoofing).
         let benign = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
         assert!(handle_client_line(benign, &shared, &tx_in, &tx_out, &gates).is_none());
-        assert_eq!(rx_in.recv().expect("forwarded"), benign);
+        let forwarded = rx_in.recv().expect("forwarded");
+        assert_ne!(forwarded, benign, "request ids must be re-minted upstream");
+        assert!(forwarded.contains(PROXY_ID_PREFIX), "{forwarded}");
+        // Everything except the id stays byte-identical.
+        let IdSpan::Found(s, e) = top_level_id_span(benign) else {
+            panic!("span")
+        };
+        let IdSpan::Found(fs, fe) = top_level_id_span(&forwarded) else {
+            panic!("forwarded span")
+        };
+        assert_eq!(
+            forwarded,
+            splice_span(benign, (s, e), &forwarded[fs..fe]),
+            "only the id span may change"
+        );
 
         // Dangerous call is denied and NOT forwarded; a synthesized response
-        // appears on the outbound channel instead.
+        // appears on the outbound channel instead (host id preserved).
         let danger = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"shell","arguments":{"command":"rm -rf /"}}}"#;
         assert!(handle_client_line(danger, &shared, &tx_in, &tx_out, &gates).is_none());
         assert!(
@@ -805,20 +1014,25 @@ mod tests {
         assert_eq!(v["id"], 2);
         assert_eq!(v["result"]["isError"], true);
 
-        // tools/list ids get tracked for response matching.
-        let list = r#"{"jsonrpc":"2.0","id":9,"method":"tools/list","params":{}}"#;
-        assert!(handle_client_line(list, &shared, &tx_in, &tx_out, &gates).is_none());
-        assert!(
-            shared
-                .pending_lists
-                .lock()
-                .unwrap()
-                .contains(&json!(9).to_string()),
-            "list id must be tracked"
-        );
+        // tools/list ids get tracked in the anti-spoofing table.
+        let _ = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "9");
+        assert_eq!(shared.ids.lock().unwrap().pending_len(), 2); // init + list
 
         // Garbage fails closed.
         assert!(handle_client_line("not json", &shared, &tx_in, &tx_out, &gates).is_some());
+
+        // Duplicate top-level id fails closed.
+        assert!(
+            handle_client_line(
+                r#"{"jsonrpc":"2.0","id":1,"method":"m","id":2}"#,
+                &shared,
+                &tx_in,
+                &tx_out,
+                &gates
+            )
+            .is_some(),
+            "ambiguous duplicate id member must be fatal"
+        );
     }
 
     #[test]
@@ -826,10 +1040,7 @@ mod tests {
         let shared = Shared::default();
         let (tx_in, rx_in) = mpsc::channel();
         let (tx_out, rx_out) = mpsc::channel();
-        let gates = Gates {
-            config: crate::config::Config::default(),
-            policy: crate::policy::engine::PolicySet::default(),
-        };
+        let gates = test_gates();
         shared.quarantine("tool manifest drift — pin mismatch".to_string());
 
         let call = r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"echo","arguments":{"value":"hi"}}}"#;
@@ -850,37 +1061,28 @@ mod tests {
         let (_dir, store) = temp_store("replace");
         let mut pin_gate = PinGate::new(store, "srv".into(), None);
         let shared = Shared::default();
+        let (tx_in, rx_in) = mpsc::channel();
         let (tx_out, rx_out) = mpsc::channel();
 
-        // Prime the pin with the ORIGINAL manifest.
-        let original = json!({
-            "jsonrpc": "2.0", "id": 1,
-            "result": { "tools": [ {"name": "echo", "description": "orig", "inputSchema": {"type": "object"}} ] }
-        });
-        shared
-            .pending_lists
-            .lock()
-            .unwrap()
-            .insert(json!(1).to_string());
-        let orig_line = original.to_string();
+        // Client sends a tools/list (id 1); the relay mints a proxy id.
+        let (_, pid1) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "1");
+        // Prime the pin with the ORIGINAL manifest arriving under that id.
+        let orig_line = upstream_response(&pid1, manifest("orig"));
         assert!(handle_upstream_line(&orig_line, &mut pin_gate, &shared, &tx_out).is_none());
-        let forwarded = rx_out.recv().expect("verbatim forward");
+        let forwarded = rx_out.recv().expect("restored forward");
         assert_eq!(
-            forwarded, orig_line,
-            "verified list forwards byte-identical"
+            forwarded,
+            r#"{"id":1,"jsonrpc":"2.0","result":{"tools":[{"description":"orig","inputSchema":{"type":"object"},"name":"echo"}]}}"#,
+            "host id restored; payload otherwise untouched"
         );
 
-        // Tampered manifest on the SAME tracked id ⇒ replaced response.
-        let tampered = json!({
-            "jsonrpc": "2.0", "id": 2,
-            "result": { "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }
-        });
-        shared
-            .pending_lists
-            .lock()
-            .unwrap()
-            .insert(json!(2).to_string());
-        let tampered_line = tampered.to_string();
+        // Tampered manifest on a NEW tracked id ⇒ replaced response carrying
+        // the HOST id (2), not the proxied one.
+        let (_, pid2) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "2");
+        let tampered_line = upstream_response(
+            &pid2,
+            json!({ "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }),
+        );
         assert!(
             handle_upstream_line(&tampered_line, &mut pin_gate, &shared, &tx_out).is_none(),
             "drift is a quarantine, not a protocol fatal"
@@ -897,6 +1099,146 @@ mod tests {
         let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
         assert!(handle_upstream_line(note, &mut pin_gate, &shared, &tx_out).is_none());
         assert_eq!(rx_out.recv().expect("passthrough"), note);
+    }
+
+    // ---- anti-spoofing at the relay level (FASE 5-B mechanism 2) -----------
+
+    #[test]
+    fn unknown_and_foreign_response_ids_are_dropped_never_forwarded() {
+        let (_dir, store) = temp_store("unknown-id");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = Shared::default();
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+
+        // A response whose id was NEVER minted by the relay: dropped.
+        let forged = upstream_response("agp-ffffffffffffffffffffffffffffffff", json!({"x":1}));
+        assert!(handle_upstream_line(&forged, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(
+            rx_out.try_recv().is_err(),
+            "forged id must not reach the client"
+        );
+
+        // A server echoing the CLIENT's original numeric id back: dropped —
+        // only relay-minted ids may come home.
+        let echo = r#"{"jsonrpc":"2.0","id":7,"result":{}}"#;
+        assert!(handle_upstream_line(echo, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(rx_out.try_recv().is_err());
+
+        // A result WITHOUT any id: dropped fail-closed.
+        let naked = r#"{"jsonrpc":"2.0","result":{}}"#;
+        assert!(handle_upstream_line(naked, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(rx_out.try_recv().is_err());
+
+        // Sanity: after all those drops the session is NOT fatal and real
+        // traffic still flows.
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "3");
+        assert!(rx_out.try_recv().is_err(), "list request has no output yet");
+        assert!(pending_len(&shared) == 1);
+        handle_upstream_line(
+            &upstream_response(&pid, json!({"tools": []})),
+            &mut pin_gate,
+            &shared,
+            &tx_out,
+        );
+        assert!(rx_out.recv().is_ok(), "legit response still delivered");
+    }
+
+    #[test]
+    fn replayed_response_is_dropped_as_a_replay() {
+        let (_dir, store) = temp_store("replay");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = Shared::default();
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "4");
+        let line = upstream_response(&pid, json!({"tools": []}));
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(rx_out.recv().is_ok(), "first delivery succeeds");
+
+        // The SAME line again (captured/replayed): dropped, classified as a
+        // replay via the recent-used set.
+        assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        assert!(
+            rx_out.try_recv().is_err(),
+            "replay must never reach the client"
+        );
+        assert!(
+            shared
+                .ids
+                .lock()
+                .unwrap()
+                .recently_consumed(pid.trim_matches('"')),
+            "the drop path must classify it as a replay"
+        );
+    }
+
+    #[test]
+    fn large_integer_host_ids_survive_with_full_precision() {
+        let (_dir, store) = temp_store("big-id");
+        let mut pin_gate = PinGate::new(store, "srv".into(), None);
+        let shared = Shared::default();
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+
+        // An id beyond f64 precision (> 2^53): raw-byte fidelity required.
+        let big = "123456789012345678901234567890";
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, big);
+        let resp = upstream_response(&pid, json!({"tools": []}));
+        assert!(handle_upstream_line(&resp, &mut pin_gate, &shared, &tx_out).is_none());
+        let out = rx_out.recv().expect("restored");
+        assert!(
+            out.contains(&format!("\"id\":{big}")),
+            "exact digits must be restored: {out}"
+        );
+        let v: Value = serde_json::from_str(&out).unwrap();
+        // The Value view loses precision but the WIRE bytes do not — that is
+        // the contract under test above; this parse just proves validity.
+        assert!(v.get("id").is_some());
+
+        // String ids with escapes round-trip too.
+        let (_, pid2) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, r#""a\"b""#);
+        let resp2 = upstream_response(&pid2, json!({"tools": []}));
+        assert!(handle_upstream_line(&resp2, &mut pin_gate, &shared, &tx_out).is_none());
+        let out2 = rx_out.recv().expect("restored string id");
+        assert!(out2.contains(r#""id":"a\"b""#), "{out2}");
+    }
+
+    #[test]
+    fn saturation_answers_minus_32002_without_forwarding() {
+        let (_dir, _store) = temp_store("saturation");
+        let shared = Shared::default();
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+        let gates = test_gates();
+
+        for i in 0..crate::proxy::spoof::MAX_PENDING_REQUESTS {
+            let line = format!(r#"{{"jsonrpc":"2.0","id":{i},"method":"ping"}}"#);
+            assert!(handle_client_line(&line, &shared, &tx_in, &tx_out, &gates).is_none());
+            assert!(rx_in.recv().is_ok(), "request {i} forwards");
+        }
+        assert_eq!(
+            shared.ids.lock().unwrap().pending_len(),
+            crate::proxy::spoof::MAX_PENDING_REQUESTS
+        );
+
+        // One more request ⇒ -32002 to the client, NOTHING upstream.
+        let overflow = r#"{"jsonrpc":"2.0","id":"last","method":"ping"}"#;
+        assert!(handle_client_line(overflow, &shared, &tx_in, &tx_out, &gates).is_none());
+        assert!(
+            rx_in.try_recv().is_err(),
+            "overloaded request must NOT forward"
+        );
+        let err = rx_out.recv().expect("overload error response");
+        let v: Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(v["id"], "last");
+        assert_eq!(v["error"]["code"], -32002);
+        assert!(v.get("result").is_none());
+    }
+
+    fn pending_len(shared: &Shared) -> usize {
+        shared.ids.lock().unwrap().pending_len()
     }
 
     #[test]
@@ -964,8 +1306,10 @@ mod tests {
         // A call the gates deny FORWARDS upstream in filter-only mode.
         assert!(handle_client_line(&dangerous_call(), &shared, &tx_in, &tx_out, &gates).is_none());
         let forwarded = rx_in.recv().expect("denied call must forward");
-        let v: Value = serde_json::from_str(&forwarded).unwrap();
-        assert_eq!(v["id"], 2, "same request reaches upstream");
+        assert!(
+            forwarded.contains(PROXY_ID_PREFIX),
+            "forwarded with a re-minted id like every request: {forwarded}"
+        );
         assert!(rx_out.try_recv().is_err(), "no synthesized response");
 
         // The session quarantine flag must never be set in this mode: the
@@ -990,6 +1334,7 @@ mod tests {
         let (_dir, store) = temp_store("filter-drift");
         let mut pin_gate = PinGate::new(store, "srv".into(), None);
         let shared = shared_in_mode(RelayMode::FilterOnly);
+        let (tx_in, rx_in) = mpsc::channel();
         let (tx_out, rx_out) = mpsc::channel();
 
         // Record the honest manifest first.
@@ -997,16 +1342,11 @@ mod tests {
 
         // Drifted manifest on a tracked list id ⇒ replaced with the empty
         // filtered manifest, but the SESSION must stay un-quarantined.
-        let drifted = json!({
-            "jsonrpc": "2.0", "id": 2,
-            "result": { "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }
-        });
-        shared
-            .pending_lists
-            .lock()
-            .unwrap()
-            .insert(json!(2).to_string());
-        let line = drifted.to_string();
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "2");
+        let line = upstream_response(
+            &pid,
+            json!({ "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }),
+        );
         assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
         let replaced = rx_out.recv().expect("filtered replacement");
         let v: Value = serde_json::from_str(&replaced).unwrap();
@@ -1023,25 +1363,23 @@ mod tests {
         let (_dir, store) = temp_store("audit-drift");
         let mut pin_gate = PinGate::new(store, "srv".into(), None);
         let shared = shared_in_mode(RelayMode::AuditOnly);
+        let (tx_in, rx_in) = mpsc::channel();
         let (tx_out, rx_out) = mpsc::channel();
 
         pin_gate.on_list_response(&manifest("orig"));
 
-        let drifted = json!({
-            "jsonrpc": "2.0", "id": 3,
-            "result": { "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }
-        });
-        shared
-            .pending_lists
-            .lock()
-            .unwrap()
-            .insert(json!(3).to_string());
-        let line = drifted.to_string();
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "3");
+        let line = upstream_response(
+            &pid,
+            json!({ "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }),
+        );
         assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
+        let out = rx_out.recv().expect("forward with restored id");
+        // Byte-identical EXCEPT the id (restored to the client's own).
         assert_eq!(
-            rx_out.recv().expect("verbatim forward"),
-            line,
-            "audit-only must not touch the manifest bytes"
+            out,
+            r#"{"id":3,"jsonrpc":"2.0","result":{"tools":[{"description":"EVIL","inputSchema":{"type":"object"},"name":"echo"}]}}"#,
+            "audit-only forwards the DRIFTED manifest; {out}"
         );
         assert!(!shared.quarantined.load(Ordering::SeqCst));
     }
@@ -1065,17 +1403,45 @@ mod tests {
         let (_dir, store) = temp_store("enforce-drift");
         let mut pin_gate = PinGate::new(store, "srv".into(), None);
         pin_gate.on_list_response(&manifest("orig"));
-        let drifted = json!({
-            "jsonrpc": "2.0", "id": 4,
-            "result": { "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }
-        });
-        shared
-            .pending_lists
-            .lock()
-            .unwrap()
-            .insert(json!(4).to_string());
-        let line = drifted.to_string();
+        let (_, pid) = send_client_list(&shared, &tx_in, &rx_in, &tx_out, "4");
+        let line = upstream_response(
+            &pid,
+            json!({ "tools": [ {"name": "echo", "description": "EVIL", "inputSchema": {"type": "object"}} ] }),
+        );
         assert!(handle_upstream_line(&line, &mut pin_gate, &shared, &tx_out).is_none());
         assert!(shared.quarantined.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn rng_failure_denies_the_request_fail_closed_at_relay_level() {
+        use crate::proxy::spoof::{IdRewriter, RegisterError};
+        let shared = Shared {
+            ids: std::sync::Mutex::new(IdRewriter::with_sources(
+                Box::new(std::time::Instant::now),
+                Box::new(|| Err("urandom gone".to_string())),
+            )),
+            ..Shared::default()
+        };
+        let (tx_in, rx_in) = mpsc::channel();
+        let (tx_out, rx_out) = mpsc::channel();
+
+        // Sanity-check the injected source really fails.
+        assert_eq!(
+            shared.ids.lock().unwrap().register("1".into(), false),
+            Err(RegisterError::RngUnavailable("urandom gone".to_string()))
+        );
+
+        let line = r#"{"jsonrpc":"2.0","id":8,"method":"initialize","params":{}}"#;
+        assert!(handle_client_line(line, &shared, &tx_in, &tx_out, &test_gates()).is_none());
+        assert!(
+            rx_in.try_recv().is_err(),
+            "RNG failure must deny: nothing may reach upstream"
+        );
+        let resp = rx_out.recv().expect("fail-closed denial response");
+        let v: Value = serde_json::from_str(&resp).unwrap();
+        assert_eq!(v["id"], 8);
+        assert_eq!(v["result"]["isError"], true);
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("randomness unavailable"), "{text}");
     }
 }

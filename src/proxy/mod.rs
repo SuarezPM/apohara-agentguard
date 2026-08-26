@@ -15,6 +15,12 @@
 //! - **Fail-closed framing** — NDJSON only, 16 MiB line cap, non-JSON lines
 //!   from either side terminate the session loudly ([`framing`]).
 //!
+//! - **Request-id anti-spoofing** — every client request id is replaced by a
+//!   relay-minted opaque id (`agp-<hex>`) upstream; responses are accepted
+//!   only when their id sits exactly in the pending map (replays, foreign
+//!   and unknown ids are dropped), then the original id bytes are restored.
+//!   ([`spoof`]).
+//!
 //! The user-facing entry point is the `agentguard-proxy` binary
 //! (`src/bin/agentguard-proxy.rs`); [`relay::run`] is the library-level
 //! session driver so integration tests can exercise real sessions.
@@ -23,3 +29,4 @@ pub mod framing;
 pub mod gate;
 pub mod pinning;
 pub mod relay;
+pub mod spoof;
