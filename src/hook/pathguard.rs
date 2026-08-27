@@ -51,11 +51,47 @@ pub fn check_path(tool: &str, path: &str, write: bool) -> Verdict {
 }
 
 /// Normalized path: lowercased (case-insensitive match), `~`/`$HOME`/
-/// `%USERPROFILE%` expanded, and backslashes folded to `/`.
+/// `%USERPROFILE%` expanded, backslashes folded to `/`, and lexically cleaned
+/// (`.` and `..` resolved without I/O).
 fn normalize(path: &str) -> String {
     let expanded = expand_home(path);
     let slashed = expanded.replace('\\', "/");
-    slashed.to_lowercase()
+    let lower = slashed.to_lowercase();
+    clean_path(&lower)
+}
+
+/// Lexically resolve `.` and `..` components in a `/`-separated path string.
+fn clean_path(path: &str) -> String {
+    let is_absolute = path.starts_with('/');
+    let mut components = Vec::new();
+
+    for part in path.split('/') {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." {
+            if is_absolute {
+                components.pop();
+            } else if let Some(last) = components.last() {
+                if *last != ".." {
+                    components.pop();
+                } else {
+                    components.push("..");
+                }
+            } else {
+                components.push("..");
+            }
+        } else {
+            components.push(part);
+        }
+    }
+
+    let mut res = String::new();
+    if is_absolute {
+        res.push('/');
+    }
+    res.push_str(&components.join("/"));
+    res
 }
 
 /// Expand a leading `~`, `$HOME`, or `%USERPROFILE%` to the home directory.
@@ -117,11 +153,11 @@ fn secret_read_target(norm: &str) -> Option<&'static str> {
     let file = file_name(norm);
 
     // Anywhere under ~/.ssh/ (private keys, authorized_keys, known_hosts).
-    if contains_dir(norm, "/.ssh/") {
+    if has_ssh_dir(norm) {
         return Some("path under ~/.ssh");
     }
     // /etc/* — system config & secrets (POSIX only; Windows has no /etc).
-    if !cfg!(windows) && norm.starts_with("/etc/") {
+    if is_etc_path(norm) {
         return Some("system path under /etc");
     }
 
@@ -147,10 +183,10 @@ fn secret_read_target(norm: &str) -> Option<&'static str> {
 
 /// If `norm` (already normalized) is a sensitive WRITE target, return why.
 fn sensitive_write_target(norm: &str) -> Option<&'static str> {
-    if contains_dir(norm, "/.ssh/") {
+    if has_ssh_dir(norm) {
         return Some("path under ~/.ssh");
     }
-    if !cfg!(windows) && norm.starts_with("/etc/") {
+    if is_etc_path(norm) {
         return Some("system path under /etc");
     }
 
@@ -179,15 +215,29 @@ fn file_name(norm: &str) -> &str {
         .unwrap_or(norm)
 }
 
-/// Whether `norm` contains `segment` as a directory boundary, also matching when
-/// it begins the path (e.g. `.ssh/...` with no leading slash after `~` drop).
-fn contains_dir(norm: &str, segment: &str) -> bool {
-    if norm.contains(segment) {
+/// Whether `norm` (already normalized and cleaned) targets an SSH directory.
+fn has_ssh_dir(norm: &str) -> bool {
+    norm.split('/').any(|comp| comp == ".ssh")
+}
+
+/// Whether `norm` (already normalized and cleaned) targets `/etc` or a subpath.
+fn is_etc_path(norm: &str) -> bool {
+    if cfg!(windows) {
+        return false;
+    }
+    if norm.starts_with("/etc/") || norm == "/etc" {
         return true;
     }
-    // Handle a path that *starts* with the bare dir (segment without lead slash).
-    let bare = segment.trim_start_matches('/');
-    norm.starts_with(bare)
+    if !norm.starts_with('/') {
+        let mut rest = norm;
+        while let Some(stripped) = rest.strip_prefix("../") {
+            rest = stripped;
+        }
+        if rest == "etc" || rest.starts_with("etc/") {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -284,5 +334,42 @@ mod tests {
     fn writing_a_secret_is_also_blocked() {
         // Overwriting .env counts as a write to a secret target.
         assert_eq!(check_path("Write", ".env", true).tier, Tier::Block);
+    }
+
+    #[test]
+    fn path_traversal_and_relative_etc_blocked() {
+        if !cfg!(windows) {
+            assert_eq!(check_path("Read", "etc/passwd", false).tier, Tier::Block);
+            assert_eq!(check_path("Read", "./etc/passwd", false).tier, Tier::Block);
+            assert_eq!(
+                check_path("Read", "/var/../etc/shadow", false).tier,
+                Tier::Block
+            );
+            assert_eq!(
+                check_path("Read", "../../etc/sudoers", false).tier,
+                Tier::Block
+            );
+            assert_eq!(
+                check_path("Write", "/var/../etc/hosts", true).tier,
+                Tier::Block
+            );
+        }
+    }
+
+    #[test]
+    fn path_traversal_and_relative_ssh_blocked() {
+        assert_eq!(
+            check_path("Read", ".ssh/authorized_keys", false).tier,
+            Tier::Block
+        );
+        assert_eq!(check_path("Read", "./.ssh/id_rsa", false).tier, Tier::Block);
+        assert_eq!(
+            check_path("Read", "some/dir/../../.ssh/id_rsa", false).tier,
+            Tier::Block
+        );
+        assert_eq!(
+            check_path("Write", "a/b/../../.ssh/authorized_keys", true).tier,
+            Tier::Block
+        );
     }
 }

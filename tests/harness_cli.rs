@@ -59,12 +59,9 @@ fn run_hook(home: &Path, harness: Option<&str>, stdin_json: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn apohara-agentguard hook");
-    child
-        .stdin
-        .take()
-        .expect("open stdin")
-        .write_all(stdin_json.as_bytes())
-        .expect("write stdin payload");
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(stdin_json.as_bytes());
+    }
     child.wait_with_output().expect("wait for hook")
 }
 
