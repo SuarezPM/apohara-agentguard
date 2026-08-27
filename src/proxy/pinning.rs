@@ -1286,6 +1286,7 @@ mod tests {
 
     // ---- atomic persistence (FASE 5-B mechanism 4) -------------------------
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn concurrent_writers_never_corrupt_the_store() {
         // Simulates multi-instance hosts: many PinStore handles on the SAME
@@ -1383,6 +1384,7 @@ mod tests {
         assert!(v.is_quarantine());
     }
 
+    #[cfg(unix)]
     #[test]
     fn lock_file_is_created_as_sibling_marker() {
         let base = TempBase::new("lockfile");
