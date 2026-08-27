@@ -35,9 +35,12 @@
 //!
 //! Durability & multi-process posture: every read-modify-write runs under an
 //! EXCLUSIVE `flock` on a sibling `.mcp-pins.lock` file (Linux, via `nix`;
-//! other platforms degrade to the atomic-rename-only posture, documented in
-//! [`PinLock`]), and the store is RE-READ inside the critical section, so two
-//! proxy instances racing on one host can never clobber each other's pins.
+//! other platforms serialize threads in the same process via an in-process
+//! mutex and otherwise degrade to the atomic-rename-only posture, documented
+//! in [`PinLock`]), and the store is RE-READ inside the critical section, so
+//! two proxy instances racing on one host can never clobber each other's pins
+//! on Linux, and threads in the same process never clobber each other on any
+//! platform.
 //! Writes go through a 0600 tempfile in the SAME directory + `sync_all` +
 //! atomic rename + best-effort parent-directory fsync. A crash mid-write can
 //! only leave either the old or the new file — never a torn document — and a
@@ -83,18 +86,28 @@ const STORE_VERSION: u32 = 3;
 // writes, surfacing as ENOENT on rename when two writers share the same tmp).
 static PIN_STORE_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+// In-process serializer for read-modify-write cycles. On macOS `PinLock` has
+// no kernel advisory lock (nix flock is Linux-only in this crate), so threads
+// in the SAME process would otherwise race: two writers can read the same
+// 5-entry snapshot, each add one entry, and the second rename clobbers the
+// first (lost update, 5 instead of 6). A process-global mutex serializes the
+// whole RMW (held for the lifetime of `PinLock`), complementing the file
+// lock on Linux.
+static PROCESS_PIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Sibling lock file guarding concurrent read-modify-writes of the store
 /// (multi-instance hosts spawn several proxies against one config dir).
 ///
 /// On Linux the guard holds a [`nix::fcntl::Flock`] over a sibling
-/// `.mcp-pins.lock` fd; dropping it releases the lock.
+/// `.mcp-pins.lock` fd; dropping it releases the lock. On all platforms it
+/// also holds the in-process `PROCESS_PIN_LOCK` mutex so threads in the same
+/// process never interleave their read-modify-write even when the kernel lock
+/// is unavailable (macOS) or when `flock` semantics are per-process.
 struct PinLock {
     #[cfg(target_os = "linux")]
     _lock: Option<nix::fcntl::Flock<std::fs::File>>,
-    // Non-Linux: no kernel advisory lock without extra deps; atomic rename
-    // alone carries consistency (see [`PinLock::acquire`]).
-    #[cfg(not(target_os = "linux"))]
-    _marker: (),
+    // Held for the entire RMW critical section; see `PROCESS_PIN_LOCK`.
+    _process_guard: std::sync::MutexGuard<'static, ()>,
 }
 
 impl PinLock {
@@ -103,13 +116,22 @@ impl PinLock {
     /// **Linux** uses `flock(LOCK_EX)` via the safe `nix::fcntl::Flock`
     /// wrapper. `flock` locks are tied to the open file description, so
     /// separate processes (and separate opens in one process) serialize
-    /// correctly. EINTR is retried.
+    /// correctly. EINTR is retried. A process-global mutex is also held for
+    /// the lifetime of the guard so threads in the same process never interleave
+    /// even when `flock` is unavailable.
     ///
-    /// **Other platforms**: degrades to atomic-rename-only consistency (each
-    /// writer produces a complete file; last rename wins, possibly dropping a
-    /// racing peer's fresh entry). Documented residual, acceptable off the
-    /// primary Linux target.
+    /// **Other platforms**: threads in the same process are serialized by the
+    /// in-process mutex; cross-process writers degrade to atomic-rename-only
+    /// consistency (each writer produces a complete file; last rename wins,
+    /// possibly dropping a racing peer's fresh entry). Documented residual,
+    /// acceptable off the primary Linux target.
     fn acquire(dir: &Path) -> Result<Self, String> {
+        // In-process mutex is held for the entire RMW critical section. On
+        // macOS the file lock below is a no-op (nix is Linux-only), so this
+        // is the sole serialization for threads in the same process; on Linux
+        // it complements flock. Poison is recovered: a panicked writer must
+        // not brick the store.
+        let process_guard = PROCESS_PIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         let path = dir.join(".mcp-pins.lock");
         #[cfg(target_os = "linux")]
@@ -141,7 +163,10 @@ impl PinLock {
                     }
                 }
             };
-            Ok(Self { _lock: Some(lock) })
+            Ok(Self {
+                _lock: Some(lock),
+                _process_guard: process_guard,
+            })
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -168,7 +193,9 @@ impl PinLock {
                     .open(&path)
                     .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
             }
-            Ok(Self { _marker: () })
+            Ok(Self {
+                _process_guard: process_guard,
+            })
         }
     }
 }
