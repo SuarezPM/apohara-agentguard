@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-08-27
+
+### Fixed
+
+- **Path traversal bypass in pathguard** (GH-28, high-severity): relative and traversal paths (`etc/passwd`, `/var/../etc/shadow`, `./.ssh/id_rsa`, `a/b/../../.ssh/authorized_keys`) now lexically cleaned via `clean_path()` and component-aware predicates `has_ssh_dir()`/`is_etc_path()` — previously bypassed `contains_dir` substring checks. 2 regression tests added.
+
+### Changed
+
+- **Zero-allocation fast-paths for hook latency** (GH-30, Bolt): `policy_engine_evaluate` and `tool_rule_verdict` short-circuit when unconfigured, `collect_ifs_separators` and `resolve_assignments` skip allocations when syntax absent, `effective_match_text` returns `Cow` zero-copy, `contains_ignore_ascii_case` pre-checks before regex — benign p50 2.15µs→1.43µs (-34%), blocked 3.36µs→2.51µs (-25%), ReDoS-safe, byte-identical.
+
 ## [0.5.1] - 2026-08-27
 
 ### Fixed
@@ -286,7 +296,8 @@ safety layer for AI coding agents: one Rust binary, no network at scan time.
 - **Dual license**: MIT OR Apache-2.0; third-party licenses enumerated in
   `THIRD-PARTY-LICENSES` and gated by `cargo deny check licenses`.
 
-[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.0...v0.4.1
