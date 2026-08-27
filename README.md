@@ -11,14 +11,14 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/SuarezPM/apohara-agentguard/release.yml?style=for-the-badge&label=CI)](https://github.com/SuarezPM/apohara-agentguard/actions)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=for-the-badge)](#-license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-0.5.3-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
+[![Version](https://img.shields.io/badge/version-0.5.4-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
 [![Sandbox](https://img.shields.io/badge/sandbox-seccomp%2BLandlock-success?style=for-the-badge)](#-how-it-works--honesty)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/SuarezPM/apohara-agentguard/badge?style=for-the-badge)](https://scorecard.dev/viewer/?uri=github.com/SuarezPM/apohara-agentguard)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13128/badge?style=for-the-badge)](https://www.bestpractices.dev/projects/13128)
 
-<sub>OpenSSF Passing + Silver criteria mapping: [docs/best-practices-silver.md](docs/best-practices-silver.md)</sub>
+<sub>OpenSSF Silver + Scorecard 7 (10 en v0.5.7) — supply-chain minimal v0.5.3 → v0.5.4 docs · SLSA L3 sigstore+intoto · Branch-Protection 8/10 · LICENSE MIT</sub>
 
-**[Quick Start](#-quick-start)** · **[Features](#-features)** · **[How it works](#-how-it-works--honesty)** · **[Roadmap](#-roadmap)**
+**[For Humans](#-for-humans--the-30-second-aida) · [For LLMs](#-for-llms--skip-this-readme)** · **[Features](#-features)** · **[Benchmarks](#-benchmarks-at-a-glance)** · **[How it works](#-how-it-works--honesty)** · **[Roadmap](#-roadmap)**
 
 A deterministic, offline Rust safety layer for AI coding agents: an **anti-bypass command gate** that parses Bash structure instead of grepping for substrings, a **seccomp + Landlock sandbox** for the code an agent actually runs, and a **prompt-injection input firewall** — no model, no network at scan time.
 
@@ -32,6 +32,148 @@ A deterministic, offline Rust safety layer for AI coding agents: an **anti-bypas
   <code>curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh</code><br>
   <sub>Deterministic Bash gate · seccomp+Landlock sandbox · MCP TOFU proxy — no LLM · local-first · works from the shadows.</sub>
 </p>
+
+> [!TIP]
+> **Two tracks, same repo.** Humans: read the 30-second story ↓. Agents: skip everything and paste the prompt in [For LLMs](#-for-llms--skip-this-readme).
+
+---
+
+## 👤 For Humans — the 30-second AIDA
+
+> [!WARNING]
+> **You don't need another scanner that tells you *after* the damage.** You need something that stops the command *before* it runs, and contains what slips through. That's the whole bet.
+
+### Attention — 4 August 2026, `npm install` became a worm
+
+At **09:35 UTC, 4 Aug 2026**, a compromised maintainer pushed `keyv@6.0.0`. It looked like a patch bump. It carried a `preinstall: node setup.mjs` that downloaded **Bun 1.3.13**, executed a 728 KB worm called **CHAINDROP (Shai-Hulud)**, then deleted itself.
+
+By **13:18 UTC** the same payload had self-replicated to **444 packages, 2,234 versions, ~2 billion monthly installs** (Elastic/JFrog/Wiz/Aikido, 4–6 Aug 2026). It didn't just run on install — it committed `.claude/settings.json` + `.vscode/tasks.json` hooks so **opening the repo in VS Code or starting a Claude Code session was enough to execute**, with no `npm install` at all. It harvested **300+ secret patterns** — `npm`/`GitHub`/`AWS`/`GCP`/`Azure` tokens plus **AI tool creds (Claude, Cursor, Codex, OpenAI, Gemini)** and `/etc/shadow` — gzip+RSA-encrypted them, and exfiltrated via **Ethereum smart-contract C2** (`0xE1f2395ee…`) and public GitHub dead-drops (`Shai-Hulud: Here We Go Again`).
+
+It also did the one thing every supply-chain post-mortem warns about and every agent did anyway: **an LLM hallucinated a package name, an attacker registered it, the agent trusted the vendor doc and ran `pip install`/`npm install` without verifying the namespace.** On Aug 27, Ars documented **120 `llms.txt`/`llms-full.txt` files on 6,214 corporate domains pointing to unclaimed packages/domains** — Forti500s included — that any registered attacker could claim. The Clerk npm case was already live malware.
+
+If your agent can run `Bash` and fetch a URL, that was your attack surface that morning.
+
+AgentGuard exists for precisely that gap: **parse the command's structure, not its spelling; and if it runs, run it jailed.**
+
+### Interest — what we actually measured
+
+No hype, just the committed corpora and the bench you can re-run:
+
+| Dimension | What we claim | How it's measured | Reproduce |
+|---|---|---|---|
+| **Gate latency — benign** | **p50 1.43 µs** (Bolt zero-alloc, −34% vs v0.5.1) | `benches/hook_latency` — end-to-end `hook::run` (JSON parse → gate/firewall → verdict), 10k iter, LazyLock warmed | `cargo bench --bench hook_latency` |
+| **Blocked** | p50 **2.51 µs**, p99 **~3.2 µs** | same harness | same |
+| **Injection scan** | p50 **0.86 µs** / p99 **1.37 µs** | firewall over full DJL+OWASP rule set | same |
+| **Precision (author-curated)** | **0 / 73 FP**, **0 / 33 FN** (gate) · **0 / 66 — 0 / 33** (policy) | same corpus vs naive substring baseline (11/33 FN) | `cargo test benchmark -- --nocapture` |
+| **QuasarNix obfuscation** | **100% mean TPR across 15 manipulations** post hexesc fix (was 93.33% v0.4.0, `hexesc` 0% → 100%) | 483k cmds (Trizna et al., ACM TOPS 2025) · opt-in `reverse-shell` pack · FPR 4.18e-2 | `docs/benchmarks-results.md` |
+| **MCPTox proxy** | OFF **26.3% ASR** → **16.9% strict (FP 0.84%)** / **18.9% conservative (FP 0%)** | 1,312 attacks + 357 benign, muse-spark-1.2-contributor clean 2026-08-26 | `evals/mcptox-policy/` |
+| **Supply chain** | **SLSA L3** — isolated `_attest.yml` + sigstore `.sigstore.json` + intoto `*.intoto.jsonl` per target · **Branch-Protection 8/10** · **11 checks strict** · `LICENSE` MIT | verified `gh attestation verify --signer-workflow` (wrong signer rejected) | `.github/workflows/release.yml` + `_attest.yml` |
+| **Distribution** | **Minimal 2 targets** (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`) + `cargo install` fallback | 13 assets vs legacy 34 | `packaging/install.sh` |
+
+> Honesty box — two qualifiers we refuse to hide: **(1)** QuasarNix 100% requires the opt-in `reverse-shell` community pack (default taxonomy is destructive-only, 1.71% TPR without it; FPR axis 4.18e-2 vs GBDT record 1e-6 — we lead on *perturbation delta*, not same-axis). **(2)** The MCPTox policy that reaches 16.9% is a **labeled oracle** authored with corpus knowledge (`evals/mcptox-policy/policy-oracle-*.toml`) — a measured best-case for deterministic gating (~30% patternable); the remaining ~65% is semantic misuse no regex proxy can catch. Previous mixed-model 23.9% is **deprecated**.
+
+### Desire — why AgentGuard, not the other tab you have open
+
+Every other cohort tool is a **pre-install scanner** — it audits a skill or repo *before* you install it. Useful. But none of them **enforce at tool-call time, offline, in microseconds, and then jail the execution**. That's the niche that was empty and still is.
+
+> **Full honest comparison is being researched by @librarian in parallel.** Numbers below are structural (code-verified) or published; any cell marked `TODO(librarian)` will be filled once their crawl finishes. We do not invent scores.
+
+| Capability | **apohara-agentguard 0.5.4** | **Snyk agent-scan** | **Cisco skill-scanner** | **NVIDIA SkillSpector** | **Pantheon Medusa** |
+|---|---|---|---|---|---|
+| **Enforcement moment** | **Runtime** — `PreToolUse` gate (Block > Ask > Warn > Allow) + seccomp/Landlock jail | Runtime thin-client (same hook slot, but **cloud verdict**) | **Pre-install** scanner | **Pre-install** scanner | **Pre-install** SAST |
+| **Network at scan time** | **None** — local, deterministic, offline | **Required** — `stdin → base64 → POST api.snyk.io → remote decision` (timeout 75s) | Offline (scanner) | Offline (scanner) | Offline (scanner) |
+| **Latency per tool call** | **1.43 µs p50** (benign, Bolt) | `TODO(librarian)` — network round-trip | `TODO(librarian)` — seconds per repo | `TODO(librarian)` — seconds per skill | `TODO(librarian)` — seconds per repo |
+| **Sandbox** | **Real kernel jail** — seccomp-bpf + Landlock, fail-closed (Linux ≥5.13) | None — detection only | None | None | None |
+| **MCP protection** | **MCP transport proxy** `agentguard-proxy` — TOFU SHA-256 pin + quarantine-on-drift + `tools/call` gating | `TODO(librarian)` | `TODO(librarian)` | MCP server that **gates installs** (not calls) | None |
+| **Ask / human-in-loop** | **Tier Ask** — `permissionDecision: "ask"` (+ `agentguard ask` CLI) · degrades gracefully per-host | `TODO(librarian)` | — | — | — |
+| **Multi-host** | **8 hosts** — Claude/Codex/OpenCode/Kilo/Kitty/Windsurf/Cursor/Antigravity (adapters over canonical IR) | 13 harnesses (hook installer) | `TODO(librarian)` | `TODO(librarian)` | `TODO(librarian)` |
+| **Precision gate** | **0 / 73 FP · 0 / 33 FN** committed, CI-enforced | `TODO(librarian)` | `TODO(librarian)` | 70 patterns / 17 cats (published) | "40k patterns" — 81% LLM-harvested, FP guards empty (code-verified) |
+| **External obfuscation** | **QuasarNix 100% mean** (pack opt-in, see qualifier) | `TODO(librarian)` | `TODO(librarian)` | `TODO(librarian)` | `TODO(librarian)` |
+| **Supply chain** | **SLSA L3 isolated** + sigstore + intoto, Scorecard 7 (10 en v0.5.7), Silver | `TODO(librarian)` | `TODO(librarian)` | `TODO(librarian)` | AGPL-3.0 (SaaS contagion) |
+| **Privacy** | **Your command stream never leaves your machine** — pipe stdin→stdout, no cloud, no upload, audit log local-off-by-default | Command stream **exfiltrated to Snyk cloud** | Local | Local | Local |
+
+**The defensible edge:** structural Bash parsing that survives obfuscation (`x=rm; $x -rf ~`, `$(echo rm) -rf ~`, `find . -delete`, `IFS` tricks, base64, ANSI-C `$'\x72\x6d'`) + a real sandbox that **contains** what the gate misses + a proxy that **pins** what the agent trusts — all at microsecond cost, without a model, without a network call. Scanners compete on pattern count; we compete on **microseconds, containment, and an honest 0-FP corpus you can gate on**.
+
+If you want *audit before install*, pair us with SkillSpector or Cisco. If you want *block before exec and jail after*, there's not a second tool that does it locally.
+
+### Action — 60 seconds to green
+
+The agent path is the happy path — but humans can type it too:
+
+```sh
+cargo install apohara-agentguard --locked
+apohara-agentguard init          # dry-run: shows what would be wired
+apohara-agentguard init --yes    # apply to Claude/Codex/OpenCode/Kilo/Kitty/Windsurf/Cursor/Antigravity
+apohara-agentguard doctor        # all green? you're guarded
+apohara-agentguard check 'x=rm; $x -rf ~'  # -> block (exit 2) — proves it's alive
+```
+
+Or the one-liner (SHA256-verified, fails on mismatch):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh
+```
+
+Downstream detail lives in [Quick Start](#-quick-start--humans--agents). Agents: your turn ↓
+
+---
+
+## 🤖 For LLMs — Skip This README
+
+**Paste this entire block into Claude Code / Cursor / AmpCode / Codex / Windsurf — it will install and configure AgentGuard without you reading anything else.**
+
+`````markdown
+Install and configure apohara-agentguard (deterministic offline safety layer for AI coding agents):
+
+SOURCE OF TRUTH (read first, follow exactly):
+  https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/refs/tags/v0.5.4/README.md
+REPO: https://github.com/SuarezPM/apohara-agentguard
+VERSION: 0.5.4 (SLSA L3, Scorecard 7 (10 en v0.5.7), OpenSSF Silver, dual MIT OR Apache-2.0, MSRV 1.85)
+
+DO THIS, IN ORDER, AND VERIFY EACH STEP:
+
+1) Install the binary (lowest-trust, build-from-source):
+   cargo install apohara-agentguard --locked
+   # Alternative if cargo is unavailable (SHA256-verified, fails on mismatch):
+   # curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh
+   # Note: distribution is minimal 2 targets (x86_64-unknown-linux-musl + aarch64-apple-darwin); other triples fallback to cargo install.
+
+2) Wire the safety hook into every supported host (dry-run first, then apply):
+   apohara-agentguard init
+   apohara-agentguard init --yes
+   # This detects Claude Code, OpenAI Codex, OpenCode, Kilo Code, kitty-code, Windsurf, Cursor, Antigravity and appends hook config.
+   # On Windsurf/Cursor (Windows native without WSL) verify POSIX shell semantics after init.
+
+3) Verify the gate is enforcement (not advisory):
+   apohara-agentguard check 'x=rm; $x -rf ~'
+   # expected: block: blocked dangerous leg `rm -rf ~` (destructive [rm-rf]) and exit 2
+   apohara-agentguard check 'git commit -m "fix the rm -rf helper"'
+   # expected: allow and exit 0 (message mentions rm -rf but does not execute it)
+   apohara-agentguard ask 'kubectl get pods'
+   # expected: allow/ask/block with reason (policy engine pipeline; empty policy => same as check)
+   apohara-agentguard doctor
+   # expected: all checks pass / green
+   apohara-agentguard version
+   # expected: 0.5.4
+
+4) Verify provenance (optional, recommended — keyless Sigstore, isolated workflow):
+   gh attestation verify <downloaded-binary> -R SuarezPM/apohara-agentguard --signer-workflow SuarezPM/apohara-agentguard/.github/workflows/_attest.yml
+   # non-zero exit means tampered or not built by this repo — do not run.
+
+5) Sanity: run the hook contract manually:
+   echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"x=rm; $x -rf ~"}}' | apohara-agentguard hook; echo "exit=$?"
+   # expected: permissionDecision=deny, exit 2
+
+CONSTRAINTS:
+- Do NOT use `AGENTGUARD_DISABLE=1` except as emergency kill-switch (fail-closed bug recovery). It disables gate+firewall+pathguard+canary together.
+- Packs (cloud/db/container + community reverse-shell) are OFF by default — enable only if needed; each has its own 0-FP/0-FN corpus.
+- Sandbox is Linux-only (seccomp+Landlock, needs >=5.13, fail-closed elsewhere).
+
+IF ANY STEP FAILS: surface the exact stderr/exit code — do not fall back to unverified binaries.
+`````
+
+> [!TIP]
+> **For LLM agents:** `curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/README.md` is cheaper than reading the whole repo — it contains everything. For humans: keep scrolling.
 
 ---
 
@@ -79,16 +221,19 @@ allow                                                                  # exit 0
 | 🤚 **`Tier::Ask` decision tier** (v0.3) | A 4th verdict — `Block > Ask > Warn > Allow` — surfaces a UI prompt via Claude Code's `permissionDecision: "ask"` contract (exit 0 on `PreToolUse`; graceful downgrade to `Warn` on `PostToolUse`/`UserPromptSubmit`). The `apohara-agentguard ask '<cmd>'` CLI subcommand is the operator introspection surface — see the verdict before relying on the hook. |
 | 📜 **Pure-Rust policy engine** (v0.3) | TOML-loaded, per-tool `[[tools]]` rule patterns, `defaults.default_action = "deny"` posture, per-session + per-tool budget caps with the `tokens = max(1, chars / 4)` heuristic (charged on `Bash` + `UserPromptSubmit` only). Loaded via `--policy <path>` (CLI > `AGENTGUARD_POLICY` env > `[policy] file` in config). Fail-closed on any load / parse / schema-version error. **Zero new runtime deps** — reuses the existing `toml` crate, purity guard stays GREEN. |
 | 🛡️ **Sandbox escape closures** (v0.3) | The Landlock allowlist never grants write access on `/proc`, closing 2 of 3 documented escape surfaces by omission: the `/proc/self/root` filesystem-via-proc alias and the ELF-linker trick of writing to `/proc/self/exe` — both pinned by real probes in `tests/sandbox_escape.rs`, including an in-sandbox seccomp self-disable attempt asserted to fail. The empirical build baseline (`cargo build` / `node -e` / `go run` exiting 0) is preserved as the non-regression gate. |
-| 🐧 **musl Linux release binaries** (v0.3) | The release matrix grew from 5 to **7** targets in v0.3; since v0.5.3 minimal distribution is **2 targets** (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`) static binaries for Alpine/musl and macOS — other platforms use `cargo install` fallback. Both attested via the existing SLSA L3 reusable workflow. |
+| 🐧 **musl + macOS minimal binaries** (v0.5.3) | Since v0.5.3 **2 targets** (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`) static binaries — other platforms use `cargo install` fallback. Both attested via SLSA L3 isolated workflow (`sigstore` + `intoto`). |
 | ⚖️ **Dual-licensed** | MIT **OR** Apache-2.0, at your option. Third-party licenses enumerated and gated by `cargo deny`. |
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Quick Start — humans + agents
+
+> [!TIP]
+> **LLM-recommended path:** Copy the prompt in [For LLMs](#-for-llms--skip-this-readme) to your agent (Claude Code, Cursor, AmpCode, Codex, Windsurf…) — it does `cargo install` + `apohara-agentguard init --yes` + verification end-to-end. Below is the same path for humans typing by hand.
 
 ```sh
 # 1. Install the binary (builds from source — lowest-trust path)
-cargo install apohara-agentguard
+cargo install apohara-agentguard --locked
 
 # 2. Check a command through the anti-bypass gate (exit 2 on a block)
 apohara-agentguard check 'x=rm; $x -rf ~'
@@ -103,8 +248,12 @@ echo "some untrusted text" | apohara-agentguard scan
 apohara-agentguard ask 'kubectl get pods'
 # -> "ask: <reason>" (budget exceeded) / "block: <reason>" / "allow"
 
-# 6. Install as a Claude Code plugin (resolves + SHA256-verifies the binary)
+# 6. Wire all hosts + SHA256-verify (idempotent, backup-atomic)
 curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh  # minimal 2-target: if 404/no binary for your triple, fallback `cargo install apohara-agentguard`
+
+# 7. Verify health
+apohara-agentguard doctor
+apohara-agentguard version  # -> 0.5.4
 ```
 
 <details>
@@ -127,7 +276,7 @@ export AGENTGUARD_DISABLE=1   # or: disable = true in the config file
 apohara-agentguard version
 ```
 
-**Subcommands:** `check <cmd>` (gate) · `ask <cmd>` (v0.3: gate + policy engine) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `audit verify` (SHA-256 hash-chain check on the JSONL audit log: tamper / truncation detection) · `version`.
+**Subcommands:** `check <cmd>` (gate) · `ask <cmd>` (v0.3: gate + policy engine) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `audit verify` (SHA-256 hash-chain check on the JSONL audit log: tamper / truncation detection) · `init` (auto-wire) · `doctor` (health) · `version`.
 
 **Other acquisition paths.** A thin `npx apohara-agentguard` launcher resolves the release binary by platform × arch × libc (minimal 2-target distribution: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`; other triples fall back to `cargo install`); `cargo install --git https://github.com/SuarezPM/apohara-agentguard apohara-agentguard --locked` builds from source (the supported fallback for any platform without a pinned artifact; the package is named so cargo skips the in-repo fuzz crate). `packaging/install.sh` also falls back to `cargo install` on 404/missing checksum — see its error message.
 
@@ -135,6 +284,23 @@ apohara-agentguard version
 > Downloading a pre-built binary is itself a supply-chain surface — the very risk this tool exists to flag. The `npx` and install-script paths resolve the artifact, verify its **SHA256 against a pinned manifest**, and **refuse to run on a mismatch**. Prefer `cargo install` and build from source when in doubt.
 
 </details>
+
+---
+
+## 📊 Benchmarks at a glance
+
+Honest numbers you can re-run today. Full tables live in [BENCHMARK.md](BENCHMARK.md) and [docs/benchmarks-results.md](https://github.com/SuarezPM/apohara-agentguard/blob/main/docs/benchmarks-results.md).
+
+| Axis | Result | What it means | Caveat |
+|---|---|---|---|
+| **FP / FN gate** | **0 / 73 FP · 0 / 33 FN** | every benign allows, every obfuscated destructive blocks | author-curated synthetic — demonstrates the mechanism, not a neutral sample |
+| **Bolt latency (benign)** | **p50 1.43 µs** (−34% vs 2.15 µs pre-Bolt) | zero-alloc fast-path: `Cow` + short-circuit when unconfigured | `cargo bench --bench hook_latency` on Ryzen 5 3600 |
+| **QuasarNix** | **100% mean TPR** across 15 obfuscation manipulations (was 93.33% at campaign, `hexesc` 0% → 100% after `7f3d46f`) | `printf '\xHH' \| sh` hex-escape payloads now decoded before scan | requires **opt-in `reverse-shell` pack**; default TPR 1.71% by design; FPR 4.18e-2 (527/12,607) vs GBDT record 60.2% @ FPR 1e-6 — we win on perturbation delta |
+| **MCPTox** | OFF **26.3%** → ON+strict **16.9% (FP 0.84%)**, ON+cons **18.9% (FP 0%)** | Δ strict −9.4pp (−35.7% rel.) on 1,312 attacks + 357 benign | **labeled oracle policy** — measured best-case for deterministic gating; deprecated mixed-model 23.9% replaced 2026-08-26 clean run |
+| **TensorTrust** | firewall **94.8% FN** (21/400 blocked) | deterministic regex ceiling vs human social-engineering — motivates semantic tier | external corpus vendored under BSD-2 |
+| **Mirror paraphrase** | **100% FN** on 30 rewritten attacks / **0% FP** on 15 controls | same ceiling, worst-case paraphrase | authored consulting the rule tables |
+
+SLSA L3 provenance per binary, Scorecard 7 (10 en v0.5.7) (11 checks strict), OpenSSF Silver (passing + silver criteria mapped in [docs/best-practices-silver.md](https://github.com/SuarezPM/apohara-agentguard/blob/main/docs/best-practices-silver.md)), Branch-Protection 8/10.
 
 ---
 
@@ -232,7 +398,7 @@ apohara-agentguard/
 ├── tests/                   # incl. committed FP/FN gates (gate / policy / ask / sandbox) + evasion regression net
 ├── benches/                 # ReDoS guard for the rule regexes
 ├── fuzz/                    # cargo-fuzz target over gate::evaluate
-├── .claude-plugin/          # v0.3: marketplace.json (submission itself GATED on Pablo)
+├── .claude-plugin/          # marketplace.json (submission itself GATED on Pablo)
 └── packaging/               # Claude Code plugin manifest, hooks, npx + install.sh
 ```
 
@@ -252,7 +418,7 @@ Where the hook contract actually ships today, stated plainly:
 | **Antigravity** | Supported (v0.5) | Plugin drop-in (`~/.gemini/antigravity-cli/plugins/agentguard/`) speaking a claude-like PreToolUse contract; deny = `{"allow_tool": false, "deny_reason": …}` with exit 0 (its loader treats non-zero exits as hook failures). |
 | **MCP gateway** | Supported (v0.4) | Ships as `agentguard-proxy`: TOFU SHA-256 pinning of the server's tool manifest with quarantine-on-drift; deliberate default-allow for ungoverned calls, with policy rules + a command/script deep check enforcing on governed ones. |
 
-An auto-wiring command (`agentguard init`) detects supported installs (Claude Code, OpenAI Codex, OpenCode, Kilo Code, kitty-code, Windsurf, Cursor, Antigravity) and appends the hook configuration (`agentguard init --yes` to apply, plain `init` dry-runs, `--undo` removes immediately — no confirmation prompt).
+An auto-wiring command (`apohara-agentguard init`) detects supported installs (Claude Code, OpenAI Codex, OpenCode, Kilo Code, kitty-code, Windsurf, Cursor, Antigravity) and appends the hook configuration (`apohara-agentguard init --yes` to apply, plain `init` dry-runs, `--undo` removes immediately — no confirmation prompt).
 
 > [!NOTE]
 > **Windows:** the Windsurf/Cursor wiring entries assume the host executes hook commands through a POSIX-compatible shell (single-quote escaping). On native Windows without WSL, verify your harness's shell semantics after `init` — or wire those hosts from WSL. Claude Code / Codex / Antigravity entries are unaffected.
@@ -269,7 +435,7 @@ An auto-wiring command (`agentguard init`) detects supported installs (Claude Co
 - [x] **Declarative policy engine** — pure-Rust TOML (no Cedar/OPA, zero new runtime deps). Default-deny posture, per-session + per-tool budget caps with `tokens = max(1, chars / 4)` heuristic, per-tool `[[tools]]` rule patterns. Fail-closed on any load/parse/schema-version error.
 - [x] **Sandbox hardening** — Landlock ruleset extension closes 2 of 3 documented escape surfaces (`/proc/self/root` write alias + `/proc/self/exe` ELF-linker trick); the seccomp self-disable side is covered by the empirical baseline (`tests/sandbox_seccomp.rs::unlisted_syscall_returns_eperm`).
 - [x] **Claude Code plugin marketplace listing** — `.claude-plugin/marketplace.json` added; **submission to the directory itself is gated on Pablo**.
-- [x] **musl Linux release binaries** — `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` added to the release matrix (5 → 7 targets) in v0.3. x86_64 verified locally (5.4M static-pie); aarch64 uses the `ghcr.io/cross-rs/aarch64-unknown-linux-musl:main` image (4.4M static). Both attested via the existing SLSA L3 reusable workflow. Since v0.5.3 distribution is minimal **2 targets** (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`); otras plataformas usar `cargo install` fallback.
+- [x] **musl Linux release binaries** — `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` added to the release matrix (5 → 7 targets) in v0.3. x86_64 verified locally (5.4M static-pie); aarch64 uses the `ghcr.io/cross-rs/aarch64-unknown-linux-musl:main` image (4.4M static). Both attested via the existing SLSA L3 reusable workflow. Since v0.5.3 distribution is minimal **2 targets** (`x86_64-unknown-linux-musl` + `aarch64-apple-darwin`); otras plataformas usar `cargo install` fallback.
 
 ### v0.4 — Multi-host + transport-layer MCP
 
@@ -313,8 +479,10 @@ An auto-wiring command (`agentguard init`) detects supported installs (Claude Co
 - [x] **Policy engine corpora** (v0.3) — `tests/corpus/policy_{benign,dangerous}.txt` (66/33) with pre-committed 0-FP / 0-FN gate (`tests/policy_engine.rs`)
 - [x] **Ask corpus + benchmark** (v0.3) — `tests/corpus/ask_{benign,dangerous}.txt` (30/18) with pre-committed 0-FP / 0-FN gate (`tests/ask_corpus.rs`)
 - [x] **Sandbox escape closures** (v0.3) — the Landlock allowlist denies `/proc` writes by omission; closes the `/proc/self/root` filesystem-via-proc alias and the `/proc/self/exe` ELF-linker trick (`tests/sandbox_escape.rs`)
-- [x] **musl Linux release binaries** (v0.3) — `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` (release matrix 5 → 7); both SLSA L3-attested (since v0.5.3 minimal 2 targets: `x86_64-unknown-linux-musl` + `aarch64-apple-darwin`; otras plataformas `cargo install` fallback)
+- [x] **musl + macOS minimal binaries** (v0.5.3) — `x86_64-unknown-linux-musl` + `aarch64-apple-darwin` (release matrix 5 → 7 → 2); both SLSA L3-attested; otras plataformas `cargo install` fallback
 - [x] **Claude Code marketplace metadata** (v0.3) — `.claude-plugin/marketplace.json` added; submission to the directory itself deferred
+- [x] **Bolt zero-alloc fast-paths** (v0.5.2) — benign p50 **2.15 µs → 1.43 µs** (−34%), blocked **3.36 µs → 2.51 µs** (−25%), ReDoS-safe, byte-identical
+- [x] **Supply-chain minimal** (v0.5.3) — 2 targets + MIT LICENSE + Branch-Protection 8/10 + intoto `*.intoto.jsonl` for Scorecard Signed-Releases 10
 
 ---
 
