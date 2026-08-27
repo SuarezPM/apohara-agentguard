@@ -637,6 +637,9 @@ fn strip_quotes(s: &str) -> String {
 /// Empty `IFS=` is a no-op. `IFS=` inside a quoted string is ignored. The
 /// returned separators are applied (gated on surfacing a hit) by the caller.
 fn collect_ifs_separators(s: &str) -> Vec<char> {
+    if !s.contains("IFS=") {
+        return Vec::new();
+    }
     let mut extra: Vec<char> = Vec::new();
     for leg in top_level_legs(s) {
         let leg = leg.trim();

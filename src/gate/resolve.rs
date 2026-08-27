@@ -16,6 +16,10 @@ use std::collections::HashMap;
 /// Resolve `$VAR` / `${VAR}` references using `VAR=value` assignments seen in
 /// earlier legs. Returns the legs with references expanded.
 pub(crate) fn resolve_assignments(legs: &[String]) -> Vec<String> {
+    if !legs.iter().any(|l| l.contains('=') || l.contains('$')) {
+        return legs.to_vec();
+    }
+
     let mut vars: HashMap<String, String> = HashMap::new();
     let mut out: Vec<String> = Vec::with_capacity(legs.len());
 
