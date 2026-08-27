@@ -12,6 +12,7 @@
 //!   because `curl … | sh` is a pipe relationship that disappears once the
 //!   command is split into legs — the legacy gate's dead `|sh` substring check.
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -43,7 +44,26 @@ macro_rules! re {
     }};
 }
 
+/// Zero-allocation, case-insensitive ASCII substring search helper.
+#[inline]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let needle_bytes = needle.as_bytes();
+    if needle_bytes.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle_bytes.len() {
+        return false;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle_bytes.len())
+        .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+}
+
 fn m_rm_rf(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "rm") {
+        return false;
+    }
     // rm with a recursive+force combination, in either order, including
     // bundled short flags (-rf / -fr / -Rf / combined like -rfv).
     re!(
@@ -53,22 +73,37 @@ fn m_rm_rf(s: &str) -> bool {
 }
 
 fn m_find_delete(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "find") || !contains_ignore_ascii_case(s, "delete") {
+        return false;
+    }
     re!(s, r"(?i)\bfind\b.*-delete\b")
 }
 
 fn m_find_exec_rm(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "find") || !contains_ignore_ascii_case(s, "rm") {
+        return false;
+    }
     re!(s, r"(?i)\bfind\b.*-exec\s+rm\b")
 }
 
 fn m_dd(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "dd") {
+        return false;
+    }
     re!(s, r"(?i)\bdd\b[^|;&\n]*\sif=")
 }
 
 fn m_mkfs(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "mkfs") {
+        return false;
+    }
     re!(s, r"(?i)\bmkfs(\.\w+)?\b")
 }
 
 fn m_chmod_777(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "chmod") {
+        return false;
+    }
     // Octal 777 (optional leading zero) or its exact symbolic-mode equivalents
     // (`a+rwx`, `a=rwx`, `ugo+rwx`, `ugo=rwx`) — every spelling that grants
     // world write+execute. Narrower symbolic grants (`a+x`, `u+w`, `ugo+x`)
@@ -78,17 +113,26 @@ fn m_chmod_777(s: &str) -> bool {
 }
 
 fn m_chmod_recursive(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "chmod") {
+        return false;
+    }
     // Short-bundle `-R` (e.g. `-R`, `-rR`, combined `-vR`) or the GNU long
     // form `--recursive`.
     re!(s, r"(?i)\bchmod\b[^|;&\n]*\s(-[a-z]*R|--recursive\b)")
 }
 
 fn m_chown_recursive_root(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "chown") {
+        return false;
+    }
     // chown -R … targeting / (root) is far more dangerous than a local dir.
     re!(s, r"(?i)\bchown\b[^|;&\n]*\s-[a-z]*R[^|;&\n]*\s/(\s|$)")
 }
 
 fn m_fork_bomb(s: &str) -> bool {
+    if !s.contains("(){") {
+        return false;
+    }
     // Classic `:(){ :|:& };:` and same-shape variants that merely rename the
     // function (`fb(){ fb|fb& };fb`), tolerating whitespace variations AND
     // multi-character function names. Matched on the whitespace-stripped text
@@ -126,6 +170,9 @@ fn fork_bomb_slots_same(compact: &str) -> bool {
 }
 
 fn m_chmod_recursive_777_root(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "chmod") {
+        return false;
+    }
     // Recursive chmod 777 targeting `/` is catastrophic (unlike a local file).
     // Requires the recursive flag (short `-R` bundle or GNU `--recursive`), the
     // 777 mode, AND a `/` (root) target in any order, so `chmod 777 -R /`,
@@ -141,6 +188,9 @@ fn m_chmod_recursive_777_root(s: &str) -> bool {
 }
 
 fn m_write_block_device(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "/dev/") {
+        return false;
+    }
     // Redirect or dd-output to a raw disk device.
     re!(
         s,
@@ -149,10 +199,16 @@ fn m_write_block_device(s: &str) -> bool {
 }
 
 fn m_mv_to_devnull(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "mv") || !contains_ignore_ascii_case(s, "/dev/null") {
+        return false;
+    }
     re!(s, r"(?i)\bmv\b[^|;&\n]*\s/dev/null\b")
 }
 
 fn m_fetch_run_inline(s: &str) -> bool {
+    if !contains_ignore_ascii_case(s, "curl") && !contains_ignore_ascii_case(s, "wget") {
+        return false;
+    }
     // A curl/wget download whose output is consumed by an inline interpreter on
     // the SAME leg via substitution, e.g. `bash -c "$(curl …)"` or
     // `eval "$(wget …)"`. (The classic `curl | sh` PIPE form is caught
@@ -266,15 +322,19 @@ pub(crate) fn rules() -> &'static [DestructiveRule] {
 /// separately by [`live_substitution_bodies`] and scanned as commands, so this
 /// stripping cannot hide them. (Inside SINGLE quotes a substitution is literal,
 /// so it is correctly suppressed by the strip.)
-pub(crate) fn effective_match_text(leg: &str) -> String {
+pub(crate) fn effective_match_text<'a>(leg: &'a str) -> Cow<'a, str> {
     // A comment line is entirely inert text.
     if leg.trim_start().starts_with('#') {
-        return String::new();
+        return Cow::Borrowed("");
     }
     if is_non_executing_verb(leg) {
-        strip_quoted_spans(leg)
+        if leg.contains('"') || leg.contains('\'') {
+            Cow::Owned(strip_quoted_spans(leg))
+        } else {
+            Cow::Borrowed(leg)
+        }
     } else {
-        leg.to_string()
+        Cow::Borrowed(leg)
     }
 }
 
@@ -356,6 +416,12 @@ fn strip_quoted_spans(leg: &str) -> String {
 /// Returns the matching `DestructiveRule`-equivalent (id, severity, category) if
 /// a download stage pipes directly into a shell interpreter stage.
 pub(crate) fn fetch_pipe_to_shell(command: &str) -> Option<(&'static str, u8, &'static str)> {
+    if !command.contains('|')
+        || (!contains_ignore_ascii_case(command, "curl")
+            && !contains_ignore_ascii_case(command, "wget"))
+    {
+        return None;
+    }
     let stages: Vec<&str> = command.split('|').map(str::trim).collect();
     if stages.len() < 2 {
         return None;
@@ -382,6 +448,9 @@ pub(crate) fn fetch_pipe_to_shell(command: &str) -> Option<(&'static str, u8, &'
 /// `fetch_pipe_to_shell` is checked pre-split). Returns the rule triple if the
 /// whitespace-insensitive signature is present.
 pub(crate) fn fork_bomb_presplit(command: &str) -> Option<(&'static str, u8, &'static str)> {
+    if !command.contains("(){") {
+        return None;
+    }
     if m_fork_bomb(command) {
         Some(("fork-bomb", 9, "dos"))
     } else {
@@ -419,6 +488,8 @@ mod tests {
     #[test]
     fn rm_rf_variants() {
         assert!(m_rm_rf("rm -rf ~"));
+        assert!(m_rm_rf("rM -rf ~"));
+        assert!(m_rm_rf("RM -rf ~"));
         assert!(m_rm_rf("rm -fr /tmp/x"));
         assert!(m_rm_rf("rm -Rf /"));
         assert!(m_rm_rf("rm -rfv /data"));

@@ -320,6 +320,9 @@ fn dispatch_pretooluse_builtin(
 /// `tool_rules` is empty (the default), so the caller's combine is a no-op and
 /// the default path stays byte-identical.
 fn tool_rule_verdict(input: &HookInput, config: &Config) -> Verdict {
+    if config.tool_rules.is_empty() {
+        return Verdict::allow();
+    }
     let tool = input.tool_name.as_deref().unwrap_or("");
     let thresholds = config.effective_thresholds();
     let mut best = Verdict::allow();
@@ -442,8 +445,10 @@ pub(crate) fn tier_rank(tier: Tier) -> u8 {
 /// `(out, code)` matches the built-in checks alone — the engine is a
 /// true no-op combine.
 fn policy_engine_evaluate(input: &HookInput, config: &Config) -> (Verdict, Option<String>) {
-    let path = config.policy.file.as_deref();
-    let set = match crate::policy::engine::PolicySet::load(path) {
+    let Some(path) = config.policy.file.as_deref() else {
+        return (Verdict::allow(), None);
+    };
+    let set = match crate::policy::engine::PolicySet::load(Some(path)) {
         Ok(s) => s,
         Err(e) => {
             // Fail-closed: a load error is a hard refusal. The
