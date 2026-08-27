@@ -1,6 +1,6 @@
 {
   "name": "apohara-agentguard",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Deterministic, offline, no-model safety hook + local seccomp+Landlock sandbox + input firewall for Claude Code. Headline differentiator: structural Bash parsing that closes the 3 bypasses naive fixed-list gates miss (variable aliasing, base64 smuggling, pipe/structure-aware destructive detection).",
   "author": {
     "name": "Pablo (SuarezPM)",
