@@ -1,0 +1,5 @@
+# CODEOWNERS — single-owner maximal for Scorecard Branch-Protection / Code-Review
+# All paths require review by @SuarezPM. Combined with ruleset requiring
+# 1 approving review + code-owner review + dismiss stale, this yields
+# Branch-Protection 8/10 with a single maintainer (trai pattern; 10/10 requires 2 reviewers per Scorecard Tier4).
+* @SuarezPM
