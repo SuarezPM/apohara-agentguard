@@ -62,6 +62,37 @@ jobs:
       # actions/attest is GitHub's primitive; attest-build-provenance@v4 is a
       # maintained wrapper over it, so this wiring uses actions/attest directly.
       - name: Attest build provenance
+        id: attest
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
         with:
           subject-path: dist/${{ inputs.subject-name }}
+
+      # Export the Sigstore bundle as an offline-verifiable *.intoto.jsonl asset.
+      # actions/attest writes the DSSE envelope to the path in outputs.bundle-path
+      # and also stores it in GitHub's attestations DB (for gh attestation verify).
+      # Scorecard Signed-Releases looks for release assets named *.intoto.jsonl, so
+      # we copy the bundle to that name and upload it as a separate artifact for
+      # the downstream `manifest` job to collect into the release bundle.
+      - name: Export intoto bundle for release asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="${{ steps.attest.outputs.bundle-path }}"
+          if [ -z "$bundle" ] || [ ! -f "$bundle" ]; then
+            echo "::error::attestation bundle not found at '$bundle' (outputs.bundle-path empty or missing)" >&2
+            ls -R dist || true
+            ls -R "${RUNNER_TEMP}" 2>/dev/null | head -n 100 || true
+            exit 1
+          fi
+          out="dist/${{ inputs.subject-name }}.intoto.jsonl"
+          cp "$bundle" "$out"
+          echo "exported intoto bundle: $out (from $bundle)"
+          ls -l "$out"
+          head -c 500 "$out" | cat; echo
+
+      - name: Upload intoto bundle (for release)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact-name }}.intoto
+          path: dist/${{ inputs.subject-name }}.intoto.jsonl
+          if-no-files-found: error

@@ -11,7 +11,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/SuarezPM/apohara-agentguard/release.yml?style=for-the-badge&label=CI)](https://github.com/SuarezPM/apohara-agentguard/actions)
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue?style=for-the-badge)](#-license)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org)
-[![Version](https://img.shields.io/badge/version-0.5.2-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
+[![Version](https://img.shields.io/badge/version-0.5.3-purple?style=for-the-badge)](https://github.com/SuarezPM/apohara-agentguard/releases)
 [![Sandbox](https://img.shields.io/badge/sandbox-seccomp%2BLandlock-success?style=for-the-badge)](#-how-it-works--honesty)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/SuarezPM/apohara-agentguard/badge?style=for-the-badge)](https://scorecard.dev/viewer/?uri=github.com/SuarezPM/apohara-agentguard)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13128/badge?style=for-the-badge)](https://www.bestpractices.dev/projects/13128)
@@ -79,7 +79,7 @@ allow                                                                  # exit 0
 | 🤚 **`Tier::Ask` decision tier** (v0.3) | A 4th verdict — `Block > Ask > Warn > Allow` — surfaces a UI prompt via Claude Code's `permissionDecision: "ask"` contract (exit 0 on `PreToolUse`; graceful downgrade to `Warn` on `PostToolUse`/`UserPromptSubmit`). The `apohara-agentguard ask '<cmd>'` CLI subcommand is the operator introspection surface — see the verdict before relying on the hook. |
 | 📜 **Pure-Rust policy engine** (v0.3) | TOML-loaded, per-tool `[[tools]]` rule patterns, `defaults.default_action = "deny"` posture, per-session + per-tool budget caps with the `tokens = max(1, chars / 4)` heuristic (charged on `Bash` + `UserPromptSubmit` only). Loaded via `--policy <path>` (CLI > `AGENTGUARD_POLICY` env > `[policy] file` in config). Fail-closed on any load / parse / schema-version error. **Zero new runtime deps** — reuses the existing `toml` crate, purity guard stays GREEN. |
 | 🛡️ **Sandbox escape closures** (v0.3) | The Landlock allowlist never grants write access on `/proc`, closing 2 of 3 documented escape surfaces by omission: the `/proc/self/root` filesystem-via-proc alias and the ELF-linker trick of writing to `/proc/self/exe` — both pinned by real probes in `tests/sandbox_escape.rs`, including an in-sandbox seccomp self-disable attempt asserted to fail. The empirical build baseline (`cargo build` / `node -e` / `go run` exiting 0) is preserved as the non-regression gate. |
-| 🐧 **musl Linux release binaries** (v0.3) | The release matrix grew from 5 to **7** targets with the addition of `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` — static binaries for Alpine, Void, and any musl-based container base. Both attested via the existing SLSA L3 reusable workflow. |
+| 🐧 **musl Linux release binaries** (v0.3) | The release matrix grew from 5 to **7** targets in v0.3; since v0.5.3 minimal distribution is **2 targets** (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`) static binaries for Alpine/musl and macOS — other platforms use `cargo install` fallback. Both attested via the existing SLSA L3 reusable workflow. |
 | ⚖️ **Dual-licensed** | MIT **OR** Apache-2.0, at your option. Third-party licenses enumerated and gated by `cargo deny`. |
 
 ---
@@ -104,7 +104,7 @@ apohara-agentguard ask 'kubectl get pods'
 # -> "ask: <reason>" (budget exceeded) / "block: <reason>" / "allow"
 
 # 6. Install as a Claude Code plugin (resolves + SHA256-verifies the binary)
-curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/main/packaging/install.sh | sh  # minimal 2-target: if 404/no binary for your triple, fallback `cargo install apohara-agentguard`
 ```
 
 <details>
@@ -129,7 +129,7 @@ apohara-agentguard version
 
 **Subcommands:** `check <cmd>` (gate) · `ask <cmd>` (v0.3: gate + policy engine) · `sandbox --tier <t> [--workspace-root <p>] -- <cmd>` · `scan` (stdin → firewall) · `hook` (stdin event → decision) · `mcp` (stdio JSON-RPC server: `check_command` + `scan_prompt`) · `audit verify` (SHA-256 hash-chain check on the JSONL audit log: tamper / truncation detection) · `version`.
 
-**Other acquisition paths.** A thin `npx apohara-agentguard` launcher resolves the release binary by platform × arch × libc; `cargo install --git https://github.com/SuarezPM/apohara-agentguard apohara-agentguard --locked` builds from source (the supported path for musl Linux and any platform without a pinned artifact; the package is named so cargo skips the in-repo fuzz crate).
+**Other acquisition paths.** A thin `npx apohara-agentguard` launcher resolves the release binary by platform × arch × libc (minimal 2-target distribution: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`; other triples fall back to `cargo install`); `cargo install --git https://github.com/SuarezPM/apohara-agentguard apohara-agentguard --locked` builds from source (the supported fallback for any platform without a pinned artifact; the package is named so cargo skips the in-repo fuzz crate). `packaging/install.sh` also falls back to `cargo install` on 404/missing checksum — see its error message.
 
 > [!WARNING]
 > Downloading a pre-built binary is itself a supply-chain surface — the very risk this tool exists to flag. The `npx` and install-script paths resolve the artifact, verify its **SHA256 against a pinned manifest**, and **refuse to run on a mismatch**. Prefer `cargo install` and build from source when in doubt.
@@ -269,7 +269,7 @@ An auto-wiring command (`agentguard init`) detects supported installs (Claude Co
 - [x] **Declarative policy engine** — pure-Rust TOML (no Cedar/OPA, zero new runtime deps). Default-deny posture, per-session + per-tool budget caps with `tokens = max(1, chars / 4)` heuristic, per-tool `[[tools]]` rule patterns. Fail-closed on any load/parse/schema-version error.
 - [x] **Sandbox hardening** — Landlock ruleset extension closes 2 of 3 documented escape surfaces (`/proc/self/root` write alias + `/proc/self/exe` ELF-linker trick); the seccomp self-disable side is covered by the empirical baseline (`tests/sandbox_seccomp.rs::unlisted_syscall_returns_eperm`).
 - [x] **Claude Code plugin marketplace listing** — `.claude-plugin/marketplace.json` added; **submission to the directory itself is gated on Pablo**.
-- [x] **musl Linux release binaries** — `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` added to the release matrix (5 → 7 targets). x86_64 verified locally (5.4M static-pie); aarch64 uses the `ghcr.io/cross-rs/aarch64-unknown-linux-musl:main` image (4.4M static). Both attested via the existing SLSA L3 reusable workflow.
+- [x] **musl Linux release binaries** — `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` added to the release matrix (5 → 7 targets) in v0.3. x86_64 verified locally (5.4M static-pie); aarch64 uses the `ghcr.io/cross-rs/aarch64-unknown-linux-musl:main` image (4.4M static). Both attested via the existing SLSA L3 reusable workflow. Since v0.5.3 distribution is minimal **2 targets** (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`); otras plataformas usar `cargo install` fallback.
 
 ### v0.4 — Multi-host + transport-layer MCP
 
@@ -313,7 +313,7 @@ An auto-wiring command (`agentguard init`) detects supported installs (Claude Co
 - [x] **Policy engine corpora** (v0.3) — `tests/corpus/policy_{benign,dangerous}.txt` (66/33) with pre-committed 0-FP / 0-FN gate (`tests/policy_engine.rs`)
 - [x] **Ask corpus + benchmark** (v0.3) — `tests/corpus/ask_{benign,dangerous}.txt` (30/18) with pre-committed 0-FP / 0-FN gate (`tests/ask_corpus.rs`)
 - [x] **Sandbox escape closures** (v0.3) — the Landlock allowlist denies `/proc` writes by omission; closes the `/proc/self/root` filesystem-via-proc alias and the `/proc/self/exe` ELF-linker trick (`tests/sandbox_escape.rs`)
-- [x] **musl Linux release binaries** (v0.3) — `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` (release matrix 5 → 7); both SLSA L3-attested
+- [x] **musl Linux release binaries** (v0.3) — `x86_64-unknown-linux-musl` + `aarch64-unknown-linux-musl` (release matrix 5 → 7); both SLSA L3-attested (since v0.5.3 minimal 2 targets: `x86_64-unknown-linux-musl` + `aarch64-apple-darwin`; otras plataformas `cargo install` fallback)
 - [x] **Claude Code marketplace metadata** (v0.3) — `.claude-plugin/marketplace.json` added; submission to the directory itself deferred
 
 ---

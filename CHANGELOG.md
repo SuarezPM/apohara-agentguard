@@ -5,6 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-08-27
+
+### Changed
+
+- **Release minimal 2 targets** — recortado de 7→2 (`x86_64-unknown-linux-musl` + `aarch64-apple-darwin`) con `agentguard-proxy`, manteniendo `SLSA L3` aislado (`_attest.yml`) y añadiendo `*.intoto.jsonl` provenance junto a `.sigstore.json` para `Signed-Releases` 10/10 (Scorecard busca `*.intoto.jsonl` en últimos 5 releases; 2→7-13 assets vs 34). Documentado ventana `v0.5.3..v0.5.7` y fallback `cargo install`.
+
+### Fixed
+
+- **License 9→10** — `LICENSE` ahora `MIT License` puro idéntico a `LICENSE-MIT` (detectable por `licensee` como OSI), preservando dual `MIT OR Apache-2.0` en `Cargo.toml` + `LICENSE-APACHE`.
+
 ## [0.5.2] - 2026-08-27
 
 ### Fixed
@@ -296,7 +306,8 @@ safety layer for AI coding agents: one Rust binary, no network at scan time.
 - **Dual license**: MIT OR Apache-2.0; third-party licenses enumerated in
   `THIRD-PARTY-LICENSES` and gated by `cargo deny check licenses`.
 
-[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.1...v0.5.0

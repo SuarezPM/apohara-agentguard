@@ -38,9 +38,9 @@ Expected bundle contents:
 * v0.4.1 baseline (12 files): 7 × `apohara-agentguard-<triple>[.exe]`,
   `plugin.json`, `hooks.json`, `THIRD-PARTY-LICENSES`,
   `agentguard-packs.tar.gz`, `SHA256SUMS`
-* from v0.5 on (34 files): the above plus 7 × `agentguard-proxy-<triple>[.exe]`,
-  1 × `apohara-agentguard.cdx.json`
-  (CycloneDX SBOM), and one `.sigstore.json` keyless signature per binary (14).
+* from v0.5.2 (sigstore-only, 14+ assets) y desde v0.5.3 minimal (7–13 assets): 2 × `apohara-agentguard-<triple>` + 2 × `agentguard-proxy-<triple>` (=4 bins) + `SHA256SUMS` + `THIRD-PARTY-LICENSES` + `plugin.json` + `hooks.json` + `agentguard-packs.tar.gz` + `apohara-agentguard.cdx.json` + 4 × `.sigstore.json` + 2 × `.intoto.jsonl` (≈13 con firmas; 7–9 sin contar sigstore/intoto). Nota distribución minimal: solo 2 targets prebuilt (`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`); otras plataformas usar `cargo install` fallback — ver `packaging/install.sh` y `packaging/homebrew/README.md`.
+
+> **Nota Signed-Releases 10 (fix-1):** Signed-Releases 10 requiere 5 releases seguidos con `*.intoto.jsonl`; con v0.5.2 sigstore-only + v0.5.3/v0.5.4 intoto, ventana quedará [v0.5.4 10, v0.5.3 10, v0.5.1 8, v0.4.1 10, v0.4.0 0] =7, 10 real en v0.5.7; alternativa retroactiva `gh release upload v0.5.1 *.intoto.jsonl`.
 
 ## 3. Tag the exact reviewed SHA, then create the GitHub Release
 
@@ -65,9 +65,8 @@ assets so users can verify offline. Each `attest` job exposes its bundle as a
 workflow artifact:
 
 ```sh
-targets="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
-         x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
-         x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-msvc.exe"
+# v0.5.3+ minimal: 2 targets; for retroactive upload to old tags adapt the list
+targets="x86_64-unknown-linux-musl aarch64-apple-darwin"
 
 mkdir intoto
 for t in $targets; do
@@ -75,6 +74,8 @@ for t in $targets; do
   mv "intoto/raw-$t"/<bundle-file> "apohara-agentguard-$t.intoto.jsonl"
 done
 gh release upload vX.Y.Z apohara-agentguard-*.intoto.jsonl
+# alternativa retroactiva para acelerar ventana Scorecard:
+# gh release upload v0.5.1 apohara-agentguard-*.intoto.jsonl
 ```
 
 ## 4. Post-release verification
@@ -115,9 +116,9 @@ publishes `packaging/npx-wrapper/` with `--provenance --access public`.
 ## 7. Homebrew tap bump [secret]
 
 Repeat steps 2–3 of `packaging/homebrew/README.md`: bump the formula's
-`version`, refresh the four sha256 values from the new `SHA256SUMS`, copy into
+`version`, refresh the two sha256 values (minimal 2-target: `x86_64-unknown-linux-musl`, `aarch64-apple-darwin`) from the new `SHA256SUMS`, copy into
 `homebrew-tap/Formula/`, push. Requires the tap repo (**TODO-humano** until
-created).
+created). Legacy 7-target releases used four values — ver historial.
 
 ## 8. Optional channels
 

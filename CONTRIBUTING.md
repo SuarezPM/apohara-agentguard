@@ -156,12 +156,31 @@ figure.
 
 ## Pull requests
 
-The `main` branch is **protected**: it cannot be pushed to directly, and
-force-push and branch deletion are disabled. Every change — including the
-maintainer's — lands through a pull request that **must pass the full CI suite**
-(rustfmt, clippy `-D warnings`, `cargo-deny` licenses + advisories, the
-clean-install independence gate, the default-build purity guard, and the test
-matrix on Linux/macOS/Windows) before it can be merged.
+The `main` branch is **protected via Repository Ruleset** (`~DEFAULT_BRANCH`,
+enforcement `active`, id `21241626`): direct pushes are blocked and force-push
+/ branch deletion are disabled (`non_fast_forward` + `deletion` +
+`required_linear_history`). Every change — including the maintainer's — lands
+through a pull request that requires **1 approving review**,
+**code-owner review** (`* @SuarezPM` in [`.github/CODEOWNERS`](.github/CODEOWNERS),
+`dismiss_stale_reviews_on_push: true`, `require_last_push_approval: true`)
+and **strict required status checks** before merge (all checks must be green
+and branches must be up-to-date):
+
+- `rustfmt`
+- `clippy (-D warnings)`
+- `cargo-deny (licenses + advisories)`
+- `clean-install (independence gate)`
+- `default-build purity guard`
+- `structure invariants (modules + test wiring)`
+- `test (ubuntu-latest)` / `test (macos-latest)` / `test (windows-latest)`
+- `coverage (regions >= 92, kernel layer excluded)`
+- `Analyze (rust)` (CodeQL)
+
+No bypass actors are configured — admins cannot bypass — for maximal
+Branch-Protection posture with a single maintainer (trai pattern:
+Rulesets with 1 reviewer + code-owner + dismiss stale + require_last_push_approval
+yields Scorecard Branch-Protection 8/10; 10/10 requires 2 reviewers per
+Scorecard Tier 4, techo documentado single-owner).
 
 - Keep changes focused; one logical change per PR.
 - Update [`CHANGELOG.md`](CHANGELOG.md) under `[Unreleased]` when your change is

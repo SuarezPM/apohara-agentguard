@@ -20,8 +20,11 @@
 #   - Failed or interrupted runs never leave a partial binary behind, and
 #     files the installer does not manage are never touched.
 #
-# glibc and musl Linux builds are both published since v0.3; libc detection
-# selects between them.
+# glibc and musl Linux builds were both published since v0.3; since v0.5.3
+# distribution is minimal (only x86_64-unknown-linux-musl + aarch64-apple-darwin
+# prebuilt; other triples fallback to `cargo install` — see errors below).
+# libc detection still selects between musl/gnu, but gnu will 404 on minimal
+# releases and the script will suggest the cargo fallback.
 #
 # Zero-touch wiring (default ON): after the binary is verified and placed,
 # the installer detects supported agent hosts and runs `<bin> init --yes`
@@ -42,7 +45,7 @@
 
 set -eu
 
-VERSION="${AGENTGUARD_VERSION:-0.5.2}"
+VERSION="${AGENTGUARD_VERSION:-0.5.3}"
 BASE_URL="${AGENTGUARD_DOWNLOAD_BASE:-https://github.com/SuarezPM/apohara-agentguard/releases/download/v${VERSION}}"
 PREFIX="${AGENTGUARD_PREFIX:-${HOME}/.local/share/apohara-agentguard}"
 
@@ -83,7 +86,7 @@ Refusing to install an unverified binary. Offline? Install from source instead:
   sums_file=""
 
   if [ -z "$hash" ]; then
-    err "no checksum for target $1 in the v${VERSION} checksum manifest.
+    err "no checksum for target $1 in the v${VERSION} checksum manifest (minimal distribution v0.5.3+ only ships x86_64-unknown-linux-musl + aarch64-apple-darwin).
 Refusing to install an unverified binary. Install from source instead:
   cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked --version ${VERSION}"
   fi
@@ -99,13 +102,15 @@ detect_triple() {
   case "$uname_m" in
     x86_64 | amd64) arch="x86_64" ;;
     aarch64 | arm64) arch="aarch64" ;;
-    *) err "unsupported architecture: $uname_m (supported: x86_64, aarch64)" ;;
+    *) err "unsupported architecture: $uname_m (supported: x86_64, aarch64) — fallback: cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked" ;;
   esac
 
   case "$uname_s" in
     Linux)
       # libc detection picks between the glibc and musl builds (both
-      # published since v0.3): ldd --version mentions musl on musl systems.
+      # published since v0.3, but v0.5.3+ minimal only ships musl + aarch64-darwin):
+      # ldd --version mentions musl on musl systems. gnu will 404 on minimal and
+      # checksum_for_triple will suggest cargo install fallback.
       if (ldd --version 2>&1 || true) | grep -qi musl; then
         echo "${arch}-unknown-linux-musl"
       else
@@ -116,7 +121,7 @@ detect_triple() {
       echo "${arch}-apple-darwin"
       ;;
     *)
-      err "unsupported OS: $uname_s (Windows: use the npx wrapper or cargo install)"
+      err "unsupported OS: $uname_s (Windows: use the npx wrapper or cargo install --git https://github.com/SuarezPM/apohara-agentguard --locked)"
       ;;
   esac
 }
