@@ -93,6 +93,7 @@ static PIN_STORE_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::
 // first (lost update, 5 instead of 6). A process-global mutex serializes the
 // whole RMW (held for the lifetime of `PinLock`), complementing the file
 // lock on Linux.
+#[cfg(unix)]
 static PROCESS_PIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Sibling lock file guarding concurrent read-modify-writes of the store
@@ -107,7 +108,10 @@ struct PinLock {
     #[cfg(target_os = "linux")]
     _lock: Option<nix::fcntl::Flock<std::fs::File>>,
     // Held for the entire RMW critical section; see `PROCESS_PIN_LOCK`.
+    #[cfg(unix)]
     _process_guard: std::sync::MutexGuard<'static, ()>,
+    #[cfg(not(unix))]
+    _marker: (),
 }
 
 impl PinLock {
@@ -131,6 +135,7 @@ impl PinLock {
         // is the sole serialization for threads in the same process; on Linux
         // it complements flock. Poison is recovered: a panicked writer must
         // not brick the store.
+        #[cfg(unix)]
         let process_guard = PROCESS_PIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
         let path = dir.join(".mcp-pins.lock");
@@ -192,6 +197,7 @@ impl PinLock {
                     .truncate(false)
                     .open(&path)
                     .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
+                return Ok(Self { _marker: () });
             }
             Ok(Self {
                 _process_guard: process_guard,
