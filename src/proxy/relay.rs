@@ -1732,7 +1732,7 @@ mod tests {
         let rv: Value = serde_json::from_str(&resp).unwrap();
         assert_eq!(rv["result"]["isError"], true);
         assert!(
-            !shared.blocked_tool_reason("calc").is_some(),
+            shared.blocked_tool_reason("calc").is_none(),
             "intact tool must remain callable"
         );
         let ok_call = r#"{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"calc","arguments":{}}}"#;
