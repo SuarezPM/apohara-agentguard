@@ -6,7 +6,7 @@
 class ApoharaAgentguard < Formula
   desc "Deterministic, offline safety hook + seccomp/Landlock sandbox + input firewall for AI coding agents"
   homepage "https://github.com/SuarezPM/apohara-agentguard"
-  version "0.5.0"
+  version "0.5.1"
   license "MIT OR Apache-2.0"
 
   # Release assets are bare per-triple binaries (no archive, no bottles), so

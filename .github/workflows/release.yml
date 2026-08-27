@@ -396,5 +396,5 @@ jobs:
       - name: Upload release bundle (for maintainer review — NOT auto-published)
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: apohara-agentguard-v0.5.0-release
+          name: apohara-agentguard-v0.5.1-release
           path: release/*

@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-08-27
+
+### Fixed
+
+- CI: windows/macos audit/doctor paths — `audit` write guard gated to `#[cfg(unix)]`, `doctor` dir-writability test gated to `target_os="linux"` and XDG env hermetic guard with global mutex so `XDG_CONFIG_HOME` divergence no longer flakes CI on macOS/windows.
+- Dockerfile: pin base image digests (`rust:bookworm` and `gcr.io/distroless/cc-debian12:nonroot` pinned to sha256, reproducible builds).
+- Proxy pinning: race/mutex hardening — in-process `PROCESS_PIN_LOCK` mutex for RMW, `PIN_STORE_TMP_COUNTER` + thread-id for unique tmp names, `0600` enforcement on lock/store files, parent-dir re-ensure; `store()` write guard cfg(unix)-only, final `Ok` gated for Windows.
+- Tests: gate entire pinning suite to `#[cfg(all(test,unix))]` (and `concurrent_writers` to linux) to fix Windows 10–11m hang — pin-store is fundamentally Linux `flock`+`0600` feature.
+- Release: `cargo cyclonedx --format json --spec-version 1.5` (CycloneDX JSON 1.5, was default XML) so `apohara-agentguard.cdx.json` is produced.
+- CI: wire 13 missing suites into portable hard gate + coverage (`adapters_contract`, `audit_chain`, `community_packs`, `doctor_cli`, `firewall_micro_bench`, `firewall_unicode_url`, `harness_cli`, `init_cli`, `mcp_corpus`, `mirror_benchmark`, `proxy_e2e`, `shim_contract`, `tightening`); suite-completeness invariant now green.
+- CI purity guard: quiet + robust (`cargo tree 2>&1 | grep -Eq`, injection via `awk '/^\[dependencies\]/'`, fallback `grep -Eq "$DENY" Cargo.toml`).
+- CI: allowlist `firewall_micro_bench` as explicitly `#[ignore]` timing harness (run with `--ignored --nocapture`).
+
 ## [0.5.0] - 2026-08-26
 
 ### Added
@@ -273,7 +286,8 @@ safety layer for AI coding agents: one Rust binary, no network at scan time.
 - **Dual license**: MIT OR Apache-2.0; third-party licenses enumerated in
   `THIRD-PARTY-LICENSES` and gated by `cargo deny check licenses`.
 
-[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/SuarezPM/apohara-agentguard/compare/v0.3.0...v0.4.0

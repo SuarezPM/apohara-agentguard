@@ -22,7 +22,7 @@ Fetch the release manifest and copy the four digests into the formula's
 TODO-HUMAN placeholders:
 
 ```sh
-VER=0.5.0   # keep identical to the formula's `version` line
+VER=0.5.1   # keep identical to the formula's `version` line
 curl -fsSL -o SHA256SUMS \
   "https://github.com/SuarezPM/apohara-agentguard/releases/download/v${VER}/SHA256SUMS"
 grep -E 'apple-darwin|unknown-linux-musl' SHA256SUMS
