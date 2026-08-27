@@ -22,7 +22,7 @@
 # push to ghcr.io/suarezpm/apohara-agentguard:<tag> with cosign signing) if
 # container distribution is wanted for the launch.
 
-FROM rust:bookworm AS builder
+FROM rust:bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends musl-tools \
@@ -35,7 +35,7 @@ RUN cargo build --release --locked --target x86_64-unknown-linux-musl \
         --bin apohara-agentguard
 
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
 
 ARG VERSION=dev
 ARG REVISION=unknown

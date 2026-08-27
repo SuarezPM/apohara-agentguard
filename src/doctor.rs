@@ -618,7 +618,7 @@ mod tests {
         assert!(check.detail.contains("(created later)"));
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn dir_check_fails_on_unwritable_dir() {
         // Root bypasses mode bits — the assertion below would be vacuous.

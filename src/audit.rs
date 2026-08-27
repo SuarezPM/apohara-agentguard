@@ -409,6 +409,7 @@ fn rebuild_chain_state(log: &Path, sp: &Path) -> ChainState {
 /// repo's established pattern (cf. `proxy/pinning.rs::store`). A crash can
 /// never leave a torn state file behind.
 fn write_state_atomic(sp: &Path, state: &ChainState) -> std::io::Result<()> {
+    #[cfg(unix)]
     use std::io::Write as _;
 
     let dir = match sp.parent() {
