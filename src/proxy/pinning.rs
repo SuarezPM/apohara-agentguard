@@ -78,6 +78,11 @@ use sha2::{Digest, Sha256};
 /// alarms re-fire, they never silently pass.
 const STORE_VERSION: u32 = 3;
 
+// Monotonic counter to make store tempfile names unique within a process and
+// second (pid + seconds alone collides across threads on fast concurrent
+// writes, surfacing as ENOENT on rename when two writers share the same tmp).
+static PIN_STORE_TMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Sibling lock file guarding concurrent read-modify-writes of the store
 /// (multi-instance hosts spawn several proxies against one config dir).
 ///
@@ -111,6 +116,7 @@ impl PinLock {
         {
             use nix::fcntl::{Flock, FlockArg};
             use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::fs::PermissionsExt;
             let mut file = fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -119,6 +125,10 @@ impl PinLock {
                 .mode(0o600)
                 .open(&path)
                 .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
+            // Ensure 0600 even if file pre-existed with looser perms or umask
+            // interfered at creation; best-effort (store remains usable).
+            let _ = fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
             let lock = loop {
                 match Flock::lock(file, FlockArg::LockExclusive) {
                     Ok(l) => break l,
@@ -135,12 +145,29 @@ impl PinLock {
         }
         #[cfg(not(target_os = "linux"))]
         {
-            fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&path)
-                .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                use std::os::unix::fs::PermissionsExt;
+                let file = fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .mode(0o600)
+                    .open(&path)
+                    .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
+                let _ = fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+            }
+            #[cfg(not(unix))]
+            {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(false)
+                    .open(&path)
+                    .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
+            }
             Ok(Self { _marker: () })
         }
     }
@@ -583,13 +610,16 @@ impl PinStore {
         let text =
             serde_json::to_string_pretty(doc).map_err(|e| format!("serializing pin store: {e}"))?;
         let tmp = dir.join(format!(
-            ".mcp-pins.json.tmp-{}-{}",
+            ".mcp-pins.json.tmp-{}-{}-{}-{:?}",
             std::process::id(),
-            unix_now()
+            unix_now(),
+            PIN_STORE_TMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            std::thread::current().id()
         ));
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::fs::PermissionsExt;
             let mut f = fs::OpenOptions::new()
                 .write(true)
                 .create(true)
@@ -597,6 +627,8 @@ impl PinStore {
                 .mode(0o600)
                 .open(&tmp)
                 .map_err(|e| format!("writing {}: {e}", tmp.display()))?;
+            let _ = fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
             f.write_all(text.as_bytes())
                 .map_err(|e| format!("writing {}: {e}", tmp.display()))?;
             f.sync_all()
@@ -606,6 +638,11 @@ impl PinStore {
         {
             fs::write(&tmp, text).map_err(|e| format!("writing {}: {e}", tmp.display()))?;
         }
+        // Re-ensure parent exists: between the initial create_dir_all and the
+        // rename a concurrent writer (or test harness) may have raced; on
+        // macOS the original pid+seconds tmp collision also surfaced as
+        // ENOENT on rename when two writers shared the same tmp path.
+        let _ = fs::create_dir_all(dir);
         fs::rename(&tmp, &self.path).map_err(|e| {
             let _ = fs::remove_file(&tmp);
             format!("renaming pin store into place: {e}")
