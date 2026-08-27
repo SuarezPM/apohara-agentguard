@@ -33,3 +33,34 @@
 # Generated/local tooling artifacts
 codemap.md
 /HANDOFF.md
+
+# v0.5.4-docs: aggressive minimal public tree — internal docs (local-only)
+# Public indispensable for forker/cloner: README.md, LICENSE*, Cargo.toml, Cargo.lock,
+# src/, .github/workflows/*, packaging/install.sh, SECURITY.md, CONTRIBUTING.md,
+# ARCHITECTURE.md, BENCHMARK.md, THIRD-PARTY-LICENSES — everything else below is hidden
+# from published minimal view (CHANGELOG is internal; kept in git history but not in
+# published minimal tarball — forker sees Releases page).
+/CHANGELOG.md
+# BENCHMARK.md stays public (linked from README Benchmarks at a glance + GOVERNANCE);
+# do not re-add /BENCHMARK.md here — see Gate 1 B2 Option A.
+# Uncomment to make stricter minimal (currently kept public for README links + Scorecard):
+# /ARCHITECTURE.md
+# /GOVERNANCE.md
+# /RELEASING.md
+# /CODE_OF_CONDUCT.md
+
+# Aggressive hidden: ignore dotfiles/dirs at repository root only (scoped)
+# `.*` matched at any level and silenced .gitattributes/.env in subdirs — scoping to
+# `/.??*` keeps the minimal-forker intent but avoids silencing nested dotfiles.
+/.??*
+# Minimal public hidden exceptions (must stay visible to forker/cloner)
+!.github/
+!.github/**
+!.gitignore
+!.ignore
+!.gitattributes
+# Keep tracked hidden plugins for marketplace/CI (defensive re-include)
+!.claude-plugin/
+!.claude-plugin/**
+!.ci/
+!.ci/**
