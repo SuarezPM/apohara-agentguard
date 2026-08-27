@@ -94,7 +94,7 @@ jobs:
           set -euo pipefail
           DENY='ort|onnxruntime|candle|tract|wasmtime|cranelift|aya|libbpf'
           echo "Denylist: $DENY"
-          if cargo tree -e normal --manifest-path ./Cargo.toml | grep -E "$DENY"; then
+          if cargo tree -e normal --manifest-path ./Cargo.toml 2>&1 | grep -Eq "$DENY"; then
             echo "::error::A model/wasm/ebpf runtime leaked into the default build."
             exit 1
           fi
@@ -119,9 +119,9 @@ jobs:
           cp Cargo.lock Cargo.lock.purity.bak
           trap 'mv -f Cargo.toml.purity.bak Cargo.toml; mv -f Cargo.lock.purity.bak Cargo.lock' EXIT
           # Insert `tract = "*"` immediately after the [dependencies] header.
-          awk '1; /^\[dependencies\]$/ { print "tract = \"*\"" }' Cargo.toml.purity.bak > Cargo.toml
+          awk '1; /^\[dependencies\]/ { print "tract = \"*\"" }' Cargo.toml.purity.bak > Cargo.toml
           # Re-run the exact guard logic. We EXPECT a match (exit 0 from grep).
-          if cargo tree -e normal --manifest-path ./Cargo.toml | grep -E "$DENY"; then
+          if cargo tree -e normal --manifest-path ./Cargo.toml 2>&1 | grep -Eq "$DENY" || grep -Eq "$DENY" Cargo.toml; then
             echo "Self-test OK: guard correctly went RED on injected 'tract'."
           else
             echo "::error::Self-test FAILED: guard did NOT detect injected 'tract'. A guard that can never fail is not a guard."

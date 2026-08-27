@@ -628,6 +628,7 @@ impl PinStore {
     /// Caller contract: the [`PinLock`] for this directory must be held (the
     /// rename must not race another process's read-modify-write cycle).
     fn store(&self, doc: &PinStoreDoc) -> Result<(), String> {
+        #[cfg(unix)]
         use std::io::Write as _;
         let dir = self
             .path
