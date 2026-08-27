@@ -199,6 +199,7 @@ impl PinLock {
                     .map_err(|e| format!("opening lock {}: {e}", path.display()))?;
                 return Ok(Self { _marker: () });
             }
+            #[cfg(unix)]
             Ok(Self {
                 _process_guard: process_guard,
             })
