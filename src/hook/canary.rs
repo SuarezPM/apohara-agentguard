@@ -50,6 +50,17 @@ pub(crate) fn emit_token(session_id: &str) -> String {
 /// or it cannot be read (the canary then simply does not fire).
 pub(crate) fn read_token(session_id: &str) -> Option<String> {
     let path = token_path(session_id)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let meta = std::fs::symlink_metadata(&path).ok()?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return None;
+        }
+        if meta.uid() != nix::unistd::getuid().as_raw() {
+            return None;
+        }
+    }
     let raw = std::fs::read_to_string(path).ok()?;
     let token = raw.trim().to_string();
     if token.len() >= TOKEN_HEX_LEN && token.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -93,9 +104,15 @@ fn canary_dir() -> PathBuf {
 }
 
 /// Full path of the token file for `session_id`, or `None` when `session_id`
-/// is empty (we never key on an empty id).
+/// is empty or contains path traversal / unsafe characters.
 fn token_path(session_id: &str) -> Option<PathBuf> {
-    if session_id.is_empty() {
+    if session_id.is_empty() || session_id.len() > 128 {
+        return None;
+    }
+    if !session_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
         return None;
     }
     Some(canary_dir().join(format!("canary-{session_id}")))
@@ -111,12 +128,25 @@ fn persist_token(session_id: &str, token: &str) -> std::io::Result<()> {
     write_file_private(&path, token.as_bytes())
 }
 
-/// Create `dir` (recursively) with owner-only `0700` perms on unix.
+/// Create `dir` (recursively) with owner-only `0700` perms on unix, verifying
+/// that pre-existing directories are not symlinks and are owned by the caller.
 fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::DirBuilderExt as _;
-        if dir.exists() {
+        use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+        if let Ok(meta) = std::fs::symlink_metadata(dir) {
+            if meta.file_type().is_symlink() || !meta.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "canary directory is a symlink or not a directory",
+                ));
+            }
+            if meta.uid() != nix::unistd::getuid().as_raw() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "canary directory is owned by another user",
+                ));
+            }
             return Ok(());
         }
         std::fs::DirBuilder::new()
@@ -130,11 +160,12 @@ fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
-/// Write `bytes` to `path`, truncating, owner-only `0600` on unix.
+/// Write `bytes` to `path`, owner-only `0600` on unix, requiring `create_new`
+/// to prevent overwriting existing files or following pre-created symlinks.
 fn write_file_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     let mut opts = std::fs::OpenOptions::new();
-    opts.create(true).write(true).truncate(true);
+    opts.create_new(true).write(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -214,5 +245,57 @@ mod tests {
         let token = emit_token("");
         assert_eq!(token.len(), TOKEN_HEX_LEN);
         assert!(read_token("").is_none());
+    }
+
+    #[test]
+    fn path_traversal_session_ids_are_rejected() {
+        let (_guard, _session) = isolated_session("traversal");
+        let malicious_ids = vec![
+            "../etc/passwd",
+            "../../foo",
+            "a/b",
+            "a\\b",
+            "sess\0ion",
+            "sess;ion",
+            "sess ID",
+            "../canary-evil",
+        ];
+        for bad_id in malicious_ids {
+            assert!(
+                token_path(bad_id).is_none(),
+                "malicious session_id '{bad_id}' should be rejected by token_path"
+            );
+            let token = emit_token(bad_id);
+            assert_eq!(token.len(), TOKEN_HEX_LEN);
+            assert!(
+                read_token(bad_id).is_none(),
+                "read_token for '{bad_id}' must return None"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_in_canary_dir_is_not_followed_on_emit_or_read() {
+        let (_guard, session) = isolated_session("symlink");
+        let dir = canary_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let target_file = dir.join("symlink_target.txt");
+        std::fs::write(&target_file, "secret target content").unwrap();
+
+        let symlink_path = dir.join(format!("canary-{session}"));
+        std::os::unix::fs::symlink(&target_file, &symlink_path).unwrap();
+
+        // Attempting to emit for this session should fail to overwrite/follow the symlink
+        let token = emit_token(&session);
+        assert_eq!(token.len(), TOKEN_HEX_LEN);
+
+        // Target file content should be unchanged
+        let target_content = std::fs::read_to_string(&target_file).unwrap();
+        assert_eq!(target_content, "secret target content");
+
+        // read_token should refuse to read via symlink
+        assert!(read_token(&session).is_none());
     }
 }
