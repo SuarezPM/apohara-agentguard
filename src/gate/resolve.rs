@@ -11,17 +11,19 @@
 //! to be a full shell. Assignment legs are kept in the output (so an assignment
 //! whose value is itself dangerous can still be matched).
 
+use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Resolve `$VAR` / `${VAR}` references using `VAR=value` assignments seen in
 /// earlier legs. Returns the legs with references expanded.
-pub(crate) fn resolve_assignments(legs: &[String]) -> Vec<String> {
+pub(crate) fn resolve_assignments<'a>(legs: &[&'a str]) -> SmallVec<[Cow<'a, str>; 4]> {
     if !legs.iter().any(|l| l.contains('=') || l.contains('$')) {
-        return legs.to_vec();
+        return legs.iter().copied().map(Cow::Borrowed).collect();
     }
 
-    let mut vars: HashMap<String, String> = HashMap::new();
-    let mut out: Vec<String> = Vec::with_capacity(legs.len());
+    let mut vars: HashMap<&'a str, Cow<'a, str>> = HashMap::new();
+    let mut out: SmallVec<[Cow<'a, str>; 4]> = SmallVec::with_capacity(legs.len());
 
     for leg in legs {
         // Expand using bindings known BEFORE this leg, so a self-referential
@@ -44,7 +46,7 @@ pub(crate) fn resolve_assignments(legs: &[String]) -> Vec<String> {
 /// Parse a leading `VAR=value` assignment. Returns `None` if `leg` is not a
 /// single assignment token (i.e. there is a space before any `=`, meaning it is
 /// a command with arguments rather than an assignment).
-fn parse_assignment(leg: &str) -> Option<(String, String)> {
+fn parse_assignment<'a>(leg: &'a str) -> Option<(&'a str, Cow<'a, str>)> {
     let eq = leg.find('=')?;
     let name = &leg[..eq];
     if name.is_empty() || !is_valid_var_name(name) {
@@ -54,7 +56,7 @@ fn parse_assignment(leg: &str) -> Option<(String, String)> {
     // name is a valid identifier, which forbids spaces). Strip surrounding
     // quotes from the value so `x="rm"` binds `rm`.
     let value = strip_quotes(&leg[eq + 1..]);
-    Some((name.to_string(), value))
+    Some((name, value))
 }
 
 /// A valid shell variable name: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -68,23 +70,28 @@ fn is_valid_var_name(name: &str) -> bool {
 }
 
 /// Remove one layer of matching single or double quotes around `s`.
-fn strip_quotes(s: &str) -> String {
+fn strip_quotes<'a>(s: &'a str) -> Cow<'a, str> {
     let bytes = s.as_bytes();
     if bytes.len() >= 2
         && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
             || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
     {
-        return s[1..s.len() - 1].to_string();
+        return Cow::Borrowed(&s[1..s.len() - 1]);
     }
-    s.to_string()
+    Cow::Borrowed(s)
 }
 
 /// Substitute `$VAR` and `${VAR}` references in `text` using `vars`. Unknown
 /// references are left intact. A `$$` is treated literally (no expansion).
-fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
+fn expand_vars<'a>(text: &'a str, vars: &HashMap<&'a str, Cow<'a, str>>) -> Cow<'a, str> {
+    if !text.contains('$') {
+        return Cow::Borrowed(text);
+    }
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;
+    let mut changed = false;
+
     while i < bytes.len() {
         if bytes[i] == b'$' && i + 1 < bytes.len() {
             if bytes[i + 1] == b'{' {
@@ -95,6 +102,7 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
                         if let Some(v) = vars.get(name) {
                             out.push_str(v);
                             i = close + 1;
+                            changed = true;
                             continue;
                         }
                     }
@@ -111,6 +119,7 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
                     if let Some(v) = vars.get(name) {
                         out.push_str(v);
                         i = j;
+                        changed = true;
                         continue;
                     }
                 }
@@ -119,7 +128,12 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
         out.push(bytes[i] as char);
         i += 1;
     }
-    out
+
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
@@ -130,67 +144,59 @@ fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn legs(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
-
     #[test]
     fn resolves_simple_alias() {
-        let input = legs(&["x=rm", "$x -rf ~"]);
+        let input = ["x=rm", "$x -rf ~"];
         let out = resolve_assignments(&input);
-        assert_eq!(out, vec!["x=rm", "rm -rf ~"]);
+        assert_eq!(out.as_slice(), &["x=rm", "rm -rf ~"]);
     }
 
     #[test]
     fn resolves_braced_reference() {
-        let input = legs(&["bin=rm", "${bin} -rf ~"]);
+        let input = ["bin=rm", "${bin} -rf ~"];
         let out = resolve_assignments(&input);
         assert_eq!(out[1], "rm -rf ~");
     }
 
     #[test]
     fn last_write_wins() {
-        let input = legs(&["x=ls", "x=rm", "$x -rf ~"]);
+        let input = ["x=ls", "x=rm", "$x -rf ~"];
         let out = resolve_assignments(&input);
         assert_eq!(out[2], "rm -rf ~");
     }
 
     #[test]
     fn multiple_vars() {
-        let input = legs(&["a=rm", "b=-rf", "$a $b /tmp/x"]);
+        let input = ["a=rm", "b=-rf", "$a $b /tmp/x"];
         let out = resolve_assignments(&input);
         assert_eq!(out[2], "rm -rf /tmp/x");
     }
 
     #[test]
     fn unknown_var_left_intact() {
-        let input = legs(&["echo $undefined"]);
+        let input = ["echo $undefined"];
         let out = resolve_assignments(&input);
         assert_eq!(out[0], "echo $undefined");
     }
 
     #[test]
     fn quoted_assignment_value() {
-        let input = legs(&["x=\"rm\"", "$x -rf ~"]);
+        let input = ["x=\"rm\"", "$x -rf ~"];
         let out = resolve_assignments(&input);
         assert_eq!(out[1], "rm -rf ~");
     }
 
     #[test]
     fn command_with_equals_arg_is_not_assignment() {
-        // `dd if=/dev/zero` has a space before nothing relevant, but the leg
-        // `find . -name x=y` should not be treated as an assignment of `find`.
-        let input = legs(&["find . -name x=y", "$find"]);
+        let input = ["find . -name x=y", "$find"];
         let out = resolve_assignments(&input);
-        // `find ...` is not a valid var name (has spaces) so no binding; the
-        // later `$find` stays literal.
         assert_eq!(out[1], "$find");
     }
 
     #[test]
     fn assignment_leg_preserved() {
-        let input = legs(&["x=rm"]);
+        let input = ["x=rm"];
         let out = resolve_assignments(&input);
-        assert_eq!(out, vec!["x=rm"]);
+        assert_eq!(out.as_slice(), &["x=rm"]);
     }
 }

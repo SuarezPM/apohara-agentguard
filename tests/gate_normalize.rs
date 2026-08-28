@@ -36,7 +36,7 @@ fn echo_subst_splice_surfaces_rm_leg() {
     assert_eq!(n.command, "rm -rf ~");
     let legs = split_compound(&n.command);
     assert!(
-        legs.iter().any(|l| l == "rm -rf ~"),
+        legs.contains(&"rm -rf ~"),
         "splice must surface a single `rm -rf ~` leg: {legs:?}"
     );
 }

