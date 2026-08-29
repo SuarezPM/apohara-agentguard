@@ -12,6 +12,7 @@
 //!   because `curl … | sh` is a pipe relationship that disappears once the
 //!   command is split into legs — the legacy gate's dead `|sh` substring check.
 
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::sync::OnceLock;
 
@@ -353,12 +354,12 @@ pub(crate) fn effective_match_text<'a>(leg: &'a str) -> Cow<'a, str> {
 /// Returns empty for EXECUTING verbs (their whole content is already kept and
 /// matched by [`effective_match_text`]) and for comments (inert). Single-quoted
 /// substitutions are literal and are NOT returned.
-pub(crate) fn live_substitution_bodies(leg: &str) -> Vec<String> {
+pub(crate) fn live_substitution_bodies<'a>(leg: &'a str) -> SmallVec<[Cow<'a, str>; 2]> {
     if leg.trim_start().starts_with('#') {
-        return Vec::new();
+        return SmallVec::new();
     }
     if !is_non_executing_verb(leg) {
-        return Vec::new();
+        return SmallVec::new();
     }
     crate::gate::compound::extract_double_quoted_substitutions(leg)
 }
@@ -675,16 +676,16 @@ mod tests {
         // A `$()`/backtick inside a DOUBLE-quoted arg to a non-executing verb is
         // LIVE code — its body must be surfaced for command scanning.
         assert_eq!(
-            live_substitution_bodies(r#"echo "$(rm -rf ~)""#),
-            vec!["rm -rf ~".to_string()]
+            live_substitution_bodies(r#"echo "$(rm -rf ~)""#).as_slice(),
+            &["rm -rf ~"]
         );
         assert_eq!(
-            live_substitution_bodies(r#"git commit -m "$(rm -rf ~)""#),
-            vec!["rm -rf ~".to_string()]
+            live_substitution_bodies(r#"git commit -m "$(rm -rf ~)""#).as_slice(),
+            &["rm -rf ~"]
         );
         assert_eq!(
-            live_substitution_bodies(r#"git commit -m "`rm -rf ~`""#),
-            vec!["rm -rf ~".to_string()]
+            live_substitution_bodies(r#"git commit -m "`rm -rf ~`""#).as_slice(),
+            &["rm -rf ~"]
         );
     }
 
@@ -708,8 +709,8 @@ mod tests {
     #[test]
     fn live_substitution_bodies_surfaces_multiple() {
         assert_eq!(
-            live_substitution_bodies(r#"echo "$(rm -rf ~)" "$(find . -delete)""#),
-            vec!["rm -rf ~".to_string(), "find . -delete".to_string()]
+            live_substitution_bodies(r#"echo "$(rm -rf ~)" "$(find . -delete)""#).as_slice(),
+            &["rm -rf ~", "find . -delete"]
         );
     }
 }
