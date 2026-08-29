@@ -92,10 +92,30 @@ fn canary_dir() -> PathBuf {
     base.join("agentguard")
 }
 
+/// Validate `session_id` to prevent path traversal attacks (e.g. `../../.bashrc`).
+///
+/// Returns `true` iff `session_id` is non-empty, at most 128 chars, contains no
+/// path separators (`/`, `\`), contains no `..` components, and consists solely
+/// of safe ASCII characters (`[a-zA-Z0-9_.-]`).
+fn is_safe_session_id(session_id: &str) -> bool {
+    if session_id.is_empty() || session_id.len() > 128 {
+        return false;
+    }
+    if session_id == "." || session_id == ".." {
+        return false;
+    }
+    if session_id.contains('/') || session_id.contains('\\') || session_id.contains("..") {
+        return false;
+    }
+    session_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+}
+
 /// Full path of the token file for `session_id`, or `None` when `session_id`
-/// is empty (we never key on an empty id).
+/// is invalid or unsafe (e.g. empty, path traversal attempt, or control chars).
 fn token_path(session_id: &str) -> Option<PathBuf> {
-    if session_id.is_empty() {
+    if !is_safe_session_id(session_id) {
         return None;
     }
     Some(canary_dir().join(format!("canary-{session_id}")))
@@ -104,8 +124,12 @@ fn token_path(session_id: &str) -> Option<PathBuf> {
 /// Create the canary dir (0700 on unix) and write the token file (0600 on
 /// unix). Returns the I/O error so the best-effort caller can ignore it.
 fn persist_token(session_id: &str, token: &str) -> std::io::Result<()> {
-    let path = token_path(session_id)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty session_id"))?;
+    let path = token_path(session_id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid or unsafe session_id",
+        )
+    })?;
     let dir = canary_dir();
     create_dir_private(&dir)?;
     write_file_private(&path, token.as_bytes())
@@ -214,5 +238,77 @@ mod tests {
         let token = emit_token("");
         assert_eq!(token.len(), TOKEN_HEX_LEN);
         assert!(read_token("").is_none());
+    }
+
+    #[test]
+    fn path_traversal_session_ids_are_rejected() {
+        let (_guard, _session) = isolated_session("pathtraversal");
+
+        let dangerous_ids = [
+            "../../.bashrc",
+            "../etc/passwd",
+            "/etc/shadow",
+            "C:\\Windows\\System32\\cmd.exe",
+            "..\\..\\Desktop",
+            "session/nested",
+            "session\\nested",
+            "session_id_with_null\0byte",
+            "sess..ion",
+            "..",
+            ".",
+            "session_id_with_space ",
+            "session_id_with_newline\n",
+        ];
+
+        for bad_id in dangerous_ids {
+            assert!(
+                !is_safe_session_id(bad_id),
+                "is_safe_session_id should reject {bad_id:?}"
+            );
+            assert!(
+                token_path(bad_id).is_none(),
+                "token_path should return None for {bad_id:?}"
+            );
+            assert!(
+                read_token(bad_id).is_none(),
+                "read_token should return None for {bad_id:?}"
+            );
+
+            // Emitting token with bad id must return a token for context injection
+            // but NEVER persist it to disk.
+            let token = emit_token(bad_id);
+            assert_eq!(token.len(), TOKEN_HEX_LEN);
+            assert!(
+                read_token(bad_id).is_none(),
+                "persist_token must fail for {bad_id:?}"
+            );
+        }
+
+        // Test overlong session_id (> 128 chars)
+        let long_id = "a".repeat(129);
+        assert!(!is_safe_session_id(&long_id));
+        assert!(token_path(&long_id).is_none());
+    }
+
+    #[test]
+    fn valid_session_ids_are_accepted() {
+        let valid_ids = [
+            "session-123",
+            "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "SESS_ABC_123.test",
+            "12345",
+            "a-b-c_d.e",
+        ];
+
+        for good_id in valid_ids {
+            assert!(
+                is_safe_session_id(good_id),
+                "is_safe_session_id should accept {good_id:?}"
+            );
+            assert!(
+                token_path(good_id).is_some(),
+                "token_path should return Some for {good_id:?}"
+            );
+        }
     }
 }

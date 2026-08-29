@@ -192,4 +192,32 @@ mod tests {
         assert!(out.is_none(), "no echo => Allow");
         assert_eq!(code, 0);
     }
+
+    #[test]
+    fn sessionstart_canary_path_traversal_does_not_persist() {
+        let _guard = isolate_tmpdir("traversal");
+        let cfg = canary_on();
+
+        // A malicious session_id containing path traversal.
+        let json = r#"{"hook_event_name":"SessionStart","session_id":"../../.bashrc"}"#;
+        let (out, code) = run(json, &cfg);
+        assert_eq!(code, 0);
+
+        // Context is still emitted (with a generated token) so session context is seeded.
+        let v: serde_json::Value = serde_json::from_str(&out.expect("emits context")).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("additionalContext string");
+        assert!(ctx.contains("Environment sentinel value"));
+
+        // BUT the token must NOT be persisted to disk at the malicious path or anywhere.
+        assert!(canary::read_token("../../.bashrc").is_none());
+
+        // And PostToolUse scan with the malicious session_id returns None (no persisted token found).
+        let scan_input = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash","session_id":"../../.bashrc","tool_response":{"stdout":"test"}}"#;
+        let src = CannedSource("");
+        let (scan_out, scan_code) = run_with_source(scan_input, &cfg, &src);
+        assert_eq!(scan_code, 0);
+        assert!(scan_out.is_none());
+    }
 }
