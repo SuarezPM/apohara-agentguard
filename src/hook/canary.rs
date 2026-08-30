@@ -92,10 +92,21 @@ fn canary_dir() -> PathBuf {
     base.join("agentguard")
 }
 
+/// Validate whether `session_id` is a safe filename component (prevents path traversal).
+/// Must be non-empty, <= 128 characters, and contain only ASCII alphanumeric characters,
+/// hyphens, or underscores.
+fn is_safe_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id.len() <= 128
+        && session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Full path of the token file for `session_id`, or `None` when `session_id`
-/// is empty (we never key on an empty id).
+/// is empty or unsafe (we never key on an empty or path-traversing id).
 fn token_path(session_id: &str) -> Option<PathBuf> {
-    if session_id.is_empty() {
+    if !is_safe_session_id(session_id) {
         return None;
     }
     Some(canary_dir().join(format!("canary-{session_id}")))
@@ -104,8 +115,12 @@ fn token_path(session_id: &str) -> Option<PathBuf> {
 /// Create the canary dir (0700 on unix) and write the token file (0600 on
 /// unix). Returns the I/O error so the best-effort caller can ignore it.
 fn persist_token(session_id: &str, token: &str) -> std::io::Result<()> {
-    let path = token_path(session_id)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty session_id"))?;
+    let path = token_path(session_id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid or unsafe session_id",
+        )
+    })?;
     let dir = canary_dir();
     create_dir_private(&dir)?;
     write_file_private(&path, token.as_bytes())
@@ -214,5 +229,59 @@ mod tests {
         let token = emit_token("");
         assert_eq!(token.len(), TOKEN_HEX_LEN);
         assert!(read_token("").is_none());
+    }
+
+    #[test]
+    fn path_traversal_session_ids_are_rejected() {
+        let (guard, _session) = isolated_session("traversal");
+        let tmp_dir = canary_dir().parent().unwrap().to_path_buf();
+
+        let malicious_ids = [
+            "../../.bashrc",
+            "../traversal_target",
+            "/../etc/shadow",
+            "sub/dir",
+            "sess\\win",
+            "sess\0null",
+            "sess ID with spaces",
+            "../",
+            "..",
+            ".",
+        ];
+
+        for bad_id in malicious_ids {
+            assert!(
+                token_path(bad_id).is_none(),
+                "token_path must return None for unsafe session_id `{bad_id}`"
+            );
+            assert!(
+                read_token(bad_id).is_none(),
+                "read_token must return None for unsafe session_id `{bad_id}`"
+            );
+
+            // Emitting with an unsafe session_id must not write to any file.
+            let token = emit_token(bad_id);
+            assert_eq!(token.len(), TOKEN_HEX_LEN);
+        }
+
+        // Verify that no traversal target file was created in tmp_dir.
+        let target_file = tmp_dir.join("traversal_target");
+        assert!(
+            !target_file.exists(),
+            "path traversal file must not be created on disk"
+        );
+
+        drop(guard);
+    }
+
+    #[test]
+    fn oversized_session_id_is_rejected() {
+        let (_guard, _session) = isolated_session("oversized");
+        let long_id = "a".repeat(129);
+        assert!(token_path(&long_id).is_none());
+        assert!(read_token(&long_id).is_none());
+
+        let ok_id = "a".repeat(128);
+        assert!(token_path(&ok_id).is_some());
     }
 }
