@@ -25,6 +25,8 @@ mod packs;
 mod resolve;
 mod taxonomy;
 
+use std::borrow::Cow;
+
 use crate::config::{Config, CustomBlock};
 use crate::verdict::{severity_to_tier, Tier, Verdict};
 use packs::community::CommunityRule;
@@ -58,11 +60,11 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     //    the allow-list (which matched the RAW text) and BEFORE everything else,
     //    so the splice composes into a normal command line for the rest of the
     //    pipeline. Honors the `normalize` kill-switch.
-    let (scan_command, extra_seps): (String, Vec<char>) = if config.normalize {
+    let (scan_command, extra_seps): (Cow<'_, str>, Vec<char>) = if config.normalize {
         let n = normalize::normalize_command(command);
         (n.command, n.extra_separators)
     } else {
-        (command.to_string(), Vec::new())
+        (Cow::Borrowed(command), Vec::new())
     };
     let command: &str = &scan_command;
 
@@ -114,7 +116,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     let resolved = resolve::resolve_assignments(&legs);
 
     // 5. Match each (resolved/decoded) leg.
-    for leg in &resolved {
+    for leg in resolved.iter() {
         scan_leg(leg, 0, config, &mut best, &community_rules);
     }
 
@@ -152,16 +154,16 @@ fn ifs_resplit_block(
     community: &[CommunityRule],
 ) -> Option<Hit> {
     let legs = compound::split_compound(command);
-    let mut rebuilt: Vec<String> = Vec::with_capacity(legs.len());
+    let mut rebuilt: Vec<Cow<'_, str>> = Vec::with_capacity(legs.len());
     let mut seen_ifs = false;
     for leg in &legs {
         if seen_ifs {
             // Word-join: the IFS char separates fields, so map it to a space.
-            let mut rewritten = leg.clone();
+            let mut rewritten = leg.to_string();
             for sep in extra_seps {
                 rewritten = rewritten.replace(*sep, " ");
             }
-            rebuilt.push(rewritten);
+            rebuilt.push(Cow::Owned(rewritten));
         } else {
             rebuilt.push(leg.clone());
         }
@@ -172,7 +174,7 @@ fn ifs_resplit_block(
 
     let resolved = resolve::resolve_assignments(&rebuilt);
     let mut ifs_best: Option<Hit> = None;
-    for leg in &resolved {
+    for leg in resolved.iter() {
         scan_leg(leg, 0, config, &mut ifs_best, community);
     }
     match ifs_best {

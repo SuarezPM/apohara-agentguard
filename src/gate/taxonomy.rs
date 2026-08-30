@@ -353,7 +353,7 @@ pub(crate) fn effective_match_text<'a>(leg: &'a str) -> Cow<'a, str> {
 /// Returns empty for EXECUTING verbs (their whole content is already kept and
 /// matched by [`effective_match_text`]) and for comments (inert). Single-quoted
 /// substitutions are literal and are NOT returned.
-pub(crate) fn live_substitution_bodies(leg: &str) -> Vec<String> {
+pub(crate) fn live_substitution_bodies<'a>(leg: &'a str) -> Vec<Cow<'a, str>> {
     if leg.trim_start().starts_with('#') {
         return Vec::new();
     }

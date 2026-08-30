@@ -11,17 +11,18 @@
 //! to be a full shell. Assignment legs are kept in the output (so an assignment
 //! whose value is itself dangerous can still be matched).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Resolve `$VAR` / `${VAR}` references using `VAR=value` assignments seen in
 /// earlier legs. Returns the legs with references expanded.
-pub(crate) fn resolve_assignments(legs: &[String]) -> Vec<String> {
+pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Cow<'a, [Cow<'a, str>]> {
     if !legs.iter().any(|l| l.contains('=') || l.contains('$')) {
-        return legs.to_vec();
+        return Cow::Borrowed(legs);
     }
 
     let mut vars: HashMap<String, String> = HashMap::new();
-    let mut out: Vec<String> = Vec::with_capacity(legs.len());
+    let mut out: Vec<Cow<'a, str>> = Vec::with_capacity(legs.len());
 
     for leg in legs {
         // Expand using bindings known BEFORE this leg, so a self-referential
@@ -38,7 +39,7 @@ pub(crate) fn resolve_assignments(legs: &[String]) -> Vec<String> {
         out.push(expanded);
     }
 
-    out
+    Cow::Owned(out)
 }
 
 /// Parse a leading `VAR=value` assignment. Returns `None` if `leg` is not a
@@ -81,10 +82,15 @@ fn strip_quotes(s: &str) -> String {
 
 /// Substitute `$VAR` and `${VAR}` references in `text` using `vars`. Unknown
 /// references are left intact. A `$$` is treated literally (no expansion).
-fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
+fn expand_vars<'a>(text: &'a str, vars: &HashMap<String, String>) -> Cow<'a, str> {
+    if !text.contains('$') || vars.is_empty() {
+        return Cow::Borrowed(text);
+    }
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;
+    let mut modified = false;
+
     while i < bytes.len() {
         if bytes[i] == b'$' && i + 1 < bytes.len() {
             if bytes[i + 1] == b'{' {
@@ -95,6 +101,7 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
                         if let Some(v) = vars.get(name) {
                             out.push_str(v);
                             i = close + 1;
+                            modified = true;
                             continue;
                         }
                     }
@@ -111,6 +118,7 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
                     if let Some(v) = vars.get(name) {
                         out.push_str(v);
                         i = j;
+                        modified = true;
                         continue;
                     }
                 }
@@ -119,7 +127,11 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
         out.push(bytes[i] as char);
         i += 1;
     }
-    out
+    if modified {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
@@ -130,8 +142,8 @@ fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn legs(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+    fn legs<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>> {
+        parts.iter().map(|s| Cow::Borrowed(*s)).collect()
     }
 
     #[test]
