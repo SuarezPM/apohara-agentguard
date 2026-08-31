@@ -11,17 +11,18 @@
 //! to be a full shell. Assignment legs are kept in the output (so an assignment
 //! whose value is itself dangerous can still be matched).
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 /// Resolve `$VAR` / `${VAR}` references using `VAR=value` assignments seen in
 /// earlier legs. Returns the legs with references expanded.
-pub(crate) fn resolve_assignments(legs: &[String]) -> Vec<String> {
+pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Vec<Cow<'a, str>> {
     if !legs.iter().any(|l| l.contains('=') || l.contains('$')) {
         return legs.to_vec();
     }
 
-    let mut vars: HashMap<String, String> = HashMap::new();
-    let mut out: Vec<String> = Vec::with_capacity(legs.len());
+    let mut vars: HashMap<&str, &str> = HashMap::new();
+    let mut out: Vec<Cow<'a, str>> = Vec::with_capacity(legs.len());
 
     for leg in legs {
         // Expand using bindings known BEFORE this leg, so a self-referential
@@ -44,7 +45,7 @@ pub(crate) fn resolve_assignments(legs: &[String]) -> Vec<String> {
 /// Parse a leading `VAR=value` assignment. Returns `None` if `leg` is not a
 /// single assignment token (i.e. there is a space before any `=`, meaning it is
 /// a command with arguments rather than an assignment).
-fn parse_assignment(leg: &str) -> Option<(String, String)> {
+fn parse_assignment(leg: &str) -> Option<(&str, &str)> {
     let eq = leg.find('=')?;
     let name = &leg[..eq];
     if name.is_empty() || !is_valid_var_name(name) {
@@ -53,8 +54,8 @@ fn parse_assignment(leg: &str) -> Option<(String, String)> {
     // A real assignment leg has no whitespace before `=` (we already checked the
     // name is a valid identifier, which forbids spaces). Strip surrounding
     // quotes from the value so `x="rm"` binds `rm`.
-    let value = strip_quotes(&leg[eq + 1..]);
-    Some((name.to_string(), value))
+    let value = strip_quotes_borrowed(&leg[eq + 1..]);
+    Some((name, value))
 }
 
 /// A valid shell variable name: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -68,23 +69,27 @@ fn is_valid_var_name(name: &str) -> bool {
 }
 
 /// Remove one layer of matching single or double quotes around `s`.
-fn strip_quotes(s: &str) -> String {
+fn strip_quotes_borrowed(s: &str) -> &str {
     let bytes = s.as_bytes();
     if bytes.len() >= 2
         && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
             || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
     {
-        return s[1..s.len() - 1].to_string();
+        return &s[1..s.len() - 1];
     }
-    s.to_string()
+    s
 }
 
 /// Substitute `$VAR` and `${VAR}` references in `text` using `vars`. Unknown
 /// references are left intact. A `$$` is treated literally (no expansion).
-fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
+fn expand_vars<'a>(text: &'a Cow<'a, str>, vars: &HashMap<&str, &str>) -> Cow<'a, str> {
+    if !text.contains('$') {
+        return text.clone();
+    }
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;
+    let mut changed = false;
     while i < bytes.len() {
         if bytes[i] == b'$' && i + 1 < bytes.len() {
             if bytes[i + 1] == b'{' {
@@ -95,6 +100,7 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
                         if let Some(v) = vars.get(name) {
                             out.push_str(v);
                             i = close + 1;
+                            changed = true;
                             continue;
                         }
                     }
@@ -111,6 +117,7 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
                     if let Some(v) = vars.get(name) {
                         out.push_str(v);
                         i = j;
+                        changed = true;
                         continue;
                     }
                 }
@@ -119,7 +126,11 @@ fn expand_vars(text: &str, vars: &HashMap<String, String>) -> String {
         out.push(bytes[i] as char);
         i += 1;
     }
-    out
+    if changed {
+        Cow::Owned(out)
+    } else {
+        text.clone()
+    }
 }
 
 fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
@@ -130,8 +141,8 @@ fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
 mod tests {
     use super::*;
 
-    fn legs(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
+    fn legs<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>> {
+        parts.iter().map(|&s| Cow::Borrowed(s)).collect()
     }
 
     #[test]
