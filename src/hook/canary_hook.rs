@@ -145,6 +145,21 @@ mod tests {
     }
 
     #[test]
+    fn sessionstart_canary_on_with_traversal_session_id_does_not_persist() {
+        let _guard = isolate_tmpdir("traversalsess");
+        let json = r#"{"hook_event_name":"SessionStart","session_id":"../../tmp/traversal"}"#;
+        let (out, code) = run(json, &canary_on());
+        assert_eq!(code, 0);
+        let v: serde_json::Value = serde_json::from_str(&out.expect("emits context")).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .expect("additionalContext string");
+        assert!(ctx.contains("Environment sentinel value"));
+        // Token was generated but not persisted due to invalid session_id
+        assert!(canary::read_token("../../tmp/traversal").is_none());
+    }
+
+    #[test]
     fn posttooluse_canary_echo_warns_never_blocks() {
         let _guard = isolate_tmpdir("echo");
         // Canary ON, firewall OFF: this test isolates the canary path. The

@@ -93,9 +93,22 @@ fn canary_dir() -> PathBuf {
 }
 
 /// Full path of the token file for `session_id`, or `None` when `session_id`
-/// is empty (we never key on an empty id).
+/// is empty or contains path traversal components (we never key on an invalid id).
 fn token_path(session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
+        return None;
+    }
+    // SECURITY: Prevent path traversal via user-supplied session_id.
+    // Restrict characters to safe ASCII alphanumeric and basic delimiters (- _ .),
+    // and explicitly reject path separators, NUL bytes, and '..' components.
+    if session_id.contains('/')
+        || session_id.contains('\\')
+        || session_id.contains('\0')
+        || session_id.contains("..")
+        || !session_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+    {
         return None;
     }
     Some(canary_dir().join(format!("canary-{session_id}")))
@@ -104,8 +117,9 @@ fn token_path(session_id: &str) -> Option<PathBuf> {
 /// Create the canary dir (0700 on unix) and write the token file (0600 on
 /// unix). Returns the I/O error so the best-effort caller can ignore it.
 fn persist_token(session_id: &str, token: &str) -> std::io::Result<()> {
-    let path = token_path(session_id)
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "empty session_id"))?;
+    let path = token_path(session_id).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid session_id")
+    })?;
     let dir = canary_dir();
     create_dir_private(&dir)?;
     write_file_private(&path, token.as_bytes())
@@ -214,5 +228,39 @@ mod tests {
         let token = emit_token("");
         assert_eq!(token.len(), TOKEN_HEX_LEN);
         assert!(read_token("").is_none());
+    }
+
+    #[test]
+    fn path_traversal_session_id_is_rejected() {
+        let (_guard, _session) = isolated_session("traversal");
+        let malicious_ids = [
+            "../etc/passwd",
+            "..\\windows\\system32",
+            "../../tmp/target",
+            "foo/bar",
+            "foo\\bar",
+            "session\0null",
+            "..",
+            "valid..invalid",
+            "space in id",
+            "semi;colon",
+        ];
+        for id in &malicious_ids {
+            assert!(
+                token_path(id).is_none(),
+                "Must reject malicious session_id: {id}"
+            );
+            assert!(
+                read_token(id).is_none(),
+                "read_token must return None for malicious session_id: {id}"
+            );
+            // emit_token still generates a token string but persists nothing
+            let token = emit_token(id);
+            assert_eq!(token.len(), TOKEN_HEX_LEN);
+            assert!(
+                read_token(id).is_none(),
+                "read_token after emit_token must be None for malicious id: {id}"
+            );
+        }
     }
 }
