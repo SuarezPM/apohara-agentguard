@@ -48,6 +48,20 @@ jobs:
       # Uses the [advisories] section already in deny.toml.
       - run: cargo deny check advisories
 
+  semver-checks:
+    name: semver-checks (API compatibility)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0  # Full history needed for baseline comparison
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Install cargo-semver-checks
+        run: cargo install cargo-semver-checks --locked
+      # Verify no accidental API breaking changes since the last published release.
+      # Catches removed public items, changed signatures, and new required fields.
+      - run: cargo semver-checks
+
   clean-install:
     name: clean-install (independence gate)
     runs-on: ubuntu-latest
