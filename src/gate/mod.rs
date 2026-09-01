@@ -25,6 +25,8 @@ mod packs;
 mod resolve;
 mod taxonomy;
 
+use std::borrow::Cow;
+
 use crate::config::{Config, CustomBlock};
 use crate::verdict::{severity_to_tier, Tier, Verdict};
 use packs::community::CommunityRule;
@@ -58,13 +60,13 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     //    the allow-list (which matched the RAW text) and BEFORE everything else,
     //    so the splice composes into a normal command line for the rest of the
     //    pipeline. Honors the `normalize` kill-switch.
-    let (scan_command, extra_seps): (String, Vec<char>) = if config.normalize {
+    let (scan_command, extra_seps): (Cow<'_, str>, Vec<char>) = if config.normalize {
         let n = normalize::normalize_command(command);
         (n.command, n.extra_separators)
     } else {
-        (command.to_string(), Vec::new())
+        (Cow::Borrowed(command), Vec::new())
     };
-    let command: &str = &scan_command;
+    let command: &str = scan_command.as_ref();
 
     // Community pack rules (V5-A): resolved ONCE per evaluation and threaded
     // through the leg scans. With `community_packs.enabled` empty (the
@@ -105,7 +107,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     // split, so decode the ORIGINAL command's pipe and rescan the payload.
     if let Some(decoded) = decode::decode_and_expand(command, 0) {
         for inner in compound::split_compound(&decoded) {
-            scan_leg(&inner, 1, config, &mut best, &community_rules);
+            scan_leg(inner.as_ref(), 1, config, &mut best, &community_rules);
         }
     }
 
@@ -115,7 +117,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
 
     // 5. Match each (resolved/decoded) leg.
     for leg in &resolved {
-        scan_leg(leg, 0, config, &mut best, &community_rules);
+        scan_leg(leg.as_ref(), 0, config, &mut best, &community_rules);
     }
 
     // 5b. IFS re-split (gated): an `IFS=<char>` reassignment makes that char a
@@ -152,16 +154,16 @@ fn ifs_resplit_block(
     community: &[CommunityRule],
 ) -> Option<Hit> {
     let legs = compound::split_compound(command);
-    let mut rebuilt: Vec<String> = Vec::with_capacity(legs.len());
+    let mut rebuilt: Vec<Cow<'_, str>> = Vec::with_capacity(legs.len());
     let mut seen_ifs = false;
     for leg in &legs {
         if seen_ifs {
             // Word-join: the IFS char separates fields, so map it to a space.
-            let mut rewritten = leg.clone();
+            let mut rewritten = leg.to_string();
             for sep in extra_seps {
                 rewritten = rewritten.replace(*sep, " ");
             }
-            rebuilt.push(rewritten);
+            rebuilt.push(Cow::Owned(rewritten));
         } else {
             rebuilt.push(leg.clone());
         }
@@ -173,7 +175,7 @@ fn ifs_resplit_block(
     let resolved = resolve::resolve_assignments(&rebuilt);
     let mut ifs_best: Option<Hit> = None;
     for leg in &resolved {
-        scan_leg(leg, 0, config, &mut ifs_best, community);
+        scan_leg(leg.as_ref(), 0, config, &mut ifs_best, community);
     }
     match ifs_best {
         Some(hit) if severity_to_tier(hit.severity, &config.thresholds) == Tier::Block => Some(hit),
@@ -241,7 +243,7 @@ fn scan_leg(
     // with the normalize/decode caps).
     if depth < MAX_SUBST_DEPTH {
         for body in taxonomy::live_substitution_bodies(leg) {
-            scan_substitution_body(&body, depth + 1, config, best, community);
+            scan_substitution_body(body, depth + 1, config, best, community);
         }
     }
 
@@ -263,7 +265,7 @@ fn scan_leg(
     if let Some(decoded) = decode::decode_and_expand(leg, depth) {
         // The decoded payload may itself be compound; re-split before rescan.
         for inner in compound::split_compound(&decoded) {
-            scan_leg(&inner, depth + 1, config, best, community);
+            scan_leg(inner.as_ref(), depth + 1, config, best, community);
         }
     } else if depth + 1 >= decode::MAX_DECODE_DEPTH && has_unresolved_decode(leg) {
         // We hit the decode cap with a payload still present -> WARN, do not
@@ -327,21 +329,21 @@ fn scan_substitution_body(
     if depth < decode::MAX_DECODE_DEPTH {
         if let Some(decoded) = decode::decode_and_expand(body, depth) {
             for inner in compound::split_compound(&decoded) {
-                scan_leg(&inner, depth + 1, config, best, community);
+                scan_leg(inner.as_ref(), depth + 1, config, best, community);
             }
         }
     }
 
     for leg in compound::split_compound(body) {
-        if taxonomy::is_non_executing_verb(&leg) {
+        if taxonomy::is_non_executing_verb(leg.as_ref()) {
             // Inert output: recurse only into its own nested live substitutions.
             if depth < MAX_SUBST_DEPTH {
-                for inner in taxonomy::live_substitution_bodies(&leg) {
-                    scan_substitution_body(&inner, depth + 1, config, best, community);
+                for inner in taxonomy::live_substitution_bodies(leg.as_ref()) {
+                    scan_substitution_body(inner, depth + 1, config, best, community);
                 }
             }
         } else {
-            scan_leg(&leg, depth, config, best, community);
+            scan_leg(leg.as_ref(), depth, config, best, community);
         }
     }
 }

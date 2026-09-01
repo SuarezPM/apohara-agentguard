@@ -23,6 +23,8 @@
 //! [`MAX_REWRITES`] (number of splices across all passes), and a per-span
 //! expansion-ratio cap (a decoded span may not exceed `4×` its source length).
 
+use std::borrow::Cow;
+
 /// Maximum size (in bytes) of the rewrite buffer. Inputs/rewrites past this are
 /// left intact (mirrors `decode::MAX_DECODE_BYTES`).
 pub(crate) const MAX_NORMALIZE_BYTES: usize = 64 * 1024;
@@ -37,9 +39,9 @@ const MAX_EXPANSION_RATIO: usize = 4;
 /// The result of [`normalize_command`]: the rewritten command plus any
 /// top-level separators derived from an `IFS=<char>` reassignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Normalized {
+pub struct Normalized<'a> {
     /// The command after the in-place splices.
-    pub command: String,
+    pub command: Cow<'a, str>,
     /// Extra characters to treat as top-level separators when splitting the
     /// SUBSEQUENT legs (from an `IFS=<char>` reassignment). Empty by default.
     pub extra_separators: Vec<char>,
@@ -50,10 +52,10 @@ pub struct Normalized {
 /// The gate calls this internally; this is `pub` (hidden from docs) so the fuzz
 /// target + `tests/gate_normalize.rs` can pin the pre-pass directly.
 #[doc(hidden)]
-pub fn normalize_command(cmd: &str) -> Normalized {
+pub fn normalize_command<'a>(cmd: &'a str) -> Normalized<'a> {
     if cmd.len() > MAX_NORMALIZE_BYTES {
         return Normalized {
-            command: cmd.to_string(),
+            command: Cow::Borrowed(cmd),
             extra_separators: Vec::new(),
         };
     }
@@ -64,13 +66,13 @@ pub fn normalize_command(cmd: &str) -> Normalized {
     };
 
     // Pass 1: join backslash line-continuations.
-    let s = join_line_continuations(cmd, &mut budget);
+    let s = join_line_continuations(Cow::Borrowed(cmd), &mut budget);
     // Pass 2: decode ANSI-C `$'...'` spans in place.
-    let s = decode_ansi_c(&s, &mut budget);
+    let s = decode_ansi_c(s, &mut budget);
     // Pass 3: decode a leg-head `printf '<\xHH…>' | <shell>` into its literal.
-    let s = decode_printf_pipe_shell(&s, &mut budget);
+    let s = decode_printf_pipe_shell(s, &mut budget);
     // Pass 4: splice leg-head echo/printf command substitutions.
-    let s = splice_echo_substitution(&s, &mut budget);
+    let s = splice_echo_substitution(s, &mut budget);
     // Pass 5: collect IFS-derived extra separators (no splice).
     let extra_separators = collect_ifs_separators(&s);
 
@@ -103,9 +105,9 @@ impl Budget {
 /// Join `\<newline>` and `\<carriage-return><newline>` into nothing (continue
 /// the line). A lone trailing `\` not before a newline is left untouched, and a
 /// `\x`-style escape (not before a newline) is left for the ANSI-C pass.
-fn join_line_continuations(s: &str, budget: &mut Budget) -> String {
+fn join_line_continuations<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
     if !s.contains('\\') {
-        return s.to_string();
+        return s;
     }
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -129,7 +131,7 @@ fn join_line_continuations(s: &str, budget: &mut Budget) -> String {
         out.push(bytes[i] as char);
         i += 1;
     }
-    out
+    Cow::Owned(out)
 }
 
 // --- Pass 2: ANSI-C `$'...'` quoting ----------------------------------------
@@ -138,9 +140,9 @@ fn join_line_continuations(s: &str, budget: &mut Budget) -> String {
 /// literal in place. Respects the byte/count budget and a per-span 4× expansion
 /// cap; a span that violates a cap (or contains a malformed escape we choose not
 /// to expand) is left intact.
-fn decode_ansi_c(s: &str, budget: &mut Budget) -> String {
+fn decode_ansi_c<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
     if !s.contains("$'") {
-        return s.to_string();
+        return s;
     }
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -178,7 +180,7 @@ fn decode_ansi_c(s: &str, budget: &mut Budget) -> String {
         out.push(c as char);
         i += 1;
     }
-    out
+    Cow::Owned(out)
 }
 
 /// Read a `$'...'` span starting at `start` (pointing at `$`). Returns the
@@ -327,11 +329,11 @@ const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "ksh", "dash", "ash",
 /// literal, double-quoted/backtick arguments, anything but whitespace between
 /// the closing quote and the `|`, a non-shell pipe target, or any malformed
 /// escape leave the command intact.
-fn decode_printf_pipe_shell(s: &str, budget: &mut Budget) -> String {
+fn decode_printf_pipe_shell<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
     // Cheap guards before walking bytes (hot path): both are necessary
     // conditions of the shape, so missing either skips the pass entirely.
     if !s.contains("printf") || !s.contains(r"\x") {
-        return s.to_string();
+        return s;
     }
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -370,7 +372,7 @@ fn decode_printf_pipe_shell(s: &str, budget: &mut Budget) -> String {
         out.push(c as char);
         i += 1;
     }
-    out
+    Cow::Owned(out)
 }
 
 /// Read a leg-head `printf '<lit>' … | <shell>` span starting at `start`
@@ -468,9 +470,9 @@ fn try_decode_printf_head(bytes: &[u8], start: usize) -> Option<(String, usize)>
 /// body is exactly an `echo`/`printf` of literal args into the literal it would
 /// emit. ONLY fires in VERB/command position (the leg head), never as an
 /// argument — so `git commit -m "$(echo rm -rf)"` is untouched.
-fn splice_echo_substitution(s: &str, budget: &mut Budget) -> String {
+fn splice_echo_substitution<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
     if !s.contains("$(") && !s.contains('`') {
-        return s.to_string();
+        return s;
     }
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
@@ -523,7 +525,7 @@ fn splice_echo_substitution(s: &str, budget: &mut Budget) -> String {
         out.push(c as char);
         i += 1;
     }
-    out
+    Cow::Owned(out)
 }
 
 /// True iff the text emitted so far ends at a leg head — i.e. the current
@@ -697,7 +699,7 @@ mod tests {
     use super::*;
 
     fn norm(cmd: &str) -> String {
-        normalize_command(cmd).command
+        normalize_command(cmd).command.into_owned()
     }
 
     // --- Pass 1: line-continuation ---
