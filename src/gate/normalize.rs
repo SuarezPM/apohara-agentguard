@@ -39,6 +39,7 @@ const MAX_EXPANSION_RATIO: usize = 4;
 /// The result of [`normalize_command`]: the rewritten command plus any
 /// top-level separators derived from an `IFS=<char>` reassignment.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)] // Internal type — lifetime param change is not a public API break
 pub struct Normalized<'a> {
     /// The command after the in-place splices.
     pub command: Cow<'a, str>,
