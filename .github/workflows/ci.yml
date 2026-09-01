@@ -295,13 +295,15 @@ jobs:
             cargo test --test sandbox_offlinux
           fi
 
-      # ReDoS guard: the bench compiles as a no-harness binary and runs under
+      # Latency gate: the bench compiles as a no-harness binary and runs under
       # both `cargo bench` and `cargo test --benches`. Pathological inputs must
-      # stay sub-millisecond. Skip on Windows smoke to avoid the 6h hang.
-      - name: ReDoS bench
+      # stay sub-millisecond. Uses --release to match production performance;
+      # debug mode adds ~15x overhead that would false-RED the 5µs budget.
+      # Skip on Windows smoke to avoid the 6h hang.
+      - name: Latency gate (bench)
         if: runner.os != 'Windows'
         shell: bash
-        run: cargo test --benches
+        run: cargo test --benches --release
 
       # ----- Linux kernel-capability sandbox gate (non-blocking on CI) -----
       # The seccomp + Landlock + build-e2e tests require an unprivileged user
