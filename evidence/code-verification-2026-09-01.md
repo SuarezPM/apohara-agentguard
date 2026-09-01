@@ -112,5 +112,5 @@ Community packs (45 rules across 4 files) are opt-in and NOT included in measure
 | T9 rules classified | ✅ 19 single-corpus (corrected from 18) |
 | LODO detector functional | ✅ Informationary, not a gate |
 | CLI neutralization | ✅ All 3 commands neutralize before printing |
-| Neutralization tests | ✅ 26/26 pass |
+| Neutralization tests | ✅ 27/27 pass |
 | No regressions | ✅ 892 tests total, 0 failures |
