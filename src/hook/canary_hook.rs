@@ -145,6 +145,23 @@ mod tests {
     }
 
     #[test]
+    fn sessionstart_canary_on_with_path_traversal_session_id_is_safe() {
+        let _guard = isolate_tmpdir("traversal");
+        let victim = std::env::temp_dir().join("agentguard_test_victim");
+        let _ = std::fs::remove_file(&victim);
+
+        let json = r#"{"hook_event_name":"SessionStart","session_id":"../../../../tmp/agentguard_test_victim"}"#;
+        let (out, code) = run(json, &canary_on());
+        assert_eq!(code, 0);
+        assert!(out.is_some(), "session start context emitted");
+
+        assert!(
+            !victim.exists(),
+            "path traversal in session_id must not write to victim file"
+        );
+    }
+
+    #[test]
     fn posttooluse_canary_echo_warns_never_blocks() {
         let _guard = isolate_tmpdir("echo");
         // Canary ON, firewall OFF: this test isolates the canary path. The
