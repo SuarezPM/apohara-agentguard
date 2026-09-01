@@ -297,14 +297,23 @@ jobs:
             }
             # CRITICAL: validate subject content is not a dummy/placeholder.
             # A dummy attestation passes count+JSON checks but attests nothing real.
-            # Extract subject[].name and verify it matches an actual binary filename.
+            # DSSE envelope from actions/attest@v4 may nest subject in data.subject
+            # or at the top level. Check both. Also reject the literal dummy content.
+            raw=$(cat "$f")
+            if echo "$raw" | grep -q '"name"[[:space:]]*:[[:space:]]*"dummy"'; then
+              echo "::error::intoto bundle $f contains literal dummy subject — this is NOT a real attestation" >&2
+              exit 1
+            fi
             subject_names=$(python3 -c "
           import json, sys
           with open('$f') as fh:
               data = json.load(fh)
-          subj = data.get('subject', [])
+          # Try top-level subject, then data.subject (DSSE envelope)
+          subj = data.get('subject', []) or data.get('data', {}).get('subject', [])
           for s in subj:
-              print(s.get('name', ''))
+              name = s.get('name', '')
+              if name:
+                  print(name)
           " 2>/dev/null || echo "")
             if [ -z "$subject_names" ]; then
               echo "::error::intoto bundle $f has no subject entries — possible dummy/placeholder attestation" >&2
