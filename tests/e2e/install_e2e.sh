@@ -26,13 +26,47 @@ setup_fake_release() {
     cargo build --release --locked 2>/dev/null
   fi
 
+  # Detect the target triple dynamically (same logic as install.sh)
+  local target
+  target=$(detect_triple)
+
   # Create fake release structure
-  local target="x86_64-unknown-linux-gnu"
   mkdir -p "$fake_dir"
   cp "$bin" "$fake_dir/apohara-agentguard-$target"
   (cd "$fake_dir" && sha256sum apohara-agentguard-$target > SHA256SUMS)
 
   echo "$fake_dir"
+}
+
+# Detect the Rust target triple (mirrors install.sh detect_triple)
+detect_triple() {
+  local arch os libc
+  arch=$(uname -m)
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+  case "$arch" in
+    x86_64|amd64) arch="x86_64" ;;
+    aarch64|arm64) arch="aarch64" ;;
+    *) arch="$arch" ;;
+  esac
+
+  case "$os" in
+    linux)
+      # Check for musl vs glibc
+      if command -v ldd >/dev/null 2>&1; then
+        libc=$(ldd --version 2>&1 | head -1 | grep -q musl && echo "musl" || echo "gnu")
+      else
+        libc="musl"  # Default to musl if ldd not available
+      fi
+      echo "${arch}-unknown-linux-${libc}"
+      ;;
+    darwin)
+      echo "${arch}-apple-darwin"
+      ;;
+    *)
+      echo "${arch}-unknown-linux-gnu"
+      ;;
+  esac
 }
 
 # Start a local HTTP server serving the fake release.
@@ -107,7 +141,9 @@ FAKE_DIR=$(setup_fake_release)
 read -r SERVER_PORT SERVER_PID <<< "$(start_server "$FAKE_DIR")"
 TEST_HOME=$(mktemp -d)
 mkdir -p "$TEST_HOME/bin"
-cp "$FAKE_DIR/apohara-agentguard-x86_64-unknown-linux-gnu" "$TEST_HOME/bin/apohara-agentguard"
+# Use the same triple detection as setup_fake_release
+target=$(detect_triple)
+cp "$FAKE_DIR/apohara-agentguard-$target" "$TEST_HOME/bin/apohara-agentguard"
 
 INSTALL_OUT=$(mktemp)
 AGENTGUARD_VERSION="0.5.4" \
@@ -159,6 +195,32 @@ HOME="$TEST_HOME" \
   run_install "$INSTALL_OUT" --no-init
 
 grep -q "wiring skipped" "$INSTALL_OUT" && pass "--no-init accepted" || fail "--no-init not working"
+rm -f "$INSTALL_OUT"
+
+stop_server "$SERVER_PID"
+cleanup
+
+# Test 5: SHA256 mismatch (corrupted download → abort)
+echo "Test 5: SHA256 mismatch (corrupted binary)"
+FAKE_DIR=$(setup_fake_release)
+read -r SERVER_PORT SERVER_PID <<< "$(start_server "$FAKE_DIR")"
+TEST_HOME=$(mktemp -d)
+
+# Tamper with the SHA256SUMS to create a mismatch
+target=$(detect_triple)
+(cd "$FAKE_DIR" && echo "0000000000000000000000000000000000000000000000000000000000000000  apohara-agentguard-$target" > SHA256SUMS)
+
+INSTALL_OUT=$(mktemp)
+AGENTGUARD_VERSION="0.5.4" \
+AGENTGUARD_DOWNLOAD_BASE="http://localhost:$SERVER_PORT" \
+AGENTGUARD_PREFIX="$TEST_HOME" \
+AGENTGUARD_NO_INIT=1 \
+HOME="$TEST_HOME" \
+  run_install "$INSTALL_OUT"
+
+[ "$INSTALL_EXIT_CODE" -ne 0 ] && pass "SHA256 mismatch correctly aborted" || fail "Should have failed on SHA256 mismatch"
+# Verify no partial binary was left behind
+[ ! -f "$TEST_HOME/bin/apohara-agentguard" ] && pass "No partial binary left on mismatch" || fail "Partial binary found after mismatch"
 rm -f "$INSTALL_OUT"
 
 stop_server "$SERVER_PID"
