@@ -30,7 +30,7 @@ toml = "1.1"
 regex = "1"
 regex-automata = { version = "0.4", default-features = false, features = ["std", "syntax", "unicode", "hybrid", "nfa-pikevm"] }
 clap = { version = "4", features = ["derive", "env"] }
-base64 = "0.22"
+base64 = "0.23"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.11"
 
