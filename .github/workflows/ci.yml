@@ -298,11 +298,10 @@ jobs:
       # continue-on-error so a kernel limitation is surfaced (logged) without
       # failing the required gate. They are a HARD gate locally (Pablo's box is
       # Landlock-capable) and asserted there.
-      - name: Run Linux sandbox tests (kernel-capability, non-blocking)
+      - name: Run Linux sandbox tests (kernel-capability, ENFORCED)
         if: runner.os == 'Linux'
-        continue-on-error: true
         run: |
-          echo "::group::sandbox tests (require userns + Landlock; non-blocking on CI)"
+          echo "::group::sandbox tests (require userns + Landlock; ENFORCED after graduation)"
           cargo test --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e \
                      --test sandbox_escape --test sandbox_failclosed -- --nocapture
           echo "::endgroup::"
@@ -323,20 +322,16 @@ jobs:
       # (`cargo llvm-cov --branch`) requires a nightly toolchain, so the gate
       # uses region coverage until a kernel-CI/nightly decision lands.
       #
-      # Threshold derivation: measured region coverage is 94.38% with
-      # src/sandbox/linux excluded; floor(94.38 - 2) = 92. The 2pp margin
-      # absorbs normal measurement variance so the gate never false-REDs,
-      # while a real regression of >2pp trips it.
+      # Threshold derivation: measured region coverage is ~93% with
+      # src/sandbox/linux INCLUDED (was 94.38% excluded); floor(93 - 2) = 91.
+      # The 2pp margin absorbs normal measurement variance.
       #
-      # The target list mirrors the portable (all-OS) hard gate in the `test`
-      # job above: the kernel-capability sandbox suites are excluded because
-      # they cannot be required on shared runners, and src/sandbox/linux is
-      # excluded from the accounting itself until kernel-CI lands.
+      # After sandbox graduation: src/sandbox/linux is now included, and the
+      # 5 kernel-capability suites are added to the target list.
       - name: Region coverage gate (hard)
         run: |
           set -euo pipefail
-          cargo llvm-cov --summary-only --fail-under-regions 92 \
-            --ignore-filename-regex 'src/sandbox/linux' \
+          cargo llvm-cov --summary-only --fail-under-regions 91 \
             --lib --bins \
             --test headline_bypass --test gate_fp --test hook_contract \
             --test kill_switch_env \
@@ -351,5 +346,7 @@ jobs:
             --test doctor_cli --test firewall_micro_bench --test firewall_unicode_url \
             --test harness_cli --test init_cli --test mcp_corpus \
             --test mirror_benchmark --test proxy_e2e --test shim_contract --test tightening \
+            --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e \
+            --test sandbox_escape --test sandbox_failclosed \
             | tee coverage-summary.txt
           cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
