@@ -94,11 +94,30 @@ fn canary_dir() -> PathBuf {
 
 /// Full path of the token file for `session_id`, or `None` when `session_id`
 /// is empty (we never key on an empty id).
+///
+/// // SECURITY: path traversal in session_id — mitigated by hashing session_id to a fixed hex filename
 fn token_path(session_id: &str) -> Option<PathBuf> {
     if session_id.is_empty() {
         return None;
     }
-    Some(canary_dir().join(format!("canary-{session_id}")))
+
+    let mut hasher = Sha256::new();
+    hasher.update(session_id.as_bytes());
+    let digest = hasher.finalize();
+
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        hex.push_str(&format!("{b:02x}"));
+    }
+
+    let dir = canary_dir();
+    let path = dir.join(format!("canary-{hex}"));
+
+    if path.parent() == Some(&dir) {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 /// Create the canary dir (0700 on unix) and write the token file (0600 on
@@ -214,5 +233,36 @@ mod tests {
         let token = emit_token("");
         assert_eq!(token.len(), TOKEN_HEX_LEN);
         assert!(read_token("").is_none());
+    }
+
+    #[test]
+    fn path_traversal_session_id_is_contained() {
+        let (guard, _session) = isolated_session("pathtraversal");
+        let dir = canary_dir();
+        let traversal_id = "../../../../tmp/agentguard_canary_test_traversal_victim";
+
+        let path = token_path(traversal_id).expect("returns a path");
+        assert!(
+            path.starts_with(&dir),
+            "token path must be strictly inside canary_dir; got: {path:?}"
+        );
+        assert_eq!(path.parent(), Some(dir.as_path()));
+
+        // Emitting token must not touch the target victim file outside canary_dir.
+        let target_victim = std::env::temp_dir().join("agentguard_canary_test_traversal_victim");
+        let _ = std::fs::remove_file(&target_victim);
+
+        let token = emit_token(traversal_id);
+        assert_eq!(token.len(), TOKEN_HEX_LEN);
+        assert!(
+            !target_victim.exists(),
+            "victim file outside canary_dir must NOT be created/overwritten"
+        );
+
+        // Reading token reads from the hashed filename inside canary_dir.
+        let read = read_token(traversal_id).expect("reads persisted token from safe dir");
+        assert_eq!(read, token);
+
+        drop(guard);
     }
 }
