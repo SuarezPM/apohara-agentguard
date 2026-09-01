@@ -313,11 +313,13 @@ jobs:
       # #[ignore] — they compile and RUN; we only mark this STEP
       # continue-on-error so a kernel limitation is surfaced (logged) without
       # failing the required gate. They are a HARD gate locally (Pablo's box is
-      # Landlock-capable) and asserted there.
-      - name: Run Linux sandbox tests (kernel-capability, ENFORCED)
+      # Landlock-capable) and asserted there. sandbox-proof.yml is the actual
+      # enforcement lane (runs daily + on sandbox path changes with AppArmor).
+      - name: Run Linux sandbox tests (kernel-capability, non-blocking)
         if: runner.os == 'Linux'
+        continue-on-error: true
         run: |
-          echo "::group::sandbox tests (require userns + Landlock; ENFORCED after graduation)"
+          echo "::group::sandbox tests (require userns + Landlock; non-blocking on CI)"
           cargo test --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e \
                      --test sandbox_escape --test sandbox_failclosed -- --nocapture
           echo "::endgroup::"
@@ -342,8 +344,9 @@ jobs:
       # src/sandbox/linux INCLUDED (was 94.38% excluded); floor(93 - 2) = 91.
       # The 2pp margin absorbs normal measurement variance.
       #
-      # After sandbox graduation: src/sandbox/linux is now included, and the
-      # 5 kernel-capability suites are added to the target list.
+      # NOTE: 5 kernel-capability sandbox suites are NOT in this target list
+      # because they require userns + Landlock which GHA runners don't reliably
+      # provide. They are covered by sandbox-proof.yml (enforcement lane).
       - name: Region coverage gate (hard)
         run: |
           set -euo pipefail
@@ -362,7 +365,5 @@ jobs:
             --test doctor_cli --test firewall_micro_bench --test firewall_unicode_url \
             --test harness_cli --test init_cli --test mcp_corpus \
             --test mirror_benchmark --test proxy_e2e --test shim_contract --test tightening \
-            --test sandbox_seccomp --test sandbox_landlock --test sandbox_build_e2e \
-            --test sandbox_escape --test sandbox_failclosed \
             | tee coverage-summary.txt
           cat coverage-summary.txt >> "$GITHUB_STEP_SUMMARY"
