@@ -97,13 +97,13 @@ Community packs (45 rules across 4 files) are opt-in and NOT included in measure
 - MCP gate: `src/proxy/gate.rs:289`
 - Hook harness: `src/hook/harness.rs:725` (test)
 
-### Test Coverage: 26 tests ✅
+### Test Coverage: 27 tests ✅
 
-**Unit tests (16):** `src/neutralize.rs:160-377` — bidi (3), role-line (7), pseudo-tags (3), fences (3), identity (2), combined (1)
+**Unit tests (20):** `src/neutralize.rs:160-377` — bidi (3), role-line (7), pseudo-tags (3), fences (3), identity (2), combined (2)
 
 **Integration tests (2):** `tests/check_cli.rs:212,247` — hostile content neutralization, identity passthrough
 
-**Cross-module tests (8):** contract (2), hook/harness (1), proxy/gate (1), mcp (1), + 3 more
+**Cross-module tests (5):** contract (2), hook/harness (1), proxy/gate (1), mcp (1)
 
 ### Verdict
 
@@ -113,4 +113,4 @@ Community packs (45 rules across 4 files) are opt-in and NOT included in measure
 | LODO detector functional | ✅ Informationary, not a gate |
 | CLI neutralization | ✅ All 3 commands neutralize before printing |
 | Neutralization tests | ✅ 26/26 pass |
-| No regressions | ✅ 691 tests total, 0 failures |
+| No regressions | ✅ 892 tests total, 0 failures |
