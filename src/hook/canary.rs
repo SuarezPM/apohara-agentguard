@@ -171,7 +171,7 @@ fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
             if mode & 0o077 != 0 {
                 let mut perms = meta.permissions();
                 perms.set_mode(0o700);
-                let _ = std::fs::set_permissions(dir, perms);
+                std::fs::set_permissions(dir, perms)?;
             }
             return Ok(());
         }
