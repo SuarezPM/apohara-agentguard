@@ -99,7 +99,8 @@ fn canary_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     #[cfg(unix)]
     {
-        let uid = nix::unistd::getuid();
+        // SAFETY: getuid is an allocation-free C FFI call that always succeeds on Unix.
+        let uid = unsafe { libc::getuid() };
         base.join(format!("agentguard-{uid}"))
     }
     #[cfg(not(unix))]
@@ -158,7 +159,8 @@ fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
                     "canary directory is not a directory or is a symlink",
                 ));
             }
-            let uid = nix::unistd::getuid().as_raw();
+            // SAFETY: getuid is an allocation-free C FFI call that always succeeds on Unix.
+            let uid = unsafe { libc::getuid() };
             if meta.uid() != uid {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -365,7 +367,7 @@ mod tests {
         let dir = canary_dir();
         #[cfg(unix)]
         {
-            let uid = nix::unistd::getuid();
+            let uid = unsafe { libc::getuid() };
             assert!(
                 dir.to_string_lossy().contains(&format!("agentguard-{uid}")),
                 "canary directory must contain uid: {dir:?}"
