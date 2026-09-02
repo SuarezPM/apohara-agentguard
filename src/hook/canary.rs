@@ -367,6 +367,7 @@ mod tests {
         let dir = canary_dir();
         #[cfg(unix)]
         {
+            // SAFETY: getuid is an allocation-free C FFI call that always succeeds on Unix.
             let uid = unsafe { libc::getuid() };
             assert!(
                 dir.to_string_lossy().contains(&format!("agentguard-{uid}")),
