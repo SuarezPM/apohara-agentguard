@@ -276,7 +276,9 @@ fn score_once(text: &str, include_url_exfil: bool) -> Option<(u8, String)> {
         // lookaround-equivalent post-validator before scoring. For every other
         // entry the pre-match hit IS the rule match.
         if !hit.two_stage || two_stage::matches(hit.id, text) {
-            let better = top.as_ref().is_none_or(|curr| hit.severity > curr.severity());
+            let better = top
+                .as_ref()
+                .is_none_or(|curr| hit.severity > curr.severity());
             if better {
                 top = Some(HitDetail::Rule {
                     id: hit.id,
@@ -288,7 +290,9 @@ fn score_once(text: &str, include_url_exfil: bool) -> Option<(u8, String)> {
 
     if include_url_exfil {
         if let Some(finding) = url_exfil::analyze(text) {
-            let better = top.as_ref().is_none_or(|curr| finding.severity > curr.severity());
+            let better = top
+                .as_ref()
+                .is_none_or(|curr| finding.severity > curr.severity());
             if better {
                 top = Some(HitDetail::Exfil {
                     severity: finding.severity,
