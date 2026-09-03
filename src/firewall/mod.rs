@@ -231,6 +231,33 @@ pub fn scan_output(text: &str, thresholds: &Thresholds) -> Verdict {
     two_pass_scan(text, true, thresholds)
 }
 
+/// Internal representation of a matching hit during scoring, deferring string
+/// allocations until final verdict construction.
+#[derive(Debug, Clone)]
+enum HitDetail {
+    Rule { id: &'static str, severity: u8 },
+    Exfil { severity: u8, reason: String },
+}
+
+impl HitDetail {
+    #[inline]
+    fn severity(&self) -> u8 {
+        match *self {
+            HitDetail::Rule { severity, .. } => severity,
+            HitDetail::Exfil { severity, .. } => severity,
+        }
+    }
+
+    fn into_reason(self) -> String {
+        match self {
+            HitDetail::Rule { id, severity } => {
+                format!("firewall rule {id} matched (severity {severity})")
+            }
+            HitDetail::Exfil { reason, .. } => reason,
+        }
+    }
+}
+
 /// One scoring pass over `text`: max severity across the regex rule set (and,
 /// when `include_url_exfil`, the URL parameter detector). `None` = clean.
 ///
@@ -238,7 +265,7 @@ pub fn scan_output(text: &str, thresholds: &Thresholds) -> Verdict {
 /// replace the current top (ties keep the first hit), so behavior for raw
 /// scans is byte-identical to pre-FASE-5A.
 fn score_once(text: &str, include_url_exfil: bool) -> Option<(u8, String)> {
-    let mut top: Option<(u8, String)> = None;
+    let mut top: Option<HitDetail> = None;
 
     // Single pre-match pass over the direct-regex DJL + OWASP patterns AND the
     // broad stage-1 gates of the two-stage rules. Each candidate rule is
@@ -249,29 +276,29 @@ fn score_once(text: &str, include_url_exfil: bool) -> Option<(u8, String)> {
         // lookaround-equivalent post-validator before scoring. For every other
         // entry the pre-match hit IS the rule match.
         if !hit.two_stage || two_stage::matches(hit.id, text) {
-            let better = top.as_ref().is_none_or(|(sev, _)| hit.severity > *sev);
+            let better = top.as_ref().is_none_or(|curr| hit.severity > curr.severity());
             if better {
-                top = Some((
-                    hit.severity,
-                    format!(
-                        "firewall rule {} matched (severity {})",
-                        hit.id, hit.severity
-                    ),
-                ));
+                top = Some(HitDetail::Rule {
+                    id: hit.id,
+                    severity: hit.severity,
+                });
             }
         }
     });
 
     if include_url_exfil {
         if let Some(finding) = url_exfil::analyze(text) {
-            let better = top.as_ref().is_none_or(|(sev, _)| finding.severity > *sev);
+            let better = top.as_ref().is_none_or(|curr| finding.severity > curr.severity());
             if better {
-                top = Some((finding.severity, finding.reason));
+                top = Some(HitDetail::Exfil {
+                    severity: finding.severity,
+                    reason: finding.reason,
+                });
             }
         }
     }
 
-    top
+    top.map(|detail| (detail.severity(), detail.into_reason()))
 }
 
 /// Map a scoring result to a [`Verdict`], tagging second-pass hits.

@@ -107,9 +107,12 @@ pub fn run_with_source(
 /// anti-self-disarm note in [`run_with_source`]). An absent var means nothing is
 /// disabled via the env.
 fn read_env_disable() -> EnvDisable {
-    match std::env::var("AGENTGUARD_DISABLE") {
-        Ok(v) => EnvDisable::parse(&v),
-        Err(_) => EnvDisable::default(),
+    match std::env::var_os("AGENTGUARD_DISABLE") {
+        Some(v) => match v.to_str() {
+            Some(s) => EnvDisable::parse(s),
+            None => EnvDisable::default(),
+        },
+        None => EnvDisable::default(),
     }
 }
 

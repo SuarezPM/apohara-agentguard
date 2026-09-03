@@ -32,6 +32,9 @@ pub(crate) fn decode_and_expand(leg: &str, depth: u8) -> Option<String> {
     if depth >= MAX_DECODE_DEPTH {
         return None;
     }
+    if !contains_ignore_ascii_case(leg, "base64") {
+        return None;
+    }
     if !has_base64_decode_stage(leg) {
         return None;
     }
@@ -43,15 +46,34 @@ pub(crate) fn decode_and_expand(leg: &str, depth: u8) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
+/// Zero-allocation, case-insensitive ASCII substring search helper.
+#[inline]
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let needle_bytes = needle.as_bytes();
+    if needle_bytes.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle_bytes.len() {
+        return false;
+    }
+    haystack
+        .as_bytes()
+        .windows(needle_bytes.len())
+        .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+}
+
 /// True iff `leg` pipes into a `base64 -d` / `base64 --decode` stage.
 fn has_base64_decode_stage(leg: &str) -> bool {
     leg.split('|').any(|stage| {
         let s = stage.trim();
         let mut tokens = s.split_whitespace();
-        if tokens.next() != Some("base64") {
+        let Some(head) = tokens.next() else {
+            return false;
+        };
+        if !head.eq_ignore_ascii_case("base64") {
             return false;
         }
-        tokens.any(|t| t == "-d" || t == "--decode")
+        tokens.any(|t| t.eq_ignore_ascii_case("-d") || t.eq_ignore_ascii_case("--decode"))
     })
 }
 
@@ -97,6 +119,13 @@ mod tests {
     fn decodes_echo_piped_payload() {
         // `cm0gLXJmIH4K` is base64 for "rm -rf ~\n".
         let leg = "echo cm0gLXJmIH4K | base64 -d | sh";
+        let out = decode_and_expand(leg, 0).expect("decode");
+        assert_eq!(out.trim(), "rm -rf ~");
+    }
+
+    #[test]
+    fn decodes_case_insensitive_base64_command() {
+        let leg = "echo cm0gLXJmIH4K | BASE64 -D | sh";
         let out = decode_and_expand(leg, 0).expect("decode");
         assert_eq!(out.trim(), "rm -rf ~");
     }

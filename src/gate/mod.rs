@@ -36,11 +36,35 @@ use packs::community::CommunityRule;
 /// a crafted `"$( "$( … )" )"` nest, consistent with the normalize/decode caps.
 const MAX_SUBST_DEPTH: u8 = 4;
 
+#[derive(Debug, Clone)]
+enum HitLabel {
+    Static {
+        category: &'static str,
+        id: &'static str,
+    },
+    FetchPipeShell(&'static str),
+    ForkBomb(&'static str),
+    CustomLabel(String),
+    Base64DecodeCap,
+}
+
+impl HitLabel {
+    fn format(&self) -> String {
+        match self {
+            HitLabel::Static { category, id } => format!("{category} [{id}]"),
+            HitLabel::FetchPipeShell(id) => format!("fetch-piped-to-shell [{id}]"),
+            HitLabel::ForkBomb(id) => format!("dos [{id}]"),
+            HitLabel::CustomLabel(label) => label.clone(),
+            HitLabel::Base64DecodeCap => "base64-decode-cap".to_string(),
+        }
+    }
+}
+
 /// A severity hit with the leg that triggered it and a label for reporting.
 struct Hit {
     severity: u8,
     leg: String,
-    label: String,
+    label: HitLabel,
 }
 
 /// Evaluate a bash `command` against the destructive taxonomy and `config`.
@@ -84,7 +108,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
             Hit {
                 severity: sev,
                 leg: command.to_string(),
-                label: format!("fetch-piped-to-shell [{id}]"),
+                label: HitLabel::FetchPipeShell(id),
             },
         );
     }
@@ -97,7 +121,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
             Hit {
                 severity: sev,
                 leg: command.to_string(),
-                label: format!("dos [{id}]"),
+                label: HitLabel::ForkBomb(id),
             },
         );
     }
@@ -211,7 +235,10 @@ fn scan_leg(
                 Hit {
                     severity: rule.severity,
                     leg: leg.to_string(),
-                    label: format!("{} [{}]", rule.category, rule.id),
+                    label: HitLabel::Static {
+                        category: rule.category,
+                        id: rule.id,
+                    },
                 },
             );
         }
@@ -227,7 +254,7 @@ fn scan_leg(
                 Hit {
                     severity: rule.severity,
                     leg: leg.to_string(),
-                    label: format!("{} [{}]", rule.category, rule.id),
+                    label: HitLabel::CustomLabel(format!("{} [{}]", rule.category, rule.id)),
                 },
             );
         }
@@ -255,7 +282,7 @@ fn scan_leg(
                 Hit {
                     severity: cb.severity,
                     leg: leg.to_string(),
-                    label: format!("custom-block [{}]", cb.category),
+                    label: HitLabel::CustomLabel(format!("custom-block [{}]", cb.category)),
                 },
             );
         }
@@ -275,7 +302,7 @@ fn scan_leg(
             Hit {
                 severity: config.thresholds.warn_at,
                 leg: leg.to_string(),
-                label: "base64-decode-cap".to_string(),
+                label: HitLabel::Base64DecodeCap,
             },
         );
     }
@@ -312,7 +339,7 @@ fn scan_substitution_body(
             Hit {
                 severity: sev,
                 leg: body.to_string(),
-                label: format!("fetch-piped-to-shell [{id}]"),
+                label: HitLabel::FetchPipeShell(id),
             },
         );
     }
@@ -322,7 +349,7 @@ fn scan_substitution_body(
             Hit {
                 severity: sev,
                 leg: body.to_string(),
-                label: format!("dos [{id}]"),
+                label: HitLabel::ForkBomb(id),
             },
         );
     }
@@ -421,10 +448,11 @@ fn build_verdict(tier: Tier, hit: &Hit) -> Verdict {
     // decision, not a severity-tier mapping). The `Tier::Ask` arms below
     // are unreachable in this code path; they exist solely to satisfy Rust's
     // non-exhaustive-match rule for the 4-variant `Tier` enum.
+    let label = hit.label.format();
     let reason = format!(
         "blocked dangerous leg `{}` ({})",
         truncate(&hit.leg, 200),
-        hit.label
+        label
     );
     let reason = if tier == Tier::Warn {
         reason.replacen("blocked", "flagged", 1)
@@ -436,13 +464,13 @@ fn build_verdict(tier: Tier, hit: &Hit) -> Verdict {
             "This command was blocked because the leg `{}` matches {}. \
              If this is intentional, add it to the apohara-agentguard allow-list.",
             truncate(&hit.leg, 200),
-            hit.label
+            label
         ),
         Tier::Warn => format!(
             "Caution: the leg `{}` matches {}. Proceed only if you understand \
              the impact.",
             truncate(&hit.leg, 200),
-            hit.label
+            label
         ),
         Tier::Allow => String::new(),
         Tier::Ask => String::new(), // unreachable: severity_to_tier never returns Ask.
