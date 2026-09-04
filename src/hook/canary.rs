@@ -84,12 +84,20 @@ fn generate_token(session_id: &str) -> String {
     hex
 }
 
-/// `${TMPDIR:-/tmp}/agentguard` — the per-session canary directory.
+/// `${TMPDIR:-/tmp}/agentguard-<uid>` — the per-session canary directory.
 fn canary_dir() -> PathBuf {
     let base = std::env::var_os("TMPDIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("agentguard")
+    #[cfg(unix)]
+    {
+        let uid = nix::unistd::getuid().as_raw();
+        base.join(format!("agentguard-{uid}"))
+    }
+    #[cfg(not(unix))]
+    {
+        base.join("agentguard")
+    }
 }
 
 /// Full path of the token file for `session_id`, or `None` when `session_id`
@@ -135,13 +143,53 @@ fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt as _;
-        if dir.exists() {
-            return Ok(());
+        use std::os::unix::fs::MetadataExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let current_uid = nix::unistd::getuid().as_raw();
+
+        match std::fs::symlink_metadata(dir) {
+            Ok(meta) => {
+                if !meta.file_type().is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "canary directory is not a directory or is a symlink",
+                    ));
+                }
+                if meta.uid() != current_uid {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "canary directory is owned by another user",
+                    ));
+                }
+                if (meta.mode() & 0o077) != 0 {
+                    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+                    let new_meta = std::fs::symlink_metadata(dir)?;
+                    if (new_meta.mode() & 0o077) != 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "canary directory has insecure permissions",
+                        ));
+                    }
+                }
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(dir)?;
+                let meta = std::fs::symlink_metadata(dir)?;
+                if !meta.file_type().is_dir() || meta.uid() != current_uid {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "canary directory creation verification failed",
+                    ));
+                }
+                Ok(())
+            }
+            Err(e) => Err(e),
         }
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
     }
     #[cfg(not(unix))]
     {
@@ -158,6 +206,7 @@ fn write_file_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<(
     {
         use std::os::unix::fs::OpenOptionsExt as _;
         opts.mode(0o600);
+        opts.custom_flags(libc::O_NOFOLLOW);
     }
     let mut f = opts.open(path)?;
     f.write_all(bytes)
@@ -263,6 +312,83 @@ mod tests {
         let read = read_token(traversal_id).expect("reads persisted token from safe dir");
         assert_eq!(read, token);
 
+        drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canary_dir_includes_uid() {
+        let dir = canary_dir();
+        let uid = nix::unistd::getuid().as_raw();
+        let dir_str = dir.to_string_lossy();
+        assert!(
+            dir_str.ends_with(&format!("agentguard-{uid}")),
+            "canary dir must be UID-scoped; got: {dir_str}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_private_rejects_symlink_directory() {
+        let guard = TMPDIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let test_base = std::env::temp_dir().join(format!(
+            "agentguard-canary-symlink-dir-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_base);
+        std::fs::create_dir_all(&test_base).unwrap();
+
+        let real_dir = test_base.join("real_dir");
+        let symlink_dir = test_base.join(format!("agentguard-{}", nix::unistd::getuid().as_raw()));
+
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
+
+        let res = create_dir_private(&symlink_dir);
+        assert!(
+            res.is_err(),
+            "create_dir_private must fail if canary_dir is a symlink"
+        );
+        assert_eq!(
+            res.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+
+        let _ = std::fs::remove_dir_all(&test_base);
+        drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_file_private_rejects_symlink_file() {
+        let guard = TMPDIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let test_base = std::env::temp_dir().join(format!(
+            "agentguard-canary-symlink-file-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_base);
+        std::fs::create_dir_all(&test_base).unwrap();
+
+        let target_file = test_base.join("target_secret.txt");
+        std::fs::write(&target_file, b"secret content").unwrap();
+
+        let link_file = test_base.join("canary-token-link");
+        std::os::unix::fs::symlink(&target_file, &link_file).unwrap();
+
+        let res = write_file_private(&link_file, b"new token");
+        assert!(
+            res.is_err(),
+            "write_file_private must fail with O_NOFOLLOW when writing to a symlink"
+        );
+
+        // Verify target secret was NOT overwritten
+        let content = std::fs::read_to_string(&target_file).unwrap();
+        assert_eq!(
+            content, "secret content",
+            "target file must not be modified"
+        );
+
+        let _ = std::fs::remove_dir_all(&test_base);
         drop(guard);
     }
 }
