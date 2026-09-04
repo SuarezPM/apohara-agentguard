@@ -1291,3 +1291,27 @@ mod proofs {
         assert!(tier_rank_local(Tier::Warn) > tier_rank_local(Tier::Allow));
     }
 }
+
+#[cfg(test)]
+mod mutation_budget_kills {
+    use super::*;
+
+    #[test]
+    fn locate_token_spans_the_token() {
+        let r = locate_token("hello world", "world");
+        assert_eq!((r.start(), r.end()), (6, 11));
+        assert_eq!(locate_token("abc", "zz"), TextRange::point(0));
+        assert_eq!(locate_token("", "x"), TextRange::point(0));
+    }
+
+    #[test]
+    fn first_backticked_extracts_first_token() {
+        assert_eq!(
+            first_backticked("unknown field `bogus_key` here"),
+            Some("bogus_key")
+        );
+        assert_eq!(first_backticked("plain message"), None);
+        assert_eq!(first_backticked("empty `` pair"), None);
+        assert_eq!(first_backticked("first `x` then `y`"), Some("x"));
+    }
+}

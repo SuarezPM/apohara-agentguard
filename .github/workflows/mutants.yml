@@ -1,9 +1,11 @@
-# Mutation-testing baseline (Story T4): cargo-mutants over the decision logic.
-#
-# INFORMATIONAL ONLY — this job is continue-on-error on purpose: until a
-# survived-mutant budget policy is decided (e.g. "zero survived mutants in
-# src/policy/engine.rs"), mutation results must not gate merges. Triage the
-# uploaded artifact instead.
+# Mutation-testing budget gate (Story T4 + audit-remediation F1): cargo-mutants
+# over the decision logic, now a HARD gate with an explicit survived-mutant
+# budget. Scope = the budget scope (policy/** + gate/taxonomy.rs); the
+# taxonomy guards classified as EQUIVALENT mutants (pure pre-filters whose
+# outcome is forced by the regex that follows) and the Kani-verified
+# `proofs` harnesses (verified by cargo-kani, unreachable by mutation) are
+# documented in docs/AUDIT-REMEDIATION-2026-09.md and carried as budget,
+# not as silent survivors. Tighten MUTANT_BUDGET to 0 as kills land.
 name: mutants
 
 on:
@@ -17,13 +19,17 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Survived-mutant budget for the scoped run. Derived from the measured
+  # baseline after the kill tests (audit-remediation F1); every remaining
+  # survivor is individually classified (equivalent guard / Kani proof).
+  # REDUCING this number is the only allowed direction of travel.
+  MUTANT_BUDGET: "17"
 
 jobs:
   mutants:
-    name: cargo-mutants (policy + gate)
+    name: cargo-mutants (budget gate)
     runs-on: ubuntu-latest
     timeout-minutes: 75
-    continue-on-error: true
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -37,14 +43,28 @@ jobs:
       # generous wall-clock cap via coreutils timeout (the run may end early
       # on the 4-core runner — partial results are still written incrementally
       # and are valid for triage).
-      - name: Mutation-test the decision logic
+      - name: Mutation-test the budget scope
         run: |
           set -o pipefail
           timeout 3600 cargo mutants \
             -j "$(nproc)" \
-            -f 'src/policy/**' -f 'src/gate/**' \
-            -e 'src/gate/packs/**' \
+            -f 'src/policy/**' -f 'src/gate/taxonomy.rs' \
             -o target/mutants 2>&1 | tee mutants-run.log
+
+      # HARD gate: the run must complete AND stay within the survived budget.
+      - name: Assert survived-mutant budget
+        run: |
+          set -euo pipefail
+          if grep -qE '^(ERROR|ERROR:)' mutants-run.log; then
+            echo "::error::cargo-mutants run failed (infra error in log)."; exit 1
+          fi
+          missed=$(grep -cE '^MISSED' mutants-run.log || true)
+          echo "Survived (MISSED) mutants: ${missed} / budget ${MUTANT_BUDGET}"
+          if [ "${missed}" -gt "${MUTANT_BUDGET}" ]; then
+            echo "::error::Survived mutants (${missed}) exceed budget (${MUTANT_BUDGET})."
+            grep -E '^MISSED' mutants-run.log
+            exit 1
+          fi
 
       - name: Append result summary to the job summary
         if: always()
