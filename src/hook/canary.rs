@@ -91,7 +91,7 @@ fn canary_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     #[cfg(unix)]
     {
-        let uid = nix::unistd::getuid().as_raw();
+        let uid = unsafe { libc::getuid() };
         base.join(format!("agentguard-{uid}"))
     }
     #[cfg(not(unix))]
@@ -146,7 +146,7 @@ fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
         use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
 
-        let current_uid = nix::unistd::getuid().as_raw();
+        let current_uid = unsafe { libc::getuid() };
 
         match std::fs::symlink_metadata(dir) {
             Ok(meta) => {
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn canary_dir_includes_uid() {
         let dir = canary_dir();
-        let uid = nix::unistd::getuid().as_raw();
+        let uid = unsafe { libc::getuid() };
         let dir_str = dir.to_string_lossy();
         assert!(
             dir_str.ends_with(&format!("agentguard-{uid}")),
@@ -339,7 +339,8 @@ mod tests {
         std::fs::create_dir_all(&test_base).unwrap();
 
         let real_dir = test_base.join("real_dir");
-        let symlink_dir = test_base.join(format!("agentguard-{}", nix::unistd::getuid().as_raw()));
+        let uid = unsafe { libc::getuid() };
+        let symlink_dir = test_base.join(format!("agentguard-{uid}"));
 
         std::fs::create_dir_all(&real_dir).unwrap();
         std::os::unix::fs::symlink(&real_dir, &symlink_dir).unwrap();
