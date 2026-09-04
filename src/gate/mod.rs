@@ -79,23 +79,17 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     // Pre-split analysis: `curl … | sh` is a pipe relationship that vanishes
     // once the command is split into legs, so analyse the original structure.
     if let Some((id, sev, _cat)) = taxonomy::fetch_pipe_to_shell(command) {
-        consider(
-            &mut best,
-            sev,
-            Cow::Borrowed(command),
-            || format!("fetch-piped-to-shell [{id}]"),
-        );
+        consider(&mut best, sev, Cow::Borrowed(command), || {
+            format!("fetch-piped-to-shell [{id}]")
+        });
     }
 
     // Pre-split analysis: a fork bomb's `:(){ :|:& };:` signature spans `;`/`|`/`&`,
     // so it is shredded across legs once split — check the original command.
     if let Some((id, sev, _cat)) = taxonomy::fork_bomb_presplit(command) {
-        consider(
-            &mut best,
-            sev,
-            Cow::Borrowed(command),
-            || format!("dos [{id}]"),
-        );
+        consider(&mut best, sev, Cow::Borrowed(command), || {
+            format!("dos [{id}]")
+        });
     }
 
     // Pre-split base64 decode: `echo <b64> | base64 -d | sh` is likewise a pipe
@@ -103,7 +97,13 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     // split, so decode the ORIGINAL command's pipe and rescan the payload.
     if let Some(decoded) = decode::decode_and_expand(command, 0) {
         for inner in compound::split_compound(&decoded) {
-            scan_leg(Cow::Owned(inner.into_owned()), 1, config, &mut best, &community_rules);
+            scan_leg(
+                Cow::Owned(inner.into_owned()),
+                1,
+                config,
+                &mut best,
+                &community_rules,
+            );
         }
     }
 
@@ -113,7 +113,13 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
 
     // 5. Match each (resolved/decoded) leg.
     for leg in resolved.as_ref() {
-        scan_leg(Cow::Borrowed(leg.as_ref()), 0, config, &mut best, &community_rules);
+        scan_leg(
+            Cow::Borrowed(leg.as_ref()),
+            0,
+            config,
+            &mut best,
+            &community_rules,
+        );
     }
 
     // 5b. IFS re-split (gated): an `IFS=<char>` reassignment makes that char a
@@ -171,7 +177,13 @@ fn ifs_resplit_block<'a>(
     let resolved = resolve::resolve_assignments(&rebuilt);
     let mut ifs_best: Option<Hit<'_>> = None;
     for leg in resolved.as_ref() {
-        scan_leg(Cow::Borrowed(leg.as_ref()), 0, config, &mut ifs_best, community);
+        scan_leg(
+            Cow::Borrowed(leg.as_ref()),
+            0,
+            config,
+            &mut ifs_best,
+            community,
+        );
     }
     match ifs_best {
         Some(hit) if severity_to_tier(hit.severity, &config.thresholds) == Tier::Block => {
@@ -238,7 +250,13 @@ fn scan_leg<'a>(
     // Base64 decode + rescan.
     if let Some(decoded) = decode::decode_and_expand(leg_str, depth) {
         for inner in compound::split_compound(&decoded) {
-            scan_leg(Cow::Owned(inner.into_owned()), depth + 1, config, best, community);
+            scan_leg(
+                Cow::Owned(inner.into_owned()),
+                depth + 1,
+                config,
+                best,
+                community,
+            );
         }
     } else if depth + 1 >= decode::MAX_DECODE_DEPTH && has_unresolved_decode(leg_str) {
         consider_ref(best, config.thresholds.warn_at, &leg, || {
@@ -252,7 +270,9 @@ fn scan_leg<'a>(
             let mut sub_best = None;
             scan_substitution_body(body, depth + 1, config, &mut sub_best, community);
             if let Some(hit) = sub_best {
-                consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || hit.label);
+                consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || {
+                    hit.label
+                });
             }
         }
     }
@@ -278,7 +298,13 @@ fn scan_substitution_body<'a>(
     if depth < decode::MAX_DECODE_DEPTH {
         if let Some(decoded) = decode::decode_and_expand(body, depth) {
             for inner in compound::split_compound(&decoded) {
-                scan_leg(Cow::Owned(inner.into_owned()), depth + 1, config, best, community);
+                scan_leg(
+                    Cow::Owned(inner.into_owned()),
+                    depth + 1,
+                    config,
+                    best,
+                    community,
+                );
             }
         }
     }
@@ -290,15 +316,25 @@ fn scan_substitution_body<'a>(
                     let mut sub_best = None;
                     scan_substitution_body(inner, depth + 1, config, &mut sub_best, community);
                     if let Some(hit) = sub_best {
-                        consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || hit.label);
+                        consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || {
+                            hit.label
+                        });
                     }
                 }
             }
         } else {
             let mut leg_best = None;
-            scan_leg(Cow::Owned(leg.into_owned()), depth, config, &mut leg_best, community);
+            scan_leg(
+                Cow::Owned(leg.into_owned()),
+                depth,
+                config,
+                &mut leg_best,
+                community,
+            );
             if let Some(hit) = leg_best {
-                consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || hit.label);
+                consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || {
+                    hit.label
+                });
             }
         }
     }
@@ -322,6 +358,7 @@ fn custom_block_matches(cb: &CustomBlock, leg: &str) -> bool {
 }
 
 /// Keep the higher-severity hit. Lazy-formats label AND clones leg only when candidate is kept.
+#[allow(clippy::ptr_arg)]
 fn consider_ref<'a>(
     best: &mut Option<Hit<'a>>,
     severity: u8,
