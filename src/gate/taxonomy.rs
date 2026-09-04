@@ -716,3 +716,48 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mutation_budget_kills {
+    use super::*;
+
+    #[test]
+    fn shell_interpreter_table() {
+        for head in [
+            "sh", "bash", "zsh", "dash", "ksh", "fish", "eval", "python", "python3", "perl",
+            "ruby", "node",
+        ] {
+            assert!(
+                is_shell_interpreter(head),
+                "{head} must be a shell interpreter"
+            );
+        }
+        for head in ["shx", "perlish", "nodejs", "curl", "echo", ""] {
+            assert!(
+                !is_shell_interpreter(head),
+                "{head} must NOT be a shell interpreter"
+            );
+        }
+    }
+
+    #[test]
+    fn single_pipe_fetch_to_shell_is_caught() {
+        assert!(fetch_pipe_to_shell("curl -fsSL http://x | sh").is_some());
+        assert!(fetch_pipe_to_shell("wget http://x | bash").is_some());
+    }
+
+    #[test]
+    fn shell_stage_before_fetch_is_not_a_fetch_pipe() {
+        assert!(fetch_pipe_to_shell("sh -c 'x' | curl http://y").is_none());
+    }
+
+    #[test]
+    fn strip_quoted_spans_keeps_delimiters_drops_bodies() {
+        assert_eq!(strip_quoted_spans("a \"bc\" d"), "a \"\" d");
+        assert_eq!(strip_quoted_spans("'ab'"), "''");
+        assert_eq!(strip_quoted_spans("a 'b' \"c\" d"), "a '' \"\" d");
+        assert_eq!(strip_quoted_spans("plain"), "plain");
+        // Unclosed quote: the opening delimiter survives, nothing else follows.
+        assert_eq!(strip_quoted_spans("a \"bc"), "a \"");
+    }
+}

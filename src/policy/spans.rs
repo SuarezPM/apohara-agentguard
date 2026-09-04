@@ -329,3 +329,28 @@ mod tests {
         assert!(f.contains('|'), "gutter skeleton present: {f}");
     }
 }
+
+#[cfg(test)]
+mod mutation_budget_kills {
+    use super::*;
+
+    #[test]
+    fn long_line_window_and_caret_alignment_exact() {
+        // 120 chars > MAX_LINE_DISPLAY_CHARS (100): the windowed path.
+        let src = "x".repeat(120);
+        let frame = render_code_frame(
+            &src,
+            &ErrorLocation::new("f.toml", TextRange::new(115, 120).expect("valid")),
+        );
+        // num="1" -> gutter " "; format emits "{gutter} |" -> two leading
+        // spaces. caret_from=115 -> win_from=107, win_to=120; prefix "…",
+        // suffix ""; caret_pad = (115-107) + 1 prefix char = 9 spaces.
+        let expected = concat!(
+            "  --> f.toml:1:116\n",
+            "  |\n",
+            "1 | …xxxxxxxxxxxxx\n",
+            "  |          ^^^^^\n",
+        );
+        assert_eq!(frame, expected);
+    }
+}
