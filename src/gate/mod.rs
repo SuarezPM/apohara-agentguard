@@ -37,9 +37,9 @@ use packs::community::CommunityRule;
 const MAX_SUBST_DEPTH: u8 = 4;
 
 /// A severity hit with the leg that triggered it and a label for reporting.
-struct Hit {
+struct Hit<'a> {
     severity: u8,
-    leg: String,
+    leg: Cow<'a, str>,
     label: String,
 }
 
@@ -81,11 +81,9 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     if let Some((id, sev, _cat)) = taxonomy::fetch_pipe_to_shell(command) {
         consider(
             &mut best,
-            Hit {
-                severity: sev,
-                leg: command.to_string(),
-                label: format!("fetch-piped-to-shell [{id}]"),
-            },
+            sev,
+            Cow::Borrowed(command),
+            || format!("fetch-piped-to-shell [{id}]"),
         );
     }
 
@@ -94,11 +92,9 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     if let Some((id, sev, _cat)) = taxonomy::fork_bomb_presplit(command) {
         consider(
             &mut best,
-            Hit {
-                severity: sev,
-                leg: command.to_string(),
-                label: format!("dos [{id}]"),
-            },
+            sev,
+            Cow::Borrowed(command),
+            || format!("dos [{id}]"),
         );
     }
 
@@ -107,7 +103,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     // split, so decode the ORIGINAL command's pipe and rescan the payload.
     if let Some(decoded) = decode::decode_and_expand(command, 0) {
         for inner in compound::split_compound(&decoded) {
-            scan_leg(inner.as_ref(), 1, config, &mut best, &community_rules);
+            scan_leg(Cow::Owned(inner.into_owned()), 1, config, &mut best, &community_rules);
         }
     }
 
@@ -116,8 +112,8 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     let resolved = resolve::resolve_assignments(&legs);
 
     // 5. Match each (resolved/decoded) leg.
-    for leg in &resolved {
-        scan_leg(leg.as_ref(), 0, config, &mut best, &community_rules);
+    for leg in resolved.as_ref() {
+        scan_leg(Cow::Borrowed(leg.as_ref()), 0, config, &mut best, &community_rules);
     }
 
     // 5b. IFS re-split (gated): an `IFS=<char>` reassignment makes that char a
@@ -128,7 +124,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     //     never mangled into a false positive.
     if !extra_seps.is_empty() {
         if let Some(hit) = ifs_resplit_block(command, &extra_seps, config, &community_rules) {
-            consider(&mut best, hit);
+            consider(&mut best, hit.severity, hit.leg, || hit.label);
         }
     }
 
@@ -147,12 +143,12 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
 /// e.g. `cmdXrmX-rfX~` -> `cmd rm -rf ~`), split, and scan. Returns a hit ONLY
 /// if the re-scan surfaces a Block-tier match — otherwise `None` (no-op), so a
 /// benign `IFS`-driven loop or `read` is never turned into a false positive.
-fn ifs_resplit_block(
-    command: &str,
+fn ifs_resplit_block<'a>(
+    command: &'a str,
     extra_seps: &[char],
     config: &Config,
     community: &[CommunityRule],
-) -> Option<Hit> {
+) -> Option<Hit<'a>> {
     let legs = compound::split_compound(command);
     let mut rebuilt: Vec<Cow<'_, str>> = Vec::with_capacity(legs.len());
     let mut seen_ifs = false;
@@ -173,177 +169,137 @@ fn ifs_resplit_block(
     }
 
     let resolved = resolve::resolve_assignments(&rebuilt);
-    let mut ifs_best: Option<Hit> = None;
-    for leg in &resolved {
-        scan_leg(leg.as_ref(), 0, config, &mut ifs_best, community);
+    let mut ifs_best: Option<Hit<'_>> = None;
+    for leg in resolved.as_ref() {
+        scan_leg(Cow::Borrowed(leg.as_ref()), 0, config, &mut ifs_best, community);
     }
     match ifs_best {
-        Some(hit) if severity_to_tier(hit.severity, &config.thresholds) == Tier::Block => Some(hit),
+        Some(hit) if severity_to_tier(hit.severity, &config.thresholds) == Tier::Block => {
+            Some(Hit {
+                severity: hit.severity,
+                leg: Cow::Owned(hit.leg.into_owned()),
+                label: hit.label,
+            })
+        }
         _ => None,
     }
 }
 
 /// Scan a single leg: taxonomy rules, community pack rules, custom blocks, and
 /// (bounded) base64 decode-and-rescan. Folds the worst hit into `best`.
-fn scan_leg(
-    leg: &str,
+fn scan_leg<'a>(
+    leg: Cow<'a, str>,
     depth: u8,
     config: &Config,
-    best: &mut Option<Hit>,
+    best: &mut Option<Hit<'a>>,
     community: &[CommunityRule],
 ) {
-    // Verb-aware match text: a destructive substring inside a quoted ARGUMENT to
-    // a non-executing verb (`git commit -m`, `echo`, `printf`, `#` comment) is
-    // DATA, not a command, so it is suppressed; an executing verb (`sh -c`,
-    // `eval`, `xargs … rm`, …) keeps its quoted content and still matches.
-    let match_text = taxonomy::effective_match_text(leg);
+    let leg_str = leg.as_ref();
+    let match_text = taxonomy::effective_match_text(leg_str);
 
-    // Built-in destructive taxonomy, UNIONED with any enabled domain packs
-    // (`config.packs`). With the default empty `packs` the chained iterator is
-    // exactly `taxonomy::rules()`, so the gate is byte-identical to no-packs.
-    for rule in taxonomy::rules()
-        .iter()
-        .chain(packs::enabled_rules(&config.packs))
-    {
+    // Built-in destructive taxonomy.
+    for rule in taxonomy::rules() {
         if rule.matches(&match_text) {
-            consider(
-                best,
-                Hit {
-                    severity: rule.severity,
-                    leg: leg.to_string(),
-                    label: format!("{} [{}]", rule.category, rule.id),
-                },
-            );
+            consider_ref(best, rule.severity, &leg, || {
+                format!("{} [{}]", rule.category, rule.id)
+            });
         }
     }
 
-    // Community pack rules (V5-A): data-driven substring/glob rules loaded
-    // from `*.toml` pack files, enabled via `[community_packs]`. Matched
-    // against the same verb-aware match text as every other per-leg rule.
+    // Domain packs enabled via `config.packs`.
+    if !config.packs.is_empty() {
+        for rule in packs::enabled_rules(&config.packs) {
+            if rule.matches(&match_text) {
+                consider_ref(best, rule.severity, &leg, || {
+                    format!("{} [{}]", rule.category, rule.id)
+                });
+            }
+        }
+    }
+
+    // Community pack rules (V5-A).
     for rule in community {
         if rule.matches(&match_text) {
-            consider(
-                best,
-                Hit {
-                    severity: rule.severity,
-                    leg: leg.to_string(),
-                    label: format!("{} [{}]", rule.category, rule.id),
-                },
-            );
+            consider_ref(best, rule.severity, &leg, || {
+                format!("{} [{}]", rule.category, rule.id)
+            });
         }
     }
 
-    // Live command substitutions inside a non-executing verb's DOUBLE-quoted
-    // argument (`echo "$(rm -rf ~)"`, `git commit -m "$(rm -rf ~)"`). The body
-    // is run by bash regardless of the outer verb, so scan it AS A COMMAND.
-    // `effective_match_text` strips the inert plain text of such an argument (the
-    // commit-message FP fix), which would also delete these bodies — surfacing
-    // them here is what closes the A5 FN. Bounded by `MAX_SUBST_DEPTH` so a
-    // crafted `"$( "$( … )" )"` nest cannot recurse without limit (consistent
-    // with the normalize/decode caps).
-    if depth < MAX_SUBST_DEPTH {
-        for body in taxonomy::live_substitution_bodies(leg) {
-            scan_substitution_body(body, depth + 1, config, best, community);
-        }
-    }
-
-    // User-defined custom blocks (substring/glob over the leg).
+    // User-defined custom blocks.
     for cb in &config.custom_blocks {
-        if custom_block_matches(cb, leg) {
-            consider(
-                best,
-                Hit {
-                    severity: cb.severity,
-                    leg: leg.to_string(),
-                    label: format!("custom-block [{}]", cb.category),
-                },
-            );
+        if custom_block_matches(cb, leg_str) {
+            consider_ref(best, cb.severity, &leg, || {
+                format!("custom-block [{}]", cb.category)
+            });
         }
     }
 
-    // Base64 decode + rescan (bounded by MAX_DECODE_DEPTH).
-    if let Some(decoded) = decode::decode_and_expand(leg, depth) {
-        // The decoded payload may itself be compound; re-split before rescan.
+    // Base64 decode + rescan.
+    if let Some(decoded) = decode::decode_and_expand(leg_str, depth) {
         for inner in compound::split_compound(&decoded) {
-            scan_leg(inner.as_ref(), depth + 1, config, best, community);
+            scan_leg(Cow::Owned(inner.into_owned()), depth + 1, config, best, community);
         }
-    } else if depth + 1 >= decode::MAX_DECODE_DEPTH && has_unresolved_decode(leg) {
-        // We hit the decode cap with a payload still present -> WARN, do not
-        // recurse further (guards against decode loops / decode bombs).
-        consider(
-            best,
-            Hit {
-                severity: config.thresholds.warn_at,
-                leg: leg.to_string(),
-                label: "base64-decode-cap".to_string(),
-            },
-        );
+    } else if depth + 1 >= decode::MAX_DECODE_DEPTH && has_unresolved_decode(leg_str) {
+        consider_ref(best, config.thresholds.warn_at, &leg, || {
+            "base64-decode-cap".to_string()
+        });
+    }
+
+    // Live command substitutions inside double-quoted arguments.
+    if depth < MAX_SUBST_DEPTH {
+        for body in taxonomy::live_substitution_bodies(leg_str) {
+            let mut sub_best = None;
+            scan_substitution_body(body, depth + 1, config, &mut sub_best, community);
+            if let Some(hit) = sub_best {
+                consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || hit.label);
+            }
+        }
     }
 }
 
 /// Scan the body of a LIVE command substitution (`$(…)`/backtick) found inside a
 /// non-executing verb's double-quoted argument.
-///
-/// A substitution captures its body's OUTPUT as a string, so the body's danger
-/// is decided by the COMMAND it runs (its head verb), not by data the head merely
-/// prints. Two cases per split leg of the body:
-///   - the leg's head is itself a non-executing verb (`echo rm -rf`,
-///     `printf rm -rf`, `git commit -m "…"`): bash runs `echo`/`printf`/… which
-///     just emits a string — harmless. We do NOT taxonomy-match the leg (so
-///     `$(echo rm -rf)` Allows), but we DO recurse into any further LIVE
-///     substitution nested in it (`$( echo "$(rm -rf ~)" )`).
-///   - any other head (`rm -rf ~`, `sh -c …`, `eval …`): the body runs a real
-///     command — scan it through the full pipeline (`$(rm -rf ~)` Blocks).
-fn scan_substitution_body(
-    body: &str,
+fn scan_substitution_body<'a>(
+    body: &'a str,
     depth: u8,
     config: &Config,
-    best: &mut Option<Hit>,
+    best: &mut Option<Hit<'a>>,
     community: &[CommunityRule],
 ) {
-    // The body is a full command, so run the same PRE-SPLIT structural analyses
-    // `evaluate` runs on the top-level command — these relationships vanish once
-    // split into legs: `curl … | sh` (pipe), a fork bomb's `;`/`|`/`&` signature,
-    // and `echo <b64> | base64 -d | sh`. Without this, `echo "$(curl … | sh)"`
-    // would slip (the body executes, but no single leg matches).
     if let Some((id, sev, _cat)) = taxonomy::fetch_pipe_to_shell(body) {
-        consider(
-            best,
-            Hit {
-                severity: sev,
-                leg: body.to_string(),
-                label: format!("fetch-piped-to-shell [{id}]"),
-            },
-        );
+        consider_ref(best, sev, &Cow::Borrowed(body), || {
+            format!("fetch-piped-to-shell [{id}]")
+        });
     }
     if let Some((id, sev, _cat)) = taxonomy::fork_bomb_presplit(body) {
-        consider(
-            best,
-            Hit {
-                severity: sev,
-                leg: body.to_string(),
-                label: format!("dos [{id}]"),
-            },
-        );
+        consider_ref(best, sev, &Cow::Borrowed(body), || format!("dos [{id}]"));
     }
     if depth < decode::MAX_DECODE_DEPTH {
         if let Some(decoded) = decode::decode_and_expand(body, depth) {
             for inner in compound::split_compound(&decoded) {
-                scan_leg(inner.as_ref(), depth + 1, config, best, community);
+                scan_leg(Cow::Owned(inner.into_owned()), depth + 1, config, best, community);
             }
         }
     }
 
     for leg in compound::split_compound(body) {
         if taxonomy::is_non_executing_verb(leg.as_ref()) {
-            // Inert output: recurse only into its own nested live substitutions.
             if depth < MAX_SUBST_DEPTH {
                 for inner in taxonomy::live_substitution_bodies(leg.as_ref()) {
-                    scan_substitution_body(inner, depth + 1, config, best, community);
+                    let mut sub_best = None;
+                    scan_substitution_body(inner, depth + 1, config, &mut sub_best, community);
+                    if let Some(hit) = sub_best {
+                        consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || hit.label);
+                    }
                 }
             }
         } else {
-            scan_leg(leg.as_ref(), depth, config, best, community);
+            let mut leg_best = None;
+            scan_leg(Cow::Owned(leg.into_owned()), depth, config, &mut leg_best, community);
+            if let Some(hit) = leg_best {
+                consider(best, hit.severity, Cow::Owned(hit.leg.into_owned()), || hit.label);
+            }
         }
     }
 }
@@ -365,11 +321,41 @@ fn custom_block_matches(cb: &CustomBlock, leg: &str) -> bool {
     packs::community::pattern_matches(&cb.pattern, leg)
 }
 
-/// Keep the higher-severity hit.
-fn consider(best: &mut Option<Hit>, candidate: Hit) {
+/// Keep the higher-severity hit. Lazy-formats label AND clones leg only when candidate is kept.
+fn consider_ref<'a>(
+    best: &mut Option<Hit<'a>>,
+    severity: u8,
+    leg: &Cow<'a, str>,
+    make_label: impl FnOnce() -> String,
+) {
     match best {
-        Some(existing) if existing.severity >= candidate.severity => {}
-        _ => *best = Some(candidate),
+        Some(existing) if existing.severity >= severity => {}
+        _ => {
+            *best = Some(Hit {
+                severity,
+                leg: leg.clone(),
+                label: make_label(),
+            });
+        }
+    }
+}
+
+/// Keep the higher-severity hit. Lazy-formats label only when candidate is kept.
+fn consider<'a>(
+    best: &mut Option<Hit<'a>>,
+    severity: u8,
+    leg: Cow<'a, str>,
+    make_label: impl FnOnce() -> String,
+) {
+    match best {
+        Some(existing) if existing.severity >= severity => {}
+        _ => {
+            *best = Some(Hit {
+                severity,
+                leg,
+                label: make_label(),
+            });
+        }
     }
 }
 
@@ -415,7 +401,7 @@ pub(crate) fn overfit_rule_fires(matcher: &dyn Fn(&str) -> bool, entry: &str) ->
 }
 
 /// Build the final verdict from the worst hit and its tier.
-fn build_verdict(tier: Tier, hit: &Hit) -> Verdict {
+fn build_verdict(tier: Tier, hit: &Hit<'_>) -> Verdict {
     // `tier` here is always the output of `severity_to_tier`, which returns
     // only Allow/Warn/Block by design (v0.3 F3' sub-step: `Ask` is a POLICY
     // decision, not a severity-tier mapping). The `Tier::Ask` arms below

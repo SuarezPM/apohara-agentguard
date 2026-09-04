@@ -354,6 +354,9 @@ pub(crate) fn effective_match_text<'a>(leg: &'a str) -> Cow<'a, str> {
 /// matched by [`effective_match_text`]) and for comments (inert). Single-quoted
 /// substitutions are literal and are NOT returned.
 pub(crate) fn live_substitution_bodies(leg: &str) -> Vec<&str> {
+    if !leg.contains("$(") && !leg.contains('`') {
+        return Vec::new();
+    }
     if leg.trim_start().starts_with('#') {
         return Vec::new();
     }

@@ -16,9 +16,9 @@ use std::collections::HashMap;
 
 /// Resolve `$VAR` / `${VAR}` references using `VAR=value` assignments seen in
 /// earlier legs. Returns the legs with references expanded.
-pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Vec<Cow<'a, str>> {
+pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Cow<'a, [Cow<'a, str>]> {
     if !legs.iter().any(|l| l.contains('=') || l.contains('$')) {
-        return legs.to_vec();
+        return Cow::Borrowed(legs);
     }
 
     let mut vars: HashMap<&str, &str> = HashMap::new();
@@ -39,7 +39,7 @@ pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Vec<Cow<'a, s
         out.push(expanded);
     }
 
-    out
+    Cow::Owned(out)
 }
 
 /// Parse a leading `VAR=value` assignment. Returns `None` if `leg` is not a
