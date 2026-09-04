@@ -172,15 +172,24 @@ fn bash_stdout_high_severity_injection_warns_only() {
 #[test]
 fn ssrf_refuses_metadata_loopback_private_linklocal() {
     let refused = [
-        "169.254.169.254", // cloud metadata
-        "127.0.0.1",       // loopback
-        "10.0.0.5",        // RFC1918
-        "172.16.0.1",      // RFC1918
-        "192.168.1.1",     // RFC1918
-        "169.254.10.1",    // link-local
-        "fd00:ec2::254",   // IPv6 cloud metadata
-        "::1",             // IPv6 loopback
-        "fc00::1",         // ULA
+        "169.254.169.254",          // cloud metadata
+        "127.0.0.1",                // loopback
+        "0.0.0.1",                  // 0.0.0.0/8
+        "100.64.0.1",               // CGNAT
+        "10.0.0.5",                 // RFC1918
+        "172.16.0.1",               // RFC1918
+        "192.168.1.1",              // RFC1918
+        "169.254.10.1",             // link-local
+        "198.18.0.1",               // Benchmarking
+        "192.0.2.1",                // TEST-NET-1
+        "224.0.0.1",                // Multicast
+        "240.0.0.1",                // Reserved
+        "fd00:ec2::254",            // IPv6 cloud metadata
+        "::1",                      // IPv6 loopback
+        "fc00::1",                  // ULA
+        "64:ff9b::127.0.0.1",       // NAT64 embedded loopback
+        "2002:7f00:1::",            // 6to4 embedded loopback
+        "fe80::200:5efe:127.0.0.1", // ISATAP embedded loopback
     ];
     for ip in refused {
         let parsed = ip.parse().expect("parse ip");

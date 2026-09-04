@@ -128,14 +128,14 @@ pub trait ContentSource {
 pub fn ssrf_check_ip(ip: IpAddr) -> Result<(), SsrfRejected> {
     let reject = |reason| Err(SsrfRejected { reason });
     match ip {
-        IpAddr::V4(v4) => check_v4(v4, reject),
-        IpAddr::V6(v6) => check_v6(v6, reject),
+        IpAddr::V4(v4) => check_v4(v4, &reject),
+        IpAddr::V6(v6) => check_v6(v6, &reject),
     }
 }
 
 fn check_v4(
     v4: Ipv4Addr,
-    reject: impl Fn(&'static str) -> Result<(), SsrfRejected>,
+    reject: &(impl Fn(&'static str) -> Result<(), SsrfRejected> + ?Sized),
 ) -> Result<(), SsrfRejected> {
     // Cloud-metadata is the highest-value target; name it explicitly.
     if v4 == Ipv4Addr::new(169, 254, 169, 254) {
@@ -153,12 +153,44 @@ fn check_v4(
     if v4.is_unspecified() {
         return reject("unspecified address (0.0.0.0)");
     }
+    let octs = v4.octets();
+    // 0.0.0.0/8 "this host / network" (Linux routes 0.0.0.0/8 to loopback)
+    if octs[0] == 0 {
+        return reject("0.0.0.0/8 address range");
+    }
+    // 100.64.0.0/10 Shared Address Space / CGNAT
+    if octs[0] == 100 && (octs[1] & 0xc0) == 64 {
+        return reject("RFC6598 Shared Address Space (100.64.0.0/10)");
+    }
+    // 198.18.0.0/15 Benchmarking
+    if octs[0] == 198 && (octs[1] & 0xfe) == 18 {
+        return reject("RFC2544 benchmarking address (198.18.0.0/15)");
+    }
+    // 192.0.0.0/24 IETF Protocol Assignments
+    if octs[0] == 192 && octs[1] == 0 && octs[2] == 0 {
+        return reject("RFC6890 IETF protocol assignment (192.0.0.0/24)");
+    }
+    // Documentation ranges: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+    if (octs[0] == 192 && octs[1] == 0 && octs[2] == 2)
+        || (octs[0] == 198 && octs[1] == 51 && octs[2] == 100)
+        || (octs[0] == 203 && octs[1] == 0 && octs[2] == 113)
+    {
+        return reject("documentation address range (TEST-NET)");
+    }
+    // Multicast 224.0.0.0/4
+    if v4.is_multicast() {
+        return reject("multicast address (224.0.0.0/4)");
+    }
+    // Reserved / future use 240.0.0.0/4 & Broadcast 255.255.255.255
+    if octs[0] >= 240 {
+        return reject("reserved/broadcast address (240.0.0.0/4)");
+    }
     Ok(())
 }
 
 fn check_v6(
     v6: Ipv6Addr,
-    reject: impl Fn(&'static str) -> Result<(), SsrfRejected>,
+    reject: &(impl Fn(&'static str) -> Result<(), SsrfRejected> + ?Sized),
 ) -> Result<(), SsrfRejected> {
     // AWS IPv6 metadata endpoint.
     if v6 == Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x254) {
@@ -170,11 +202,45 @@ fn check_v6(
     if v6.is_unspecified() {
         return reject("unspecified address (::)");
     }
+    if v6.is_multicast() {
+        return reject("multicast address (ff00::/8)");
+    }
     // An IPv4-mapped/compatible address must be judged by its v4 policy.
     if let Some(mapped) = v6.to_ipv4() {
         return check_v4(mapped, reject);
     }
-    let seg0 = v6.segments()[0];
+
+    let octs = v6.octets();
+    let segs = v6.segments();
+
+    // NAT64 Well-Known Prefix 64:ff9b::/96
+    if segs[0] == 0x0064
+        && segs[1] == 0xff9b
+        && segs[2] == 0
+        && segs[3] == 0
+        && segs[4] == 0
+        && segs[5] == 0
+    {
+        let embedded = Ipv4Addr::new(octs[12], octs[13], octs[14], octs[15]);
+        check_v4(embedded, reject)?;
+    }
+    // NAT64 64:ff9b:1::/48
+    if segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001 {
+        let embedded = Ipv4Addr::new(octs[12], octs[13], octs[14], octs[15]);
+        check_v4(embedded, reject)?;
+    }
+    // 6to4 2002::/16
+    if segs[0] == 0x2002 {
+        let embedded = Ipv4Addr::new(octs[2], octs[3], octs[4], octs[5]);
+        check_v4(embedded, reject)?;
+    }
+    // ISATAP (*:0000:5efe:a.b.c.d or *:0200:5efe:a.b.c.d)
+    if (segs[4] == 0x0000 || segs[4] == 0x0200) && segs[5] == 0x5efe {
+        let embedded = Ipv4Addr::new(octs[12], octs[13], octs[14], octs[15]);
+        check_v4(embedded, reject)?;
+    }
+
+    let seg0 = segs[0];
     // fe80::/10 link-local.
     if (seg0 & 0xffc0) == 0xfe80 {
         return reject("link-local address (fe80::/10)");
@@ -404,6 +470,40 @@ mod tests {
     fn ipv4_mapped_loopback_refused() {
         // ::ffff:127.0.0.1 must be judged by its v4 policy.
         assert!(ssrf_check_ip(ip("::ffff:127.0.0.1")).is_err());
+    }
+
+    #[test]
+    fn zero_network_and_cgnat_refused() {
+        assert!(ssrf_check_ip(ip("0.0.0.1")).is_err());
+        assert!(ssrf_check_ip(ip("100.64.0.1")).is_err());
+        assert!(ssrf_check_ip(ip("100.127.255.255")).is_err());
+    }
+
+    #[test]
+    fn benchmarking_and_doc_and_multicast_refused() {
+        assert!(ssrf_check_ip(ip("198.18.0.1")).is_err());
+        assert!(ssrf_check_ip(ip("192.0.0.1")).is_err());
+        assert!(ssrf_check_ip(ip("192.0.2.1")).is_err());
+        assert!(ssrf_check_ip(ip("198.51.100.1")).is_err());
+        assert!(ssrf_check_ip(ip("203.0.113.1")).is_err());
+        assert!(ssrf_check_ip(ip("224.0.0.1")).is_err());
+        assert!(ssrf_check_ip(ip("240.0.0.1")).is_err());
+        assert!(ssrf_check_ip(ip("255.255.255.255")).is_err());
+    }
+
+    #[test]
+    fn ipv6_transition_mechanisms_refused() {
+        // NAT64 64:ff9b::/96
+        assert!(ssrf_check_ip(ip("64:ff9b::127.0.0.1")).is_err());
+        assert!(ssrf_check_ip(ip("64:ff9b::169.254.169.254")).is_err());
+        // NAT64 64:ff9b:1::/48
+        assert!(ssrf_check_ip(ip("64:ff9b:1::10.0.0.1")).is_err());
+        // 6to4 2002::/16
+        assert!(ssrf_check_ip(ip("2002:7f00:1::")).is_err());
+        assert!(ssrf_check_ip(ip("2002:a9fe:a9fe::")).is_err());
+        // ISATAP
+        assert!(ssrf_check_ip(ip("fe80::200:5efe:127.0.0.1")).is_err());
+        assert!(ssrf_check_ip(ip("fe80::200:5efe:169.254.169.254")).is_err());
     }
 
     #[test]
