@@ -213,12 +213,18 @@ re-fetch + SSRF controls for web surfaces.
   differ from Claude's. The load-bearing guarantee is the per-surface posture
   and the SSRF guard, not byte-identical search results.
 - **SSRF guard scope.** The out-of-band fetcher resolves the hostname and
-  **denies** the request if any *resolved* IP is private (RFC1918), loopback,
-  link-local (`169.254.0.0/16`, `fe80::/10`), ULA (`fc00::/7`), or a
-  cloud-metadata address (`169.254.169.254`). It checks the resolved IP (not the
-  hostname) to defeat DNS rebinding and re-checks every redirect hop. It does
-  **not** defend against an attacker who controls a public IP, nor against
-  content served from an allowed public host.
+  **denies** the request if any *resolved* IP falls in a denied class: private
+  (RFC1918), loopback, the `0.0.0.0/8` "this network" range, shared address
+  space (CGNAT `100.64.0.0/10`), benchmarking (`198.18.0.0/15`), TEST-NET
+  documentation ranges, multicast, reserved (`240.0.0.0/4`), link-local
+  (`169.254.0.0/16`, `fe80::/10`), ULA (`fc00::/7`), or a cloud-metadata
+  address (`169.254.169.254`, `fd00:ec2::254`). IPv6 transition mechanisms are
+  judged by their embedded IPv4 policy, not by their outer shape: NAT64
+  (`64:ff9b::/96` and `64:ff9b:1::/48`), 6to4 (`2002::/16`), ISATAP, and
+  IPv4-mapped addresses are re-checked against the IPv4 rules above. It checks
+  the resolved IP (not the hostname) to defeat DNS rebinding and re-checks every
+  redirect hop. It does **not** defend against an attacker who controls a
+  public IP, nor against content served from an allowed public host.
 
 ### 5. Local audit log (`src/audit.rs`)
 

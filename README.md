@@ -369,7 +369,7 @@ The build asserts `FP == 0`, `FN == 0`, and `FN < naive FN` for every corpus —
 > ```
 > A non-zero exit means the binary is unsigned, tampered with, or not built by this repo's signing workflow — don't run it. The release workflow runs this same check over every target as an E2E gate (`gh attestation verify` with the wrong signer-workflow is rejected).
 
-**Known limitations.** Web re-fetch is a double-fetch (added latency); TOCTOU on web content; WebSearch is best-effort (the load-bearing guarantee is the per-surface posture + SSRF guard, not byte-identical results); the SSRF guard denies private/loopback/link-local/ULA/cloud-metadata _resolved_ IPs and re-checks every redirect hop; the sandbox is Linux-only and fails closed elsewhere. The full threat model lives in [SECURITY.md](SECURITY.md).
+**Known limitations.** Web re-fetch is a double-fetch (added latency); TOCTOU on web content; WebSearch is best-effort (the load-bearing guarantee is the per-surface posture + SSRF guard, not byte-identical results); the SSRF guard denies private/loopback/link-local/ULA/cloud-metadata/multicast/reserved *resolved* IPs **including IPv6 transition mechanisms judged by their embedded IPv4** (NAT64/6to4/ISATAP) and re-checks every redirect hop; the sandbox is Linux-only and fails closed elsewhere. The full threat model lives in [SECURITY.md](SECURITY.md).
 
 ---
 
