@@ -91,6 +91,7 @@ fn canary_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/tmp"));
     #[cfg(unix)]
     {
+        // SAFETY: getuid is a stateless, always-successful POSIX syscall wrapper with no pointers/preconditions.
         let uid = unsafe { libc::getuid() };
         base.join(format!("agentguard-{uid}"))
     }
@@ -146,6 +147,7 @@ fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
         use std::os::unix::fs::MetadataExt as _;
         use std::os::unix::fs::PermissionsExt as _;
 
+        // SAFETY: getuid is a stateless, always-successful POSIX syscall wrapper with no pointers/preconditions.
         let current_uid = unsafe { libc::getuid() };
 
         match std::fs::symlink_metadata(dir) {
@@ -319,6 +321,7 @@ mod tests {
     #[test]
     fn canary_dir_includes_uid() {
         let dir = canary_dir();
+        // SAFETY: getuid is a stateless, always-successful POSIX syscall wrapper with no pointers/preconditions.
         let uid = unsafe { libc::getuid() };
         let dir_str = dir.to_string_lossy();
         assert!(
@@ -339,6 +342,7 @@ mod tests {
         std::fs::create_dir_all(&test_base).unwrap();
 
         let real_dir = test_base.join("real_dir");
+        // SAFETY: getuid is a stateless, always-successful POSIX syscall wrapper with no pointers/preconditions.
         let uid = unsafe { libc::getuid() };
         let symlink_dir = test_base.join(format!("agentguard-{uid}"));
 
