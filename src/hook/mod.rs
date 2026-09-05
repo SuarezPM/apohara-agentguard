@@ -78,7 +78,7 @@ fn audit_decision(
 
     // Determine the audited event + surface + command text from the input.
     let (event, surface, command) = match (
-        input.hook_event_name.as_str(),
+        input.hook_event_name.as_ref(),
         input.tool_name.as_deref().unwrap_or(""),
     ) {
         ("PreToolUse", "Bash") => ("gate", None, input.bash_command().map(str::to_string)),

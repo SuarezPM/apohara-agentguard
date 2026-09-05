@@ -101,9 +101,9 @@ pub(crate) fn parse_subprocess_invocation(
     let raw: serde_json::Value = serde_json::from_str(payload)?;
     // Reuse the battle-tested hook-contract parsing for the fields it models
     // (snake_case canonical + camelCase aliases + extras ignored).
-    let parsed: crate::contract::HookInput = serde_json::from_value(raw.clone())?;
+    let parsed: crate::contract::HookInput<'_> = serde_json::from_str(payload)?;
 
-    let event = match parsed.hook_event_name.as_str() {
+    let event = match parsed.hook_event_name.as_ref() {
         "PreToolUse" => HookEvent::PreToolUse,
         "PostToolUse" => HookEvent::PostToolUse,
         "UserPromptSubmit" => HookEvent::UserPromptSubmit,
@@ -113,9 +113,13 @@ pub(crate) fn parse_subprocess_invocation(
             })
         }
     };
-    let raw_tool_name = parsed.tool_name.ok_or_else(|| AdapterError::Invalid {
-        reason: "`tool_name` missing: tool-use adapters require a tool call".to_string(),
-    })?;
+    let raw_tool_name =
+        parsed
+            .tool_name
+            .map(|s| s.into_owned())
+            .ok_or_else(|| AdapterError::Invalid {
+                reason: "`tool_name` missing: tool-use adapters require a tool call".to_string(),
+            })?;
 
     Ok(Invocation {
         host,
@@ -127,7 +131,7 @@ pub(crate) fn parse_subprocess_invocation(
             .get("cwd")
             .and_then(serde_json::Value::as_str)
             .map(std::path::PathBuf::from),
-        session_id: parsed.session_id,
+        session_id: parsed.session_id.map(|s| s.into_owned()),
         call_id: opt_str(&raw, "tool_use_id", "toolUseId").map(str::to_string),
         permission_mode: opt_str(&raw, "permission_mode", "permissionMode").map(str::to_string),
         source_payload: raw,

@@ -142,9 +142,9 @@ pub fn evaluate_tool_call(tool_name: &str, args: &Value, gates: &Gates) -> GateD
 
     // 1. Policy pass on a synthetic PreToolUse input.
     let input = HookInput {
-        hook_event_name: "PreToolUse".to_string(),
+        hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
         session_id: None,
-        tool_name: Some(tool_name.to_string()),
+        tool_name: Some(std::borrow::Cow::Owned(tool_name.to_string())),
         tool_input: args.clone(),
         prompt: None,
         tool_response: Value::Null,

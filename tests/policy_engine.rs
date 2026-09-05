@@ -139,11 +139,11 @@ fn ends_with_odd_backslash(line: &str) -> bool {
 }
 
 /// Wrap a `command` string as a PreToolUse Bash `HookInput`.
-fn pretooluse_bash(cmd: &str) -> HookInput {
+fn pretooluse_bash(cmd: &str) -> HookInput<'_> {
     HookInput {
-        hook_event_name: "PreToolUse".to_string(),
-        session_id: Some("bench".to_string()),
-        tool_name: Some("Bash".to_string()),
+        hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
+        session_id: Some(std::borrow::Cow::Borrowed("bench")),
+        tool_name: Some(std::borrow::Cow::Borrowed("Bash")),
         tool_input: json!({ "command": cmd }),
         prompt: None,
         tool_response: serde_json::Value::Null,
@@ -379,9 +379,9 @@ rules = [
 
     // A PreToolUse event naming the arbitrary tool hits its rule.
     let task_input = HookInput {
-        hook_event_name: "PreToolUse".to_string(),
-        session_id: Some("bench".to_string()),
-        tool_name: Some("Task".to_string()),
+        hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
+        session_id: Some(std::borrow::Cow::Borrowed("bench")),
+        tool_name: Some(std::borrow::Cow::Borrowed("Task")),
         tool_input: json!({ "prompt": "something danger here" }),
         prompt: None,
         tool_response: serde_json::Value::Null,
@@ -392,9 +392,9 @@ rules = [
 
     // And an MCP-style name fires the same way.
     let mcp_input = HookInput {
-        hook_event_name: "PreToolUse".to_string(),
-        session_id: Some("bench".to_string()),
-        tool_name: Some("mcp__github__create_issue".to_string()),
+        hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
+        session_id: Some(std::borrow::Cow::Borrowed("bench")),
+        tool_name: Some(std::borrow::Cow::Borrowed("mcp__github__create_issue")),
         tool_input: json!({ "command": "rm -rf /tmp/x" }),
         prompt: None,
         tool_response: serde_json::Value::Null,
