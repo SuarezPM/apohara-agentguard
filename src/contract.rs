@@ -61,27 +61,27 @@ const ELLIPSIS: &str = "…";
 /// Codex hooks docs: the documented release is snake_case; treat the camelCase
 /// aliases as defensive, not as a confirmed live Codex spelling.
 #[derive(Debug, Clone, Default, Deserialize)]
-pub struct HookInput {
+pub struct HookInput<'a> {
     /// The event that fired: `"PreToolUse"`, `"PostToolUse"`, `"UserPromptSubmit"`, …
-    #[serde(default, alias = "hookEventName")]
-    pub hook_event_name: String,
+    #[serde(default, borrow, alias = "hookEventName")]
+    pub hook_event_name: Cow<'a, str>,
     /// The Claude Code / Codex session identifier. Used to key the per-session
     /// canary token (US-Bemit / US-Bscan). Absent on some events / older schemas.
-    #[serde(default, alias = "sessionId")]
-    pub session_id: Option<String>,
+    #[serde(default, borrow, alias = "sessionId")]
+    pub session_id: Option<Cow<'a, str>>,
     /// Tool name for tool-use events (e.g. `"Bash"`, `"Read"`). Absent for
     /// `UserPromptSubmit`. Codex's canonical Bash name is also `"Bash"`; its file
     /// edits report `"apply_patch"` (out of scope for the dispatch table today).
-    #[serde(default, alias = "toolName")]
-    pub tool_name: Option<String>,
+    #[serde(default, borrow, alias = "toolName")]
+    pub tool_name: Option<Cow<'a, str>>,
     /// Raw tool input payload (e.g. `{ "command": "npm test" }` or
     /// `{ "file_path": "…" }`). Kept as an opaque value and read per-tool. Codex's
     /// Bash/`apply_patch` inputs also nest the command under `tool_input.command`.
     #[serde(default, alias = "toolInput")]
     pub tool_input: serde_json::Value,
     /// The submitted text for `UserPromptSubmit`.
-    #[serde(default)]
-    pub prompt: Option<String>,
+    #[serde(default, borrow)]
+    pub prompt: Option<Cow<'a, str>>,
     /// The tool's result for `PostToolUse` (Claude Code and Codex spell it
     /// `tool_response`; `tool_output` / `toolResponse` are accepted as aliases for
     /// forward/back compat across harnesses).
@@ -89,7 +89,7 @@ pub struct HookInput {
     pub tool_response: serde_json::Value,
 }
 
-impl HookInput {
+impl HookInput<'_> {
     /// Extract the Bash command from `tool_input.command`, if present.
     pub fn bash_command(&self) -> Option<&str> {
         self.tool_input.get("command").and_then(|v| v.as_str())
