@@ -39,6 +39,36 @@ pub(crate) fn split_compound_with_separators<'a>(
     command: &'a str,
     extra_seps: &[char],
 ) -> Vec<Cow<'a, str>> {
+    // PERF: Fast-path probe for compound separators, quotes, and substitutions.
+    // If none exist, single non-compound commands return a 1-element slice
+    // directly without executing the character state machine loop.
+    if extra_seps.is_empty()
+        && !command.bytes().any(|b| {
+            matches!(
+                b,
+                b'&' | b'|'
+                    | b';'
+                    | b'\n'
+                    | b'$'
+                    | b'`'
+                    | b'<'
+                    | b'>'
+                    | b'\\'
+                    | b'"'
+                    | b'\''
+                    | b'('
+                    | b')'
+            )
+        })
+    {
+        let trimmed = command.trim();
+        return if trimmed.is_empty() {
+            Vec::new()
+        } else {
+            vec![Cow::Borrowed(trimmed)]
+        };
+    }
+
     let bytes = command.as_bytes();
     let mut result: Vec<Cow<'a, str>> = Vec::new();
     let mut leg_start = 0usize;
