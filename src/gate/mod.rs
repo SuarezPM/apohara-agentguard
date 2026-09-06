@@ -541,6 +541,22 @@ mod tests {
     fn var_alias_bypass_blocks() {
         let v = evaluate("x=rm; $x -rf ~", &Config::default());
         assert_eq!(v.tier, Tier::Block);
+
+        // Security regression: export/local/declare/readonly, substitution, and quote-concat bypasses
+        let bypasses = [
+            "export x=rm; $x -rf ~",
+            "local x=rm; $x -rf ~",
+            "declare x=rm; $x -rf ~",
+            "readonly x=rm; $x -rf ~",
+            "x=$(echo rm); $x -rf ~",
+            "x=\"$(echo rm)\"; $x -rf ~",
+            "x=`echo rm`; $x -rf ~",
+            "x=\"r\"\"m\"; $x -rf ~",
+        ];
+        for cmd in bypasses {
+            let res = evaluate(cmd, &Config::default());
+            assert_eq!(res.tier, Tier::Block, "expected Block for bypass: `{cmd}`");
+        }
     }
 
     #[test]

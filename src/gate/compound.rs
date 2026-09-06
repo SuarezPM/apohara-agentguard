@@ -71,30 +71,51 @@ pub(crate) fn split_compound_with_separators<'a>(
         if !in_double && !in_single {
             // `$(...)` command substitution (depth-tracked for nesting).
             if c == b'$' && next == Some(b'(') {
-                push_leg_slice(command, leg_start, i, &mut result);
-                let (inner, advanced) = extract_paren_body(bytes, i + 2);
-                i = advanced;
-                leg_start = i;
-                result.extend(split_compound(inner));
-                continue;
+                if is_assignment_prefix(&command[leg_start..i]) {
+                    let (inner, advanced) = extract_paren_body(bytes, i + 2);
+                    result.extend(split_compound(inner));
+                    i = advanced;
+                    continue;
+                } else {
+                    push_leg_slice(command, leg_start, i, &mut result);
+                    let (inner, advanced) = extract_paren_body(bytes, i + 2);
+                    i = advanced;
+                    leg_start = i;
+                    result.extend(split_compound(inner));
+                    continue;
+                }
             }
             // Backtick command substitution.
             if c == b'`' {
-                push_leg_slice(command, leg_start, i, &mut result);
-                let (inner, advanced) = extract_backtick_body(bytes, i + 1);
-                i = advanced;
-                leg_start = i;
-                result.extend(split_compound(inner));
-                continue;
+                if is_assignment_prefix(&command[leg_start..i]) {
+                    let (inner, advanced) = extract_backtick_body(bytes, i + 1);
+                    result.extend(split_compound(inner));
+                    i = advanced;
+                    continue;
+                } else {
+                    push_leg_slice(command, leg_start, i, &mut result);
+                    let (inner, advanced) = extract_backtick_body(bytes, i + 1);
+                    i = advanced;
+                    leg_start = i;
+                    result.extend(split_compound(inner));
+                    continue;
+                }
             }
             // `<(...)` / `>(...)` process substitution.
             if (c == b'<' || c == b'>') && next == Some(b'(') {
-                push_leg_slice(command, leg_start, i, &mut result);
-                let (inner, advanced) = extract_paren_body(bytes, i + 2);
-                i = advanced;
-                leg_start = i;
-                result.extend(split_compound(inner));
-                continue;
+                if is_assignment_prefix(&command[leg_start..i]) {
+                    let (inner, advanced) = extract_paren_body(bytes, i + 2);
+                    result.extend(split_compound(inner));
+                    i = advanced;
+                    continue;
+                } else {
+                    push_leg_slice(command, leg_start, i, &mut result);
+                    let (inner, advanced) = extract_paren_body(bytes, i + 2);
+                    i = advanced;
+                    leg_start = i;
+                    result.extend(split_compound(inner));
+                    continue;
+                }
             }
             // `&&` / `||`.
             if (c == b'&' && next == Some(b'&')) || (c == b'|' && next == Some(b'|')) {
@@ -209,6 +230,35 @@ pub(crate) fn extract_double_quoted_substitutions<'a>(leg: &'a str) -> Vec<&'a s
 /// Cap on how many double-quoted substitution bodies a single leg may surface,
 /// consistent with the normalize/decode bounds (no unbounded fan-out).
 pub(crate) const MAX_SUBST_BODIES: usize = 64;
+
+fn is_assignment_prefix(prefix: &str) -> bool {
+    let trimmed = prefix.trim();
+    let mut rest = trimmed;
+    for kw in &["export", "local", "declare", "readonly"] {
+        if let Some(after) = rest.strip_prefix(kw) {
+            if after.starts_with(char::is_whitespace) {
+                rest = after.trim_start();
+                break;
+            }
+        }
+    }
+    if let Some(eq) = rest.find('=') {
+        if eq == rest.len() - 1 {
+            let name = &rest[..eq];
+            return !name.is_empty() && is_valid_var_name(name);
+        }
+    }
+    false
+}
+
+fn is_valid_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 /// Trim and push `command[start..end]` slice as a borrowed leg if non-empty.
 fn push_leg_slice<'a>(command: &'a str, start: usize, end: usize, result: &mut Vec<Cow<'a, str>>) {
