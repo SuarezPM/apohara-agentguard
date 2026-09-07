@@ -40,7 +40,7 @@ pub(crate) fn split_compound_with_separators<'a>(
     extra_seps: &[char],
 ) -> Vec<Cow<'a, str>> {
     let bytes = command.as_bytes();
-    let mut result: Vec<Cow<'a, str>> = Vec::new();
+    let mut result: Vec<Cow<'a, str>> = Vec::with_capacity(2);
     let mut leg_start = 0usize;
     let mut i = 0usize;
     let mut in_double = false;

@@ -355,9 +355,9 @@ fn run_ask(args: CheckArgs, cli_policy: Option<&std::path::Path>) -> ExitCode {
         match apohara_agentguard::policy::engine::PolicySet::load(config.policy.file.as_deref()) {
             Ok(set) => set.evaluate(
                 &apohara_agentguard::contract::HookInput {
-                    hook_event_name: "PreToolUse".to_string(),
+                    hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
                     session_id: None,
-                    tool_name: Some("Bash".to_string()),
+                    tool_name: Some(std::borrow::Cow::Borrowed("Bash")),
                     tool_input: serde_json::json!({ "command": &args.command }),
                     prompt: None,
                     tool_response: serde_json::Value::Null,
@@ -810,9 +810,9 @@ mod tests {
         let gate_v = apohara_agentguard::gate::evaluate(cmd, &cfg);
         let policy_v = apohara_agentguard::policy::engine::PolicySet::default().evaluate(
             &apohara_agentguard::contract::HookInput {
-                hook_event_name: "PreToolUse".to_string(),
+                hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
                 session_id: None,
-                tool_name: Some("Bash".to_string()),
+                tool_name: Some(std::borrow::Cow::Borrowed("Bash")),
                 tool_input: serde_json::json!({ "command": cmd }),
                 prompt: None,
                 tool_response: serde_json::Value::Null,
@@ -910,9 +910,9 @@ max_invocations = 1
         let set = apohara_agentguard::policy::engine::PolicySet::load(cfg.policy.file.as_deref())
             .unwrap();
         let make_input = || apohara_agentguard::contract::HookInput {
-            hook_event_name: "PreToolUse".to_string(),
-            session_id: Some("ask-test".to_string()),
-            tool_name: Some("Bash".to_string()),
+            hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
+            session_id: Some(std::borrow::Cow::Borrowed("ask-test")),
+            tool_name: Some(std::borrow::Cow::Borrowed("Bash")),
             tool_input: serde_json::json!({ "command": "ls" }),
             prompt: None,
             tool_response: serde_json::Value::Null,

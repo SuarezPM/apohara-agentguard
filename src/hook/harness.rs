@@ -34,6 +34,8 @@
 //! unknown keys ignored) so additive host changes degrade to fail-open rather
 //! than to errors.
 
+use std::borrow::Cow;
+
 use serde_json::{json, Value};
 
 use crate::adapters::capabilities::{capabilities_for, degrade};
@@ -91,7 +93,7 @@ impl Harness {
 
     /// Normalize this harness's raw stdin JSON into the internal
     /// [`HookInput`]. `None` ⇒ fail open (no output, exit 0).
-    pub fn parse(self, raw: &str) -> Option<HookInput> {
+    pub fn parse(self, raw: &str) -> Option<HookInput<'_>> {
         match self {
             // Claude/Codex payloads ARE the canonical envelope; the tolerant
             // serde contract already handles them (and their aliases/extras).
@@ -202,15 +204,15 @@ pub fn run(harness: Harness, stdin_json: &str, config: &Config) -> Emission {
 ///   `command` the call maps to a Bash-equivalent (gate applies); otherwise
 ///   the raw tool name is preserved so the dispatcher fails open (allow).
 /// - Anything else (unknown event, missing fields) ⇒ `None` ⇒ fail open.
-fn parse_windsurf(raw: &str) -> Option<HookInput> {
+fn parse_windsurf(raw: &str) -> Option<HookInput<'_>> {
     let v: Value = serde_json::from_str(raw).ok()?;
     match v.get("hook_event_name").and_then(Value::as_str)? {
         "pre_run_command" => {
             let cmd = v.get("command").and_then(Value::as_str)?;
             Some(HookInput {
-                hook_event_name: "PreToolUse".to_string(),
-                session_id: opt_session(&v),
-                tool_name: Some("Bash".to_string()),
+                hook_event_name: Cow::Borrowed("PreToolUse"),
+                session_id: opt_session(&v).map(Cow::Owned),
+                tool_name: Some(Cow::Borrowed("Bash")),
                 tool_input: json!({ "command": cmd }),
                 ..HookInput::default()
             })
@@ -232,7 +234,7 @@ fn parse_windsurf(raw: &str) -> Option<HookInput> {
 ///   the Windsurf MCP event (a string `args.command` upgrades the call to a
 ///   Bash-equivalent; anything else fails open under the raw tool name).
 /// - Both event kinds may carry extra host fields — ignored by construction.
-fn parse_cursor(raw: &str) -> Option<HookInput> {
+fn parse_cursor(raw: &str) -> Option<HookInput<'_>> {
     let v: Value = serde_json::from_str(raw).ok()?;
     // The documented payloads carry no event-name field, so dispatching is
     // BY SHAPE — but if an event name IS present and unknown, fail open
@@ -245,9 +247,9 @@ fn parse_cursor(raw: &str) -> Option<HookInput> {
     }
     if let Some(cmd) = v.get("command").and_then(Value::as_str) {
         return Some(HookInput {
-            hook_event_name: "PreToolUse".to_string(),
-            session_id: opt_session(&v),
-            tool_name: Some("Bash".to_string()),
+            hook_event_name: Cow::Borrowed("PreToolUse"),
+            session_id: opt_session(&v).map(Cow::Owned),
+            tool_name: Some(Cow::Borrowed("Bash")),
             tool_input: json!({ "command": cmd }),
             ..HookInput::default()
         });
@@ -261,15 +263,15 @@ fn parse_cursor(raw: &str) -> Option<HookInput> {
 /// `beforeMCPExecution`): a string `command` inside the args object makes the
 /// call Bash-like (gated); any other shape keeps the RAW tool name so the
 /// dispatcher's `_` arm fails open.
-fn mcp_like_input(carrier: &Value, tool: &str, args: Value) -> HookInput {
+fn mcp_like_input(carrier: &Value, tool: &str, args: Value) -> HookInput<'static> {
     let bash_like = args.get("command").and_then(Value::as_str).is_some();
     HookInput {
-        hook_event_name: "PreToolUse".to_string(),
-        session_id: opt_session(carrier),
+        hook_event_name: Cow::Borrowed("PreToolUse"),
+        session_id: opt_session(carrier).map(Cow::Owned),
         tool_name: Some(if bash_like {
-            "Bash".to_string()
+            Cow::Borrowed("Bash")
         } else {
-            tool.to_string()
+            Cow::Owned(tool.to_string())
         }),
         tool_input: args,
         ..HookInput::default()

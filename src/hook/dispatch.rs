@@ -107,9 +107,9 @@ pub fn run_with_source(
 /// anti-self-disarm note in [`run_with_source`]). An absent var means nothing is
 /// disabled via the env.
 fn read_env_disable() -> EnvDisable {
-    match std::env::var("AGENTGUARD_DISABLE") {
-        Ok(v) => EnvDisable::parse(&v),
-        Err(_) => EnvDisable::default(),
+    match std::env::var_os("AGENTGUARD_DISABLE") {
+        Some(v) => EnvDisable::parse(&v.to_string_lossy()),
+        None => EnvDisable::default(),
     }
 }
 
@@ -163,7 +163,7 @@ fn dispatch(
     src: &dyn ContentSource,
     env_disabled: &EnvDisable,
 ) -> (Verdict, Option<String>) {
-    match input.hook_event_name.as_str() {
+    match input.hook_event_name.as_ref() {
         "PreToolUse" => dispatch_pretooluse(input, config, src, env_disabled),
 
         // PostToolUse + Bash: scan captured stdout, WARN-only (cannot block).

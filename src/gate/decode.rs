@@ -32,6 +32,9 @@ pub(crate) fn decode_and_expand(leg: &str, depth: u8) -> Option<String> {
     if depth >= MAX_DECODE_DEPTH {
         return None;
     }
+    if !leg.contains("base64") {
+        return None;
+    }
     if !has_base64_decode_stage(leg) {
         return None;
     }
