@@ -523,7 +523,7 @@ fn build_sanitized_env(tmpdir: &Path) -> Vec<CString> {
             continue; // overridden to the in-workspace tmp below
         }
         let allowed = ALLOW.contains(&key);
-        if !allowed && is_secret_env_name(key) {
+        if !allowed || is_secret_env_name(key) {
             continue;
         }
         if let Ok(c) = CString::new(format!("{key}={val}")) {
@@ -694,3 +694,77 @@ fn nix_err<E: std::fmt::Display>(e: E) -> SandboxError {
 // `tests/sandbox_seccomp.rs::unlisted_syscall_returns_eperm`: if
 // the seccomp install is a no-op, the unlisted syscall succeeds
 // and the test fails. This is the documented assertion.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitized_env_filters_unallowlisted_and_secret_vars() {
+        let tmp_path = Path::new("/workspace/.agentguard-tmp");
+        let env_vars = build_sanitized_env(tmp_path);
+
+        let keys: Vec<String> = env_vars
+            .iter()
+            .map(|cs| {
+                let s = cs.to_str().unwrap();
+                s.split_once('=').unwrap().0.to_string()
+            })
+            .collect();
+
+        // TMPDIR must always be set to the provided tmpdir path
+        assert!(keys.contains(&"TMPDIR".to_string()));
+        let tmp_entry = env_vars
+            .iter()
+            .find(|cs| cs.to_str().unwrap().starts_with("TMPDIR="))
+            .map(|cs| cs.to_str().unwrap())
+            .unwrap();
+        assert_eq!(tmp_entry, "TMPDIR=/workspace/.agentguard-tmp");
+
+        // Unallowlisted / dangerous variables must be excluded
+        assert!(!keys.contains(&"LD_PRELOAD".to_string()));
+        assert!(!keys.contains(&"LD_LIBRARY_PATH".to_string()));
+        assert!(!keys.contains(&"NODE_OPTIONS".to_string()));
+        assert!(!keys.contains(&"PYTHONPATH".to_string()));
+        assert!(!keys.contains(&"CUSTOM_UNCLASSIFIED_SECRET".to_string()));
+
+        // Allowlisted variables (if present in host env) are preserved
+        for key in &keys {
+            if key == "TMPDIR" {
+                continue;
+            }
+            assert!(
+                [
+                    "PATH",
+                    "HOME",
+                    "USER",
+                    "LOGNAME",
+                    "SHELL",
+                    "TERM",
+                    "LANG",
+                    "LC_ALL",
+                    "PWD",
+                    "TZ",
+                    "RUSTUP_HOME",
+                    "CARGO_HOME",
+                    "GOROOT",
+                    "GOPATH",
+                    "GOMODCACHE",
+                    "GOCACHE",
+                ]
+                .contains(&key.as_str()),
+                "unexpected env var in sanitized env: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn secret_env_name_classifier() {
+        assert!(is_secret_env_name("MY_API_KEY"));
+        assert!(is_secret_env_name("OPENAI_MODEL_ID"));
+        assert!(is_secret_env_name("GITHUB_TOKEN"));
+        assert!(is_secret_env_name("DATABASE_URL"));
+        assert!(!is_secret_env_name("PATH"));
+        assert!(!is_secret_env_name("CARGO_HOME"));
+    }
+}
