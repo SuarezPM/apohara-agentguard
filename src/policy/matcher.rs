@@ -95,3 +95,18 @@ mod tests {
         assert!(!pattern_matches("*", ""));
     }
 }
+
+#[cfg(test)]
+mod mutation_budget_kills {
+    use super::*;
+
+    #[test]
+    fn multi_star_pattern_walk_is_order_enforced() {
+        assert!(pattern_matches("a*b*c", "axbycz"));
+        assert!(pattern_matches("*foo*", "xxfooyy"));
+        assert!(pattern_matches("prefix*", "prefix-tail"));
+        // A cursor that does not advance in order must NOT match: the parts
+        // appear in the wrong sequence.
+        assert!(!pattern_matches("a*b*c", "acb"));
+    }
+}

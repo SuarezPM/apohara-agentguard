@@ -61,7 +61,7 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 }
 
 fn m_rm_rf(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "rm") {
+    if !s.contains('-') || !contains_ignore_ascii_case(s, "rm") {
         return false;
     }
     // rm with a recursive+force combination, in either order, including
@@ -87,7 +87,7 @@ fn m_find_exec_rm(s: &str) -> bool {
 }
 
 fn m_dd(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "dd") {
+    if !contains_ignore_ascii_case(s, "dd") || !contains_ignore_ascii_case(s, "if=") {
         return false;
     }
     re!(s, r"(?i)\bdd\b[^|;&\n]*\sif=")
@@ -113,7 +113,7 @@ fn m_chmod_777(s: &str) -> bool {
 }
 
 fn m_chmod_recursive(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "chmod") {
+    if !s.contains('-') || !contains_ignore_ascii_case(s, "chmod") {
         return false;
     }
     // Short-bundle `-R` (e.g. `-R`, `-rR`, combined `-vR`) or the GNU long
@@ -122,7 +122,7 @@ fn m_chmod_recursive(s: &str) -> bool {
 }
 
 fn m_chown_recursive_root(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "chown") {
+    if !s.contains('/') || !s.contains('-') || !contains_ignore_ascii_case(s, "chown") {
         return false;
     }
     // chown -R … targeting / (root) is far more dangerous than a local dir.
@@ -162,7 +162,13 @@ fn fork_bomb_slots_same(compact: &str) -> bool {
         if x.is_empty() {
             continue;
         }
-        if compact[p + 3..].starts_with(&format!("{x}|{x}&}};{x}")) {
+        let rest = &compact[p + 3..];
+        if rest.starts_with(x)
+            && rest[x.len()..].starts_with('|')
+            && rest[x.len() + 1..].starts_with(x)
+            && rest[x.len() * 2 + 1..].starts_with("&};")
+            && rest[x.len() * 2 + 4..].starts_with(x)
+        {
             return true;
         }
     }
@@ -170,7 +176,7 @@ fn fork_bomb_slots_same(compact: &str) -> bool {
 }
 
 fn m_chmod_recursive_777_root(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "chmod") {
+    if !s.contains('/') || !s.contains('-') || !contains_ignore_ascii_case(s, "chmod") {
         return false;
     }
     // Recursive chmod 777 targeting `/` is catastrophic (unlike a local file).
@@ -714,5 +720,50 @@ mod tests {
             live_substitution_bodies(r#"echo "$(rm -rf ~)" "$(find . -delete)""#),
             vec!["rm -rf ~".to_string(), "find . -delete".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod mutation_budget_kills {
+    use super::*;
+
+    #[test]
+    fn shell_interpreter_table() {
+        for head in [
+            "sh", "bash", "zsh", "dash", "ksh", "fish", "eval", "python", "python3", "perl",
+            "ruby", "node",
+        ] {
+            assert!(
+                is_shell_interpreter(head),
+                "{head} must be a shell interpreter"
+            );
+        }
+        for head in ["shx", "perlish", "nodejs", "curl", "echo", ""] {
+            assert!(
+                !is_shell_interpreter(head),
+                "{head} must NOT be a shell interpreter"
+            );
+        }
+    }
+
+    #[test]
+    fn single_pipe_fetch_to_shell_is_caught() {
+        assert!(fetch_pipe_to_shell("curl -fsSL http://x | sh").is_some());
+        assert!(fetch_pipe_to_shell("wget http://x | bash").is_some());
+    }
+
+    #[test]
+    fn shell_stage_before_fetch_is_not_a_fetch_pipe() {
+        assert!(fetch_pipe_to_shell("sh -c 'x' | curl http://y").is_none());
+    }
+
+    #[test]
+    fn strip_quoted_spans_keeps_delimiters_drops_bodies() {
+        assert_eq!(strip_quoted_spans("a \"bc\" d"), "a \"\" d");
+        assert_eq!(strip_quoted_spans("'ab'"), "''");
+        assert_eq!(strip_quoted_spans("a 'b' \"c\" d"), "a '' \"\" d");
+        assert_eq!(strip_quoted_spans("plain"), "plain");
+        // Unclosed quote: the opening delimiter survives, nothing else follows.
+        assert_eq!(strip_quoted_spans("a \"bc"), "a \"");
     }
 }
