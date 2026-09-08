@@ -21,7 +21,7 @@ pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Cow<'a, [Cow<
         return Cow::Borrowed(legs);
     }
 
-    let mut vars: HashMap<&str, &str> = HashMap::new();
+    let mut vars: HashMap<&str, String> = HashMap::new();
     let mut out: Vec<Cow<'a, str>> = Vec::with_capacity(legs.len());
 
     for leg in legs {
@@ -33,7 +33,7 @@ pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Cow<'a, [Cow<
         // parse the binding from the ORIGINAL leg text (an assignment value is
         // usually a literal, not a reference).
         if let Some((name, value)) = parse_assignment(leg) {
-            vars.insert(name, value);
+            vars.insert(name, value.into_owned());
         }
 
         out.push(expanded);
@@ -42,20 +42,96 @@ pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Cow<'a, [Cow<
     Cow::Owned(out)
 }
 
-/// Parse a leading `VAR=value` assignment. Returns `None` if `leg` is not a
-/// single assignment token (i.e. there is a space before any `=`, meaning it is
-/// a command with arguments rather than an assignment).
-fn parse_assignment(leg: &str) -> Option<(&str, &str)> {
-    let eq = leg.find('=')?;
-    let name = &leg[..eq];
+/// Parse a leading `VAR=value` assignment, handling optional declaration keywords
+/// (`export`, `local`, `declare`, `readonly`), stripping surrounding quotes and quote
+/// concatenations, and unwrapping command/process substitution bodies (`$(echo rm)` -> `echo rm`).
+///
+/// Returns `None` if `leg` is not a single assignment token or valid assignment expression.
+fn parse_assignment(leg: &str) -> Option<(&str, Cow<'_, str>)> {
+    let trimmed = leg.trim();
+    let mut rest = trimmed;
+
+    // Strip declaration keyword prefixes if present.
+    for kw in &["export", "local", "declare", "readonly"] {
+        if let Some(after) = rest.strip_prefix(kw) {
+            if after.starts_with(char::is_whitespace) {
+                rest = after.trim_start();
+                break;
+            }
+        }
+    }
+
+    let eq = rest.find('=')?;
+    let name = &rest[..eq];
     if name.is_empty() || !is_valid_var_name(name) {
         return None;
     }
-    // A real assignment leg has no whitespace before `=` (we already checked the
-    // name is a valid identifier, which forbids spaces). Strip surrounding
-    // quotes from the value so `x="rm"` binds `rm`.
-    let value = strip_quotes_borrowed(&leg[eq + 1..]);
-    Some((name, value))
+
+    let val_raw = rest[eq + 1..].trim();
+    let val_unwrapped = unwrap_substitution(val_raw);
+    let val_clean = strip_quotes_and_concat(val_unwrapped);
+
+    Some((name, val_clean))
+}
+
+/// Unwrap substitution envelopes (`$(cmd)`, `` `cmd` ``, `<(cmd)`, `>(cmd)`) to expose inner command text.
+/// If the inner command is a simple output emitter like `echo text` or `printf text`, extract `text` as the evaluated value.
+fn unwrap_substitution(val: &str) -> &str {
+    let mut s = val.trim();
+    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
+    {
+        s = s[1..s.len() - 1].trim();
+    }
+
+    if s.starts_with("$(") && s.ends_with(')') && s.len() >= 3 {
+        s = s[2..s.len() - 1].trim();
+    } else if s.starts_with('`') && s.ends_with('`') && s.len() >= 2 {
+        s = s[1..s.len() - 1].trim();
+    } else if (s.starts_with("<(") || s.starts_with(">(")) && s.ends_with(')') && s.len() >= 3 {
+        s = s[2..s.len() - 1].trim();
+    }
+
+    if let Some(rest) = s.strip_prefix("echo ") {
+        return rest.trim();
+    }
+    if let Some(rest) = s.strip_prefix("printf ") {
+        return rest.trim();
+    }
+
+    s
+}
+
+/// Remove quotes and normalize quote-concatenated tokens (e.g. `"r""m"` -> `"rm"`, `'r''m'` -> `'rm'`).
+fn strip_quotes_and_concat(s: &str) -> Cow<'_, str> {
+    if !s.contains('"') && !s.contains('\'') {
+        return Cow::Borrowed(s);
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(c) = chars.next() {
+        if c == '\\' && !in_single {
+            if let Some(next) = chars.next() {
+                out.push(next);
+                continue;
+            }
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            continue;
+        }
+        out.push(c);
+    }
+
+    Cow::Owned(out)
 }
 
 /// A valid shell variable name: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -68,21 +144,9 @@ fn is_valid_var_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Remove one layer of matching single or double quotes around `s`.
-fn strip_quotes_borrowed(s: &str) -> &str {
-    let bytes = s.as_bytes();
-    if bytes.len() >= 2
-        && ((bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"')
-            || (bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\''))
-    {
-        return &s[1..s.len() - 1];
-    }
-    s
-}
-
 /// Substitute `$VAR` and `${VAR}` references in `text` using `vars`. Unknown
 /// references are left intact. A `$$` is treated literally (no expansion).
-fn expand_vars<'a>(text: &'a Cow<'a, str>, vars: &HashMap<&str, &str>) -> Cow<'a, str> {
+fn expand_vars<'a>(text: &'a Cow<'a, str>, vars: &HashMap<&str, String>) -> Cow<'a, str> {
     if !text.contains('$') {
         return text.clone();
     }
@@ -203,5 +267,57 @@ mod tests {
         let input = legs(&["x=rm"]);
         let out = resolve_assignments(&input);
         assert_eq!(out, vec!["x=rm"]);
+    }
+
+    #[test]
+    fn resolves_export_and_declaration_keywords() {
+        let input = legs(&["export x=rm", "$x -rf ~"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "rm -rf ~");
+
+        let input2 = legs(&["local y=rm", "$y -rf ~"]);
+        let out2 = resolve_assignments(&input2);
+        assert_eq!(out2[1], "rm -rf ~");
+
+        let input3 = legs(&["declare z=rm", "$z -rf ~"]);
+        let out3 = resolve_assignments(&input3);
+        assert_eq!(out3[1], "rm -rf ~");
+
+        let input4 = legs(&["readonly w=rm", "$w -rf ~"]);
+        let out4 = resolve_assignments(&input4);
+        assert_eq!(out4[1], "rm -rf ~");
+    }
+
+    #[test]
+    fn resolves_command_and_process_substitutions() {
+        let input = legs(&["cmd=$(echo rm)", "$cmd -rf ~"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "rm -rf ~");
+
+        let input2 = legs(&["cmd=`echo rm`", "$cmd -rf ~"]);
+        let out2 = resolve_assignments(&input2);
+        assert_eq!(out2[1], "rm -rf ~");
+
+        let input3 = legs(&["cmd=<(echo rm)", "$cmd -rf ~"]);
+        let out3 = resolve_assignments(&input3);
+        assert_eq!(out3[1], "rm -rf ~");
+    }
+
+    #[test]
+    fn resolves_quoted_and_concatenated_assignments() {
+        let input = legs(&["cmd=\"r\"\"m\"", "$cmd -rf ~"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "rm -rf ~");
+
+        let input2 = legs(&["cmd='r''m'", "$cmd -rf ~"]);
+        let out2 = resolve_assignments(&input2);
+        assert_eq!(out2[1], "rm -rf ~");
+    }
+
+    #[test]
+    fn resolves_utf8_multibyte_assignments() {
+        let input = legs(&["path=\"/tmp/Âñçöðê\"", "cat $path"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "cat /tmp/Âñçöðê");
     }
 }
