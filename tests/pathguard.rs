@@ -47,12 +47,31 @@ fn read_secret_blocks() {
         check_path("Read", "config/.env.local", false).tier,
         Tier::Block
     );
+    assert_eq!(check_path("Read", ".envrc", false).tier, Tier::Block);
+    assert_eq!(
+        check_path("Read", "config/.env_local", false).tier,
+        Tier::Block
+    );
+    assert_eq!(
+        check_path("Read", "proj/.env-production", false).tier,
+        Tier::Block
+    );
     assert_eq!(check_path("Read", "server.pem", false).tier, Tier::Block);
     assert_eq!(check_path("Read", "id_rsa", false).tier, Tier::Block);
     assert_eq!(
         check_path("Read", "aws_credentials", false).tier,
         Tier::Block
     );
+    if !cfg!(windows) {
+        assert_eq!(
+            check_path("Read", "/private/etc/passwd", false).tier,
+            Tier::Block
+        );
+        assert_eq!(
+            check_path("Read", "/private/etc/sudoers", false).tier,
+            Tier::Block
+        );
+    }
 }
 
 #[test]
