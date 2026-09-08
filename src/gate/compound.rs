@@ -39,8 +39,21 @@ pub(crate) fn split_compound_with_separators<'a>(
     command: &'a str,
     extra_seps: &[char],
 ) -> Vec<Cow<'a, str>> {
+    let mut result: Vec<Cow<'a, str>> = Vec::with_capacity(1);
+
+    if extra_seps.is_empty()
+        && !command.contains([
+            ';', '|', '&', '\n', '$', '`', '<', '>', '(', ')', '"', '\'', '\\',
+        ])
+    {
+        let trimmed = command.trim();
+        if !trimmed.is_empty() {
+            result.push(Cow::Borrowed(trimmed));
+        }
+        return result;
+    }
+
     let bytes = command.as_bytes();
-    let mut result: Vec<Cow<'a, str>> = Vec::new();
     let mut leg_start = 0usize;
     let mut i = 0usize;
     let mut in_double = false;

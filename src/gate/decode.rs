@@ -45,6 +45,9 @@ pub(crate) fn decode_and_expand(leg: &str, depth: u8) -> Option<String> {
 
 /// True iff `leg` pipes into a `base64 -d` / `base64 --decode` stage.
 fn has_base64_decode_stage(leg: &str) -> bool {
+    if !leg.contains("base64") {
+        return false;
+    }
     leg.split('|').any(|stage| {
         let s = stage.trim();
         let mut tokens = s.split_whitespace();

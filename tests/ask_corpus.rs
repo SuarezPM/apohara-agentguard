@@ -142,15 +142,15 @@ fn ends_with_odd_backslash(line: &str) -> bool {
 ///     convention from the Story 2 policy_engine benchmark
 ///     (the corpus is "what a user would type at the
 ///     Claude Code prompt", which IS a Bash command).
-fn parse_input(line: &str) -> HookInput {
+fn parse_input(line: &str) -> HookInput<'_> {
     let line = line.trim();
     if let Some(rest) = line.strip_prefix("UserPromptSubmit ") {
         return HookInput {
-            hook_event_name: "UserPromptSubmit".to_string(),
-            session_id: Some("ask-corpus".to_string()),
+            hook_event_name: std::borrow::Cow::Borrowed("UserPromptSubmit"),
+            session_id: Some(std::borrow::Cow::Borrowed("ask-corpus")),
             tool_name: None,
             tool_input: json!({ "prompt": rest }),
-            prompt: Some(rest.to_string()),
+            prompt: Some(std::borrow::Cow::Owned(rest.to_string())),
             tool_response: serde_json::Value::Null,
         };
     }
@@ -162,9 +162,9 @@ fn parse_input(line: &str) -> HookInput {
         match tool {
             "Read" | "Write" | "Edit" | "WebFetch" | "WebSearch" => {
                 return HookInput {
-                    hook_event_name: "PreToolUse".to_string(),
-                    session_id: Some("ask-corpus".to_string()),
-                    tool_name: Some(tool.to_string()),
+                    hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
+                    session_id: Some(std::borrow::Cow::Borrowed("ask-corpus")),
+                    tool_name: Some(std::borrow::Cow::Owned(tool.to_string())),
                     tool_input: json!({ "command": arg, "path": arg }),
                     prompt: None,
                     tool_response: serde_json::Value::Null,
@@ -175,9 +175,9 @@ fn parse_input(line: &str) -> HookInput {
     }
     // Default: treat the whole line as a Bash command.
     HookInput {
-        hook_event_name: "PreToolUse".to_string(),
-        session_id: Some("ask-corpus".to_string()),
-        tool_name: Some("Bash".to_string()),
+        hook_event_name: std::borrow::Cow::Borrowed("PreToolUse"),
+        session_id: Some(std::borrow::Cow::Borrowed("ask-corpus")),
+        tool_name: Some(std::borrow::Cow::Borrowed("Bash")),
         tool_input: json!({ "command": line }),
         prompt: None,
         tool_response: serde_json::Value::Null,

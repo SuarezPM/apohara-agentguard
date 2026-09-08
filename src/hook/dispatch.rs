@@ -79,7 +79,7 @@ pub fn run_with_source(
     }
 
     // Fail OPEN on malformed input: a parse error must not block the tool.
-    let input: HookInput = match serde_json::from_str(stdin_json) {
+    let input: HookInput<'_> = match serde_json::from_str(stdin_json) {
         Ok(i) => i,
         Err(_) => return (None, 0),
     };
@@ -88,7 +88,7 @@ pub fn run_with_source(
     // context-injection output shape (not a Verdict), so it's handled here rather
     // than in `dispatch`. When the canary is disabled OR no session_id is present
     // this returns `(None, 0)` — byte-identical to today's no-op for SessionStart.
-    if input.hook_event_name == "SessionStart" {
+    if input.hook_event_name.as_ref() == "SessionStart" {
         return session_start_output(&input, config, &env_disabled);
     }
 
@@ -107,9 +107,12 @@ pub fn run_with_source(
 /// anti-self-disarm note in [`run_with_source`]). An absent var means nothing is
 /// disabled via the env.
 fn read_env_disable() -> EnvDisable {
-    match std::env::var("AGENTGUARD_DISABLE") {
-        Ok(v) => EnvDisable::parse(&v),
-        Err(_) => EnvDisable::default(),
+    match std::env::var_os("AGENTGUARD_DISABLE") {
+        Some(v) => match v.to_str() {
+            Some(s) => EnvDisable::parse(s),
+            None => EnvDisable::default(),
+        },
+        None => EnvDisable::default(),
     }
 }
 
@@ -163,7 +166,7 @@ fn dispatch(
     src: &dyn ContentSource,
     env_disabled: &EnvDisable,
 ) -> (Verdict, Option<String>) {
-    match input.hook_event_name.as_str() {
+    match input.hook_event_name.as_ref() {
         "PreToolUse" => dispatch_pretooluse(input, config, src, env_disabled),
 
         // PostToolUse + Bash: scan captured stdout, WARN-only (cannot block).
@@ -613,7 +616,7 @@ mod tests {
         for json in cases {
             let (out, code) = run_with_source(&json, &cfg, &inj);
             // Recompute via the built-in path alone to prove equivalence.
-            let input: HookInput = serde_json::from_str(&json).unwrap();
+            let input = serde_json::from_str(&json).unwrap();
             let builtin = dispatch_pretooluse_builtin(&input, &cfg, &inj, &EnvDisable::default());
             let (exp_out, exp_code) = crate::contract::emit("PreToolUse", &builtin);
             assert_eq!(code, exp_code, "exit code differs for {json}");
@@ -633,7 +636,7 @@ mod tests {
 
         // The slot itself returns Allow with no fingerprint.
         let json = pretooluse_bash("rm -rf ~");
-        let input: HookInput = serde_json::from_str(&json).unwrap();
+        let input = serde_json::from_str(&json).unwrap();
         let (slot_verdict, slot_fp) = policy_engine_evaluate(&input, &cfg);
         assert_eq!(
             slot_verdict,
