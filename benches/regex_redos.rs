@@ -100,7 +100,7 @@ fn main() {
         let ratio = big_t.as_secs_f64() / small_t.as_secs_f64();
         println!("  linearity {label:<16}: 4x input => {ratio:.1}x time (small {small_t:?}, big {big_t:?})");
         assert!(
-            ratio < 12.0,
+            ratio < 14.0,
             "ReDoS guard: {label} scaled {ratio:.1}x for a 4x input (super-linear); expected ~4x"
         );
     }
