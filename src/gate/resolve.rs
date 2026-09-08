@@ -21,41 +21,118 @@ pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Cow<'a, [Cow<
         return Cow::Borrowed(legs);
     }
 
-    let mut vars: HashMap<&str, &str> = HashMap::new();
+    let mut vars: HashMap<String, String> = HashMap::new();
     let mut out: Vec<Cow<'a, str>> = Vec::with_capacity(legs.len());
 
     for leg in legs {
-        // Expand using bindings known BEFORE this leg, so a self-referential
-        // assignment does not expand itself.
-        let expanded = expand_vars(leg, &vars);
+        let (expanded_str, changed) = expand_vars(leg.as_ref(), &mut vars);
 
-        // If the leg is a pure assignment, record/overwrite the binding. We
-        // parse the binding from the ORIGINAL leg text (an assignment value is
-        // usually a literal, not a reference).
-        if let Some((name, value)) = parse_assignment(leg) {
-            vars.insert(name, value);
+        if let Some((name, value)) =
+            parse_assignment(&expanded_str).or_else(|| parse_assignment(leg.as_ref()))
+        {
+            vars.insert(name.to_string(), value.to_string());
         }
 
-        out.push(expanded);
+        if changed {
+            out.push(Cow::Owned(expanded_str));
+        } else {
+            out.push(leg.clone());
+        }
     }
 
     Cow::Owned(out)
 }
 
-/// Parse a leading `VAR=value` assignment. Returns `None` if `leg` is not a
-/// single assignment token (i.e. there is a space before any `=`, meaning it is
-/// a command with arguments rather than an assignment).
-fn parse_assignment(leg: &str) -> Option<(&str, &str)> {
-    let eq = leg.find('=')?;
-    let name = &leg[..eq];
+/// Parse a leading `VAR=value` assignment, handling optional declaration keywords
+/// (`export`, `local`, `declare`, `readonly`), stripping surrounding quotes and quote
+/// concatenations, and unwrapping command/process substitution bodies (`$(echo rm)` -> `echo rm`).
+///
+/// Returns `None` if `leg` is not a single assignment token or valid assignment expression.
+fn parse_assignment(leg: &str) -> Option<(&str, Cow<'_, str>)> {
+    let trimmed = leg.trim();
+    let mut rest = trimmed;
+
+    // Strip declaration keyword prefixes if present.
+    for kw in &["export", "local", "declare", "readonly"] {
+        if let Some(after) = rest.strip_prefix(kw) {
+            if after.starts_with(char::is_whitespace) {
+                rest = after.trim_start();
+                break;
+            }
+        }
+    }
+
+    let eq = rest.find('=')?;
+    let name = &rest[..eq];
     if name.is_empty() || !is_valid_var_name(name) {
         return None;
     }
-    // A real assignment leg has no whitespace before `=` (we already checked the
-    // name is a valid identifier, which forbids spaces). Strip surrounding
-    // quotes from the value so `x="rm"` binds `rm`.
-    let value = strip_quotes_borrowed(&leg[eq + 1..]);
-    Some((name, value))
+
+    let val_raw = rest[eq + 1..].trim();
+    let val_unwrapped = unwrap_substitution(val_raw);
+    let val_clean = strip_quotes_and_concat(val_unwrapped);
+
+    Some((name, val_clean))
+}
+
+/// Unwrap substitution envelopes (`$(cmd)`, `` `cmd` ``, `<(cmd)`, `>(cmd)`) to expose inner command text.
+/// If the inner command is a simple output emitter like `echo text` or `printf text`, extract `text` as the evaluated value.
+fn unwrap_substitution(val: &str) -> &str {
+    let mut s = val.trim();
+    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
+    {
+        s = s[1..s.len() - 1].trim();
+    }
+
+    if s.starts_with("$(") && s.ends_with(')') && s.len() >= 3 {
+        s = s[2..s.len() - 1].trim();
+    } else if s.starts_with('`') && s.ends_with('`') && s.len() >= 2 {
+        s = s[1..s.len() - 1].trim();
+    } else if (s.starts_with("<(") || s.starts_with(">(")) && s.ends_with(')') && s.len() >= 3 {
+        s = s[2..s.len() - 1].trim();
+    }
+
+    if let Some(rest) = s.strip_prefix("echo ") {
+        return rest.trim();
+    }
+    if let Some(rest) = s.strip_prefix("printf ") {
+        return rest.trim();
+    }
+
+    s
+}
+
+/// Remove quotes and normalize quote-concatenated tokens (e.g. `"r""m"` -> `"rm"`, `'r''m'` -> `'rm'`).
+fn strip_quotes_and_concat(s: &str) -> Cow<'_, str> {
+    if !s.contains('"') && !s.contains('\'') {
+        return Cow::Borrowed(s);
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut in_single = false;
+    let mut in_double = false;
+
+    while let Some(c) = chars.next() {
+        if c == '\\' && !in_single {
+            if let Some(next) = chars.next() {
+                out.push(next);
+                continue;
+            }
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            continue;
+        }
+        out.push(c);
+    }
+
+    Cow::Owned(out)
 }
 
 /// A valid shell variable name: `[A-Za-z_][A-Za-z0-9_]*`.
@@ -80,25 +157,87 @@ fn strip_quotes_borrowed(s: &str) -> &str {
     s
 }
 
-/// Substitute `$VAR` and `${VAR}` references in `text` using `vars`. Unknown
-/// references are left intact. A `$$` is treated literally (no expansion).
-fn expand_vars<'a>(text: &'a Cow<'a, str>, vars: &HashMap<&str, &str>) -> Cow<'a, str> {
+enum ParamExpansion<'a> {
+    Plain(&'a str),
+    WithDefault {
+        name: &'a str,
+        op: &'a str,
+        default: &'a str,
+    },
+}
+
+fn parse_param_expansion(inner: &str) -> Option<ParamExpansion<'_>> {
+    let inner_trimmed = inner.trim();
+    if is_valid_var_name(inner_trimmed) {
+        return Some(ParamExpansion::Plain(inner_trimmed));
+    }
+
+    for op in [":-", ":=", "-", "="] {
+        if let Some((name, default_raw)) = inner_trimmed.split_once(op) {
+            let name = name.trim();
+            if is_valid_var_name(name) {
+                let default = strip_quotes_borrowed(default_raw.trim());
+                return Some(ParamExpansion::WithDefault { name, op, default });
+            }
+        }
+    }
+
+    None
+}
+
+fn evaluate_param_expansion(
+    pe: ParamExpansion<'_>,
+    vars: &mut HashMap<String, String>,
+) -> Option<String> {
+    match pe {
+        ParamExpansion::Plain(name) => vars.get(name).cloned(),
+        ParamExpansion::WithDefault { name, op, default } => {
+            let val = vars.get(name).map(|s| s.as_str());
+            match op {
+                ":-" | ":=" => {
+                    if let Some(v) = val {
+                        if !v.is_empty() {
+                            return Some(v.to_string());
+                        }
+                    }
+                    if op == ":=" {
+                        vars.insert(name.to_string(), default.to_string());
+                    }
+                    Some(default.to_string())
+                }
+                "-" | "=" => {
+                    if let Some(v) = val {
+                        return Some(v.to_string());
+                    }
+                    if op == "=" {
+                        vars.insert(name.to_string(), default.to_string());
+                    }
+                    Some(default.to_string())
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+fn expand_vars_pass(text: &str, vars: &mut HashMap<String, String>) -> (String, bool) {
     if !text.contains('$') {
-        return text.clone();
+        return (text.to_string(), false);
     }
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
     let mut i = 0usize;
     let mut changed = false;
+
     while i < bytes.len() {
         if bytes[i] == b'$' && i + 1 < bytes.len() {
             if bytes[i + 1] == b'{' {
-                // ${VAR}
+                // ${VAR...}
                 if let Some(close) = find_byte(bytes, i + 2, b'}') {
-                    let name = &text[i + 2..close];
-                    if is_valid_var_name(name) {
-                        if let Some(v) = vars.get(name) {
-                            out.push_str(v);
+                    let inner = &text[i + 2..close];
+                    if let Some(pe) = parse_param_expansion(inner) {
+                        if let Some(replacement) = evaluate_param_expansion(pe, vars) {
+                            out.push_str(&replacement);
                             i = close + 1;
                             changed = true;
                             continue;
@@ -123,14 +262,36 @@ fn expand_vars<'a>(text: &'a Cow<'a, str>, vars: &HashMap<&str, &str>) -> Cow<'a
                 }
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+
+        if let Some(ch) = text[i..].chars().next() {
+            out.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
     }
-    if changed {
-        Cow::Owned(out)
-    } else {
-        text.clone()
+
+    (out, changed)
+}
+
+/// Substitute `$VAR` and `${VAR}` (including `${VAR:-default}` parameter expansions)
+/// references in `text` using `vars`. Unknown references are left intact. A `$$` is
+/// treated literally (no expansion). Bounded depth cap prevents infinite loops.
+fn expand_vars(text: &str, vars: &mut HashMap<String, String>) -> (String, bool) {
+    const MAX_EXPAND_DEPTH: usize = 8;
+    let mut current = text.to_string();
+    let mut any_changed = false;
+
+    for _ in 0..MAX_EXPAND_DEPTH {
+        let (next, changed) = expand_vars_pass(&current, vars);
+        if !changed {
+            break;
+        }
+        any_changed = true;
+        current = next;
     }
+
+    (current, any_changed)
 }
 
 fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
@@ -203,5 +364,87 @@ mod tests {
         let input = legs(&["x=rm"]);
         let out = resolve_assignments(&input);
         assert_eq!(out, vec!["x=rm"]);
+    }
+
+    #[test]
+    fn resolves_export_and_declaration_keywords() {
+        let input = legs(&["export x=rm", "$x -rf ~"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "rm -rf ~");
+
+        let input2 = legs(&["local y=rm", "$y -rf ~"]);
+        let out2 = resolve_assignments(&input2);
+        assert_eq!(out2[1], "rm -rf ~");
+
+        let input3 = legs(&["declare z=rm", "$z -rf ~"]);
+        let out3 = resolve_assignments(&input3);
+        assert_eq!(out3[1], "rm -rf ~");
+
+        let input4 = legs(&["readonly w=rm", "$w -rf ~"]);
+        let out4 = resolve_assignments(&input4);
+        assert_eq!(out4[1], "rm -rf ~");
+    }
+
+    #[test]
+    fn resolves_command_and_process_substitutions() {
+        let input = legs(&["cmd=$(echo rm)", "$cmd -rf ~"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "rm -rf ~");
+
+        let input2 = legs(&["cmd=`echo rm`", "$cmd -rf ~"]);
+        let out2 = resolve_assignments(&input2);
+        assert_eq!(out2[1], "rm -rf ~");
+
+        let input3 = legs(&["cmd=<(echo rm)", "$cmd -rf ~"]);
+        let out3 = resolve_assignments(&input3);
+        assert_eq!(out3[1], "rm -rf ~");
+    }
+
+    #[test]
+    fn resolves_quoted_and_concatenated_assignments() {
+        let input = legs(&["cmd=\"r\"\"m\"", "$cmd -rf ~"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "rm -rf ~");
+
+        let input2 = legs(&["cmd='r''m'", "$cmd -rf ~"]);
+        let out2 = resolve_assignments(&input2);
+        assert_eq!(out2[1], "rm -rf ~");
+    }
+
+    #[test]
+    fn resolves_utf8_multibyte_assignments() {
+        let input = legs(&["path=\"/tmp/Âñçöðê\"", "cat $path"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "cat /tmp/Âñçöðê");
+    }
+
+    #[test]
+    fn resolves_param_expansion_default_dash() {
+        let input = legs(&["${x:-rm} -rf ~"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[0], "rm -rf ~");
+
+        let input_set = legs(&["x=ls", "${x:-rm} -rf ~"]);
+        let out_set = resolve_assignments(&input_set);
+        assert_eq!(out_set[1], "ls -rf ~");
+    }
+
+    #[test]
+    fn resolves_param_expansion_default_eq() {
+        let input = legs(&["${x:=rm} -rf ~", "$x /tmp/x"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[0], "rm -rf ~");
+        assert_eq!(out[1], "rm /tmp/x");
+    }
+
+    #[test]
+    fn resolves_multi_variable_and_chained_expansions() {
+        let input = legs(&["a=rm", "b=-rf", "c=~", "$a $b $c"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[3], "rm -rf ~");
+
+        let input_indirect = legs(&["x=y", "y=rm", "${$x} -rf ~"]);
+        let out_indirect = resolve_assignments(&input_indirect);
+        assert_eq!(out_indirect[2], "rm -rf ~");
     }
 }

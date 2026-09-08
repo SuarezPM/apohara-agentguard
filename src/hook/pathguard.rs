@@ -161,8 +161,14 @@ fn secret_read_target(norm: &str) -> Option<&'static str> {
         return Some("system path under /etc");
     }
 
-    // Dotenv: `.env`, `.env.local`, `.env.production`, …
-    if file == ".env" || file.starts_with(".env.") {
+    // Dotenv: `.env`, `.env.local`, `.env.production`, `.envrc`, `.envfile`, `.env_local`, …
+    if file == ".env"
+        || file.starts_with(".env.")
+        || file.starts_with(".env_")
+        || file.starts_with(".env-")
+        || file == ".envrc"
+        || file == ".envfile"
+    {
         return Some("dotenv file");
     }
     // Key material by extension.
@@ -195,10 +201,18 @@ fn sensitive_write_target(norm: &str) -> Option<&'static str> {
     const PROFILES: &[&str] = &[
         ".bashrc",
         ".bash_profile",
+        ".bash_login",
+        ".bash_logout",
         ".profile",
         ".zshrc",
         ".zprofile",
         ".zshenv",
+        ".zlogin",
+        ".zlogout",
+        ".cshrc",
+        ".tcshrc",
+        ".fishrc",
+        "config.fish",
     ];
     if PROFILES.contains(&file) {
         return Some("shell profile file");
@@ -221,11 +235,16 @@ fn has_ssh_dir(norm: &str) -> bool {
 }
 
 /// Whether `norm` (already normalized and cleaned) targets `/etc` or a subpath.
+/// Also checks `/private/etc` (macOS/Darwin symlink target for `/etc`).
 fn is_etc_path(norm: &str) -> bool {
     if cfg!(windows) {
         return false;
     }
-    if norm.starts_with("/etc/") || norm == "/etc" {
+    if norm.starts_with("/etc/")
+        || norm == "/etc"
+        || norm.starts_with("/private/etc/")
+        || norm == "/private/etc"
+    {
         return true;
     }
     if !norm.starts_with('/') {
@@ -233,7 +252,11 @@ fn is_etc_path(norm: &str) -> bool {
         while let Some(stripped) = rest.strip_prefix("../") {
             rest = stripped;
         }
-        if rest == "etc" || rest.starts_with("etc/") {
+        if rest == "etc"
+            || rest.starts_with("etc/")
+            || rest == "private/etc"
+            || rest.starts_with("private/etc/")
+        {
             return true;
         }
     }
@@ -354,6 +377,56 @@ mod tests {
                 Tier::Block
             );
         }
+    }
+
+    #[test]
+    fn private_etc_paths_blocked() {
+        if !cfg!(windows) {
+            assert_eq!(
+                check_path("Read", "/private/etc/passwd", false).tier,
+                Tier::Block
+            );
+            assert_eq!(
+                check_path("Read", "/private/etc/sudoers", false).tier,
+                Tier::Block
+            );
+            assert_eq!(
+                check_path("Read", "private/etc/master.passwd", false).tier,
+                Tier::Block
+            );
+            assert_eq!(
+                check_path("Write", "/private/etc/hosts", true).tier,
+                Tier::Block
+            );
+        }
+    }
+
+    #[test]
+    fn dotenv_variants_blocked() {
+        assert_eq!(check_path("Read", ".envrc", false).tier, Tier::Block);
+        assert_eq!(check_path("Read", ".envfile", false).tier, Tier::Block);
+        assert_eq!(
+            check_path("Read", "config/.env_local", false).tier,
+            Tier::Block
+        );
+        assert_eq!(
+            check_path("Read", "proj/.env-production", false).tier,
+            Tier::Block
+        );
+    }
+
+    #[test]
+    fn additional_shell_profiles_blocked() {
+        assert_eq!(check_path("Write", "~/.bash_login", true).tier, Tier::Block);
+        assert_eq!(
+            check_path("Write", "/home/u/.zlogin", true).tier,
+            Tier::Block
+        );
+        assert_eq!(check_path("Edit", "~/.fishrc", true).tier, Tier::Block);
+        assert_eq!(
+            check_path("Write", "~/.config/fish/config.fish", true).tier,
+            Tier::Block
+        );
     }
 
     #[test]

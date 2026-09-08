@@ -61,7 +61,7 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
 }
 
 fn m_rm_rf(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "rm") {
+    if !s.contains('-') || !contains_ignore_ascii_case(s, "rm") {
         return false;
     }
     // rm with a recursive+force combination, in either order, including
@@ -87,7 +87,7 @@ fn m_find_exec_rm(s: &str) -> bool {
 }
 
 fn m_dd(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "dd") {
+    if !contains_ignore_ascii_case(s, "dd") || !contains_ignore_ascii_case(s, "if=") {
         return false;
     }
     re!(s, r"(?i)\bdd\b[^|;&\n]*\sif=")
@@ -113,7 +113,7 @@ fn m_chmod_777(s: &str) -> bool {
 }
 
 fn m_chmod_recursive(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "chmod") {
+    if !s.contains('-') || !contains_ignore_ascii_case(s, "chmod") {
         return false;
     }
     // Short-bundle `-R` (e.g. `-R`, `-rR`, combined `-vR`) or the GNU long
@@ -122,7 +122,7 @@ fn m_chmod_recursive(s: &str) -> bool {
 }
 
 fn m_chown_recursive_root(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "chown") {
+    if !s.contains('/') || !s.contains('-') || !contains_ignore_ascii_case(s, "chown") {
         return false;
     }
     // chown -R … targeting / (root) is far more dangerous than a local dir.
@@ -162,7 +162,13 @@ fn fork_bomb_slots_same(compact: &str) -> bool {
         if x.is_empty() {
             continue;
         }
-        if compact[p + 3..].starts_with(&format!("{x}|{x}&}};{x}")) {
+        let rest = &compact[p + 3..];
+        if rest.starts_with(x)
+            && rest[x.len()..].starts_with('|')
+            && rest[x.len() + 1..].starts_with(x)
+            && rest[x.len() * 2 + 1..].starts_with("&};")
+            && rest[x.len() * 2 + 4..].starts_with(x)
+        {
             return true;
         }
     }
@@ -170,7 +176,7 @@ fn fork_bomb_slots_same(compact: &str) -> bool {
 }
 
 fn m_chmod_recursive_777_root(s: &str) -> bool {
-    if !contains_ignore_ascii_case(s, "chmod") {
+    if !s.contains('/') || !s.contains('-') || !contains_ignore_ascii_case(s, "chmod") {
         return false;
     }
     // Recursive chmod 777 targeting `/` is catastrophic (unlike a local file).

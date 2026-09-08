@@ -147,14 +147,17 @@ static PRE_MATCH: LazyLock<PreMatch> = LazyLock::new(|| {
     PreMatch { dfa, set, meta }
 });
 
+struct DfaState {
+    cache: Cache,
+    hits: PatternSet,
+}
+
 thread_local! {
-    /// Per-thread search cache for [`PRE_MATCH`]'s lazy DFA. The cache is
-    /// interior-mutable and intentionally not `Sync`; each scanning thread
-    /// lazily gets its own.
-    static DFA_CACHE: RefCell<Cache> = RefCell::new(Cache::new(&PRE_MATCH.dfa));
-    /// Per-thread hit set reused across scans (cleared per query).
-    static DFA_HITS: RefCell<PatternSet> =
-        RefCell::new(PatternSet::new(PRE_MATCH.dfa.pattern_len()));
+    /// Per-thread search cache and hit set for [`PRE_MATCH`]'s lazy DFA.
+    static DFA_STATE: RefCell<DfaState> = RefCell::new(DfaState {
+        cache: Cache::new(&PRE_MATCH.dfa),
+        hits: PatternSet::new(PRE_MATCH.dfa.pattern_len()),
+    });
 }
 
 impl PreMatch {
@@ -178,25 +181,25 @@ impl PreMatch {
 
     /// Run the DFA pass; false means "gave up, use the fallback".
     fn dfa_each_hit(&self, text: &str, f: &mut dyn FnMut(usize)) -> bool {
-        DFA_CACHE.with(|cache_cell| {
-            DFA_HITS.with(|hits_cell| {
-                let mut cache = cache_cell.borrow_mut();
-                let mut hits = hits_cell.borrow_mut();
-                hits.clear();
-                match self.dfa.try_which_overlapping_matches(
-                    &mut cache,
-                    &Input::new(text),
-                    &mut hits,
-                ) {
-                    Ok(()) => {
-                        for pid in hits.iter() {
-                            f(pid.as_usize());
-                        }
-                        true
+        DFA_STATE.with(|state_cell| {
+            let mut state = state_cell.borrow_mut();
+            let DfaState {
+                ref mut cache,
+                ref mut hits,
+            } = *state;
+            hits.clear();
+            match self
+                .dfa
+                .try_which_overlapping_matches(cache, &Input::new(text), hits)
+            {
+                Ok(()) => {
+                    for pid in hits.iter() {
+                        f(pid.as_usize());
                     }
-                    Err(_) => false,
+                    true
                 }
-            })
+                Err(_) => false,
+            }
         })
     }
 }
