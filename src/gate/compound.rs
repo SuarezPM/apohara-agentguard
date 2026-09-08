@@ -39,21 +39,37 @@ pub(crate) fn split_compound_with_separators<'a>(
     command: &'a str,
     extra_seps: &[char],
 ) -> Vec<Cow<'a, str>> {
-    let mut result: Vec<Cow<'a, str>> = Vec::with_capacity(1);
-
-    if extra_seps.is_empty()
-        && !command.contains([
-            ';', '|', '&', '\n', '$', '`', '<', '>', '(', ')', '"', '\'', '\\',
-        ])
-    {
-        let trimmed = command.trim();
-        if !trimmed.is_empty() {
-            result.push(Cow::Borrowed(trimmed));
-        }
-        return result;
+    let bytes = command.as_bytes();
+    let slice = command.trim();
+    if slice.is_empty() {
+        return Vec::new();
     }
 
-    let bytes = command.as_bytes();
+    // Fast path: if there are no extra separators and no quotes, escapes,
+    // substitutions, parens or compound operators, return the single leg immediately.
+    if extra_seps.is_empty()
+        && !bytes.iter().any(|&b| {
+            matches!(
+                b,
+                b'"' | b'\''
+                    | b'\\'
+                    | b';'
+                    | b'|'
+                    | b'&'
+                    | b'\n'
+                    | b'$'
+                    | b'`'
+                    | b'<'
+                    | b'>'
+                    | b'('
+                    | b')'
+            )
+        })
+    {
+        return vec![Cow::Borrowed(slice)];
+    }
+
+    let mut result: Vec<Cow<'a, str>> = Vec::new();
     let mut leg_start = 0usize;
     let mut i = 0usize;
     let mut in_double = false;

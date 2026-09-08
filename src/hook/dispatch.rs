@@ -105,7 +105,7 @@ pub fn run_with_source(
 
 /// Read and parse `AGENTGUARD_DISABLE` from the HOOK PROCESS env (see the
 /// anti-self-disarm note in [`run_with_source`]). An absent var means nothing is
-/// disabled via the env.
+/// disabled via the env. `var_os` avoids String allocation when the variable is absent.
 fn read_env_disable() -> EnvDisable {
     match std::env::var_os("AGENTGUARD_DISABLE") {
         Some(v) => match v.to_str() {
