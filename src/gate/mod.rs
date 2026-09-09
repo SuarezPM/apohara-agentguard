@@ -129,7 +129,7 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
     //     surfaces a Block-tier hit, so a benign IFS-driven loop or read is
     //     never mangled into a false positive.
     if !extra_seps.is_empty() {
-        if let Some(hit) = ifs_resplit_block(command, &extra_seps, config, &community_rules) {
+        if let Some(hit) = ifs_resplit_block(&legs, &extra_seps, config, &community_rules) {
             consider(&mut best, hit.severity, hit.leg, || hit.label);
         }
     }
@@ -150,15 +150,14 @@ pub fn evaluate(command: &str, config: &Config) -> Verdict {
 /// if the re-scan surfaces a Block-tier match — otherwise `None` (no-op), so a
 /// benign `IFS`-driven loop or `read` is never turned into a false positive.
 fn ifs_resplit_block<'a>(
-    command: &'a str,
+    legs: &[Cow<'a, str>],
     extra_seps: &[char],
     config: &Config,
     community: &[CommunityRule],
 ) -> Option<Hit<'a>> {
-    let legs = compound::split_compound(command);
-    let mut rebuilt: Vec<Cow<'_, str>> = Vec::with_capacity(legs.len());
+    let mut rebuilt: compound::LegVec<'_> = compound::LegVec::with_capacity(legs.len());
     let mut seen_ifs = false;
-    for leg in &legs {
+    for leg in legs {
         if seen_ifs {
             // Word-join: the IFS char separates fields, so map it to a space.
             let mut rewritten = leg.to_string();

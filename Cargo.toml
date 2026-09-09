@@ -33,6 +33,7 @@ clap = { version = "4", features = ["derive", "env"] }
 base64 = "0.23"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 sha2 = "0.11"
+smallvec = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
