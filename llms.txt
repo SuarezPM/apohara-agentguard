@@ -1,0 +1,17 @@
+# apohara-agentguard
+
+> Deterministic, offline Rust safety layer for AI coding agents: anti-bypass Bash gate, seccomp+Landlock sandbox, prompt-injection firewall, MCP transport proxy with TOFU pinning. Version 0.5.4. No model, no network at scan time.
+
+## Docs
+
+- [README (tagged source of truth)](https://raw.githubusercontent.com/SuarezPM/apohara-agentguard/refs/tags/v0.5.4/README.md) : install, 10-second verify, benchmarks, agent prompt
+- [Benchmarks](https://github.com/SuarezPM/apohara-agentguard/blob/main/BENCHMARK.md) : precision (0/73 FP, 0/33 FN), latency (~1.4 us p50), QuasarNix, MCPTox — with required qualifiers
+- [Architecture](https://github.com/SuarezPM/apohara-agentguard/blob/main/ARCHITECTURE.md) : verdict model (Block > Ask > Warn > Allow) and pipeline order
+- [Security model](https://github.com/SuarezPM/apohara-agentguard/blob/main/SECURITY.md) : threat model and responsible disclosure
+- [Contributing](https://github.com/SuarezPM/apohara-agentguard/blob/main/CONTRIBUTING.md) : build/test/lint flow, how to add a rule
+
+## Install (for agents)
+
+- `cargo install apohara-agentguard --locked`, then `apohara-agentguard init` (dry-run), `apohara-agentguard init --yes` (apply), `apohara-agentguard doctor` (green = guarded)
+- Verify enforcement: `apohara-agentguard check 'x=rm; $x -rf ~'` must block with exit 2
+- Constraints: packs OFF by default; sandbox Linux-only (>=5.13, fail-closed elsewhere); `AGENTGUARD_DISABLE=1` is emergency kill-switch only
