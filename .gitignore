@@ -16,12 +16,15 @@
 .DS_Store
 
 # Local assistant working files (not part of the project)
+/.agents/
 /.claude
+/.codex/
 /.omc
 /.cocoindex_code
 /AGENTS.md
 /CLAUDE.md
 /CLAUDE.local.md
+evidence/
 
 # Deepwork session state (git-local, OpenCode-readable)
 .slim/deepwork/

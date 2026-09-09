@@ -90,12 +90,31 @@ Honest numbers you can re-run today. Full tables: [BENCHMARK.md](BENCHMARK.md).
 
 | Axis | Result | Read it as |
 |---|---|---|
-| **Gate precision** | **0 / 73 FP · 0 / 33 FN** (CI-enforced) | benign allows, obfuscated destructive blocks — on an author-curated synthetic corpus, i.e. a mechanism demo, not a neutral sample (`cargo test benchmark`) |
+| **Gate precision** | **0 / 73 FP · 0 / 37 FN** (CI-enforced) | benign allows, obfuscated destructive blocks — on an author-curated synthetic corpus, i.e. a mechanism demo, not a neutral sample (`cargo test benchmark`) |
 | **Latency** | **1.41 µs p50** benign · **2.21 µs** blocked · **0.86 µs** firewall scan | per-tool-call cost, end-to-end hook (`cargo bench --bench hook_latency`) |
 | **QuasarNix obfuscation** | **100% mean TPR**, 15 manipulations | *requires the opt-in `reverse-shell` pack*; default taxonomy scores 1.71% by design; FPR 4.18e-2 — we lead on perturbation delta, not on the GBDT axis |
 | **MCPTox proxy** | 26.3% → **16.9% strict** (FP 0.84%) / **18.9% conservative** (FP 0%) | *labeled-oracle policy*: a measured best-case for deterministic gating (~30% is patternable); the rest is semantic misuse no proxy can catch |
 
 We publish where the edge sits — including the firewall's 94.8% miss rate on human-written TensorTrust attacks. A safety claim with a boundary beats a marketing claim without one.
+
+<details>
+<summary><b>Known evasions</b> — parser boundary, pinned by <code>tests/gate_evasions.rs</code></summary>
+
+### Now caught (v0.1.x)
+
+- **ansi-c** quoting (`$'\x72\x6d' -rf ~`): decoded before scan, blocked.
+- **command-substitution** (`$(echo rm) -rf ~` in double quotes): evaluated live, blocked.
+- **ifs** reassignment (`IFS=X; cmdXrmX-rfX~`): word-splitting tricks resolved, blocked.
+- **line-continuation** (`r\` + newline + `m -rf ~`): spliced before scan, blocked.
+
+### Still out of scope
+
+- **nested** / chained encoders (hex+rot13+gzip): not modeled.
+- real **here-document** parsing: not modeled.
+- deliberate **parameter expansion**: not modeled.
+- **non-literal** command substitution in verb position (`$(curl …) -rf ~`): out of scope.
+
+</details>
 
 ## How it compares
 
