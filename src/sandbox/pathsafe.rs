@@ -233,7 +233,10 @@ mod tests {
         let root_multi_parent = Path::new("/../../..");
 
         assert_eq!(canonicalize_recursive(root).unwrap(), PathBuf::from("/"));
-        assert_eq!(canonicalize_recursive(root_parent).unwrap(), PathBuf::from("/"));
+        assert_eq!(
+            canonicalize_recursive(root_parent).unwrap(),
+            PathBuf::from("/")
+        );
         assert_eq!(
             canonicalize_recursive(root_multi_parent).unwrap(),
             PathBuf::from("/")
