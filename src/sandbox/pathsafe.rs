@@ -70,7 +70,9 @@ pub(crate) fn canonicalize_recursive(path: &Path) -> io::Result<PathBuf> {
         match seg {
             Seg::Root => resolved = PathBuf::from("/"),
             Seg::Parent => {
-                resolved.pop();
+                if resolved != Path::new("/") {
+                    resolved.pop();
+                }
             }
             Seg::Normal(name) => {
                 let candidate = resolved.join(&name);
@@ -222,5 +224,22 @@ mod tests {
         let sub_canon = canonicalize_recursive(&sub).unwrap();
         assert!(is_strict_descendant(&sub_canon, &root));
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parent_at_root_stays_at_root() {
+        let root = Path::new("/");
+        let root_parent = Path::new("/..");
+        let root_multi_parent = Path::new("/../../..");
+
+        assert_eq!(canonicalize_recursive(root).unwrap(), PathBuf::from("/"));
+        assert_eq!(
+            canonicalize_recursive(root_parent).unwrap(),
+            PathBuf::from("/")
+        );
+        assert_eq!(
+            canonicalize_recursive(root_multi_parent).unwrap(),
+            PathBuf::from("/")
+        );
     }
 }
