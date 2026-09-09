@@ -44,7 +44,7 @@ const CLOSED: &[ClosedEvasion] = &[
         sample: r"$'\x72\x6d' -rf ~",
     },
     ClosedEvasion {
-        readme_keyword: "double quotes",
+        readme_keyword: "command substitution",
         evasions_block_marker: "fn cmdsubst_echo_verb_blocks",
         sample: "$(echo rm) -rf ~",
     },
@@ -53,13 +53,20 @@ const CLOSED: &[ClosedEvasion] = &[
         evasions_block_marker: "fn ifs_reassignment_blocks",
         sample: "IFS=X; cmdXrmX-rfX~",
     },
+    ClosedEvasion {
+        readme_keyword: "line continuation",
+        evasions_block_marker: "fn backslash_line_continuation_blocks",
+        sample: "r\\\nm -rf ~",
+    },
 ];
 
-/// Out-of-scope keywords that must appear in the "Boundary:" section
+/// Out-of-scope keywords that must appear in the "Still out of scope" section
 /// and must NOT be presented as caught.
 const OUT_OF_SCOPE: &[&str] = &[
     "nested",        // nested / chained encoders
-    "verb-position", // verb-position substitutions
+    "here-document", // real here-document parsing
+    "parameter expansion",
+    "non-literal", // non-literal command substitutions ($(curl ...))
 ];
 
 /// Lowercased slice of the README between two heading markers (by substring).
@@ -78,7 +85,7 @@ fn section<'a>(haystack: &'a str, start_marker: &str, end_marker: &str) -> &'a s
 #[test]
 fn readme_now_caught_matches_gate_evasions_block_pins() {
     let readme_lower = README.to_lowercase();
-    let now_caught = section(&readme_lower, "anti-bypass command gate", "*boundary:");
+    let now_caught = section(&readme_lower, "anti-bypass command gate", "boundary:");
 
     for ev in CLOSED {
         // 1. README "Now caught" section names it.
@@ -110,8 +117,8 @@ fn readme_now_caught_matches_gate_evasions_block_pins() {
 #[test]
 fn readme_out_of_scope_items_are_listed_and_not_claimed_caught() {
     let readme_lower = README.to_lowercase();
-    let now_caught = section(&readme_lower, "anti-bypass command gate", "*boundary:");
-    let still_out = section(&readme_lower, "*boundary:", "\n");
+    let now_caught = section(&readme_lower, "anti-bypass command gate", "boundary:");
+    let still_out = section(&readme_lower, "boundary:", "\n- ");
 
     for kw in OUT_OF_SCOPE {
         assert!(

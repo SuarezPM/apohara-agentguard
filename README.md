@@ -66,7 +66,7 @@ Obfuscated destruction blocked; a benign commit whose *message* merely mentions 
 
 ## What it does
 
-- 🧬 **Anti-bypass command gate** — resolves variable aliases, decodes base64, expands ANSI-C quotes, evaluates live `$(…)` in double quotes, follows `IFS` tricks — keyed on a verb-aware destructive taxonomy, so `find . -delete` is caught with no `rm` in sight. *Boundary: nested/chained encoders and verb-position substitutions stay out of scope — the parser boundary is published, not hidden.*
+- 🧬 **Anti-bypass command gate** — resolves variable aliases, decodes base64, expands ANSI-C quotes, handles line continuations, evaluates live `$(…)` command substitutions in double quotes, follows `IFS` tricks — keyed on a verb-aware destructive taxonomy, so `find . -delete` is caught with no `rm` in sight. *Boundary: nested/chained encoders, here-document parsing, parameter expansion, and non-literal command substitutions stay out of scope — the parser boundary is published, not hidden.*
 - 🔒 **seccomp + Landlock sandbox** — a real kernel jail for agent-run code: network denied by omission, filesystem confined to one workspace root, fail-closed (Linux ≥ 5.13; refuses elsewhere rather than running unconfined).
 - 🧱 **Prompt-injection firewall** — deterministic rules over tool inputs and outputs (prompts, fetched pages, files, command output), with SSRF-guarded re-fetch. *Boundary: paraphrased social engineering has no signature — measured 94.8% FN on TensorTrust, published, not hidden.*
 - 🔌 **MCP transport proxy** (`agentguard-proxy`) — TOFU SHA-256 pinning of the server's tool manifest with quarantine-on-drift, plus `tools/call` gating. *Default-allow by design; enforcement comes from policy rules.*
@@ -90,12 +90,31 @@ Honest numbers you can re-run today. Full tables: [BENCHMARK.md](BENCHMARK.md).
 
 | Axis | Result | Read it as |
 |---|---|---|
-| **Gate precision** | **0 / 73 FP · 0 / 33 FN** (CI-enforced) | benign allows, obfuscated destructive blocks — on an author-curated synthetic corpus, i.e. a mechanism demo, not a neutral sample (`cargo test benchmark`) |
+| **Gate precision** | **0 / 73 FP · 0 / 37 FN** (CI-enforced) | benign allows, obfuscated destructive blocks — on an author-curated synthetic corpus, i.e. a mechanism demo, not a neutral sample (`cargo test benchmark`) |
 | **Latency** | **1.41 µs p50** benign · **2.21 µs** blocked · **0.86 µs** firewall scan | per-tool-call cost, end-to-end hook (`cargo bench --bench hook_latency`) |
 | **QuasarNix obfuscation** | **100% mean TPR**, 15 manipulations | *requires the opt-in `reverse-shell` pack*; default taxonomy scores 1.71% by design; FPR 4.18e-2 — we lead on perturbation delta, not on the GBDT axis |
 | **MCPTox proxy** | 26.3% → **16.9% strict** (FP 0.84%) / **18.9% conservative** (FP 0%) | *labeled-oracle policy*: a measured best-case for deterministic gating (~30% is patternable); the rest is semantic misuse no proxy can catch |
 
 We publish where the edge sits — including the firewall's 94.8% miss rate on human-written TensorTrust attacks. A safety claim with a boundary beats a marketing claim without one.
+
+<details>
+<summary><b>Known evasions</b> — parser boundary, pinned by <code>tests/gate_evasions.rs</code></summary>
+
+### Now caught (v0.1.x)
+
+- **ansi-c** quoting (`$'\x72\x6d' -rf ~`): decoded before scan, blocked.
+- **command-substitution** (`$(echo rm) -rf ~` in double quotes): evaluated live, blocked.
+- **ifs** reassignment (`IFS=X; cmdXrmX-rfX~`): word-splitting tricks resolved, blocked.
+- **line-continuation** (`r\` + newline + `m -rf ~`): spliced before scan, blocked.
+
+### Still out of scope
+
+- **nested** / chained encoders (hex+rot13+gzip): not modeled.
+- real **here-document** parsing: not modeled.
+- deliberate **parameter expansion**: not modeled.
+- **non-literal** command substitution in verb position (`$(curl …) -rf ~`): out of scope.
+
+</details>
 
 ## How it compares
 
