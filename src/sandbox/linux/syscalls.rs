@@ -352,6 +352,13 @@ mod tests {
     }
 
     #[test]
+    fn workspace_truncation_syscalls_reach_landlock() {
+        let ww = pure_allow_for(PermissionTier::WorkspaceWrite);
+        assert!(ww.contains(&"truncate"));
+        assert!(ww.contains(&"ftruncate"));
+    }
+
+    #[test]
     fn build_tool_syscalls_present() {
         // Regression guard: the syscalls the unverified reference omitted but a
         // real cargo build / node / go empirically require.

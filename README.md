@@ -67,7 +67,7 @@ Obfuscated destruction blocked; a benign commit whose *message* merely mentions 
 ## What it does
 
 - 🧬 **Anti-bypass command gate** — resolves variable aliases, decodes base64, expands ANSI-C quotes, handles line continuations, evaluates live `$(…)` command substitutions in double quotes, follows `IFS` tricks — keyed on a verb-aware destructive taxonomy, so `find . -delete` is caught with no `rm` in sight. *Boundary: nested/chained encoders, here-document parsing, parameter expansion, and non-literal command substitutions stay out of scope — the parser boundary is published, not hidden.*
-- 🔒 **seccomp + Landlock sandbox** — a real kernel jail for agent-run code: network denied by omission, filesystem confined to one workspace root, fail-closed (Linux ≥ 5.13; refuses elsewhere rather than running unconfined).
+- 🔒 **seccomp + Landlock sandbox** — a real kernel jail for agent-run code: network denied by omission, filesystem confined to one workspace root, fail-closed (Landlock ABI ≥3, normally Linux ≥6.2; refuses elsewhere rather than running unconfined).
 - 🧱 **Prompt-injection firewall** — deterministic rules over tool inputs and outputs (prompts, fetched pages, files, command output), with SSRF-guarded re-fetch. *Boundary: paraphrased social engineering has no signature — measured 94.8% FN on TensorTrust, published, not hidden.*
 - 🔌 **MCP transport proxy** (`agentguard-proxy`) — TOFU SHA-256 pinning of the server's tool manifest with quarantine-on-drift, plus `tools/call` gating. *Default-allow by design; enforcement comes from policy rules.*
 - 🦀 **Offline and deterministic** — pure Rust, single binary, no API keys, no telemetry. Same input ⇒ same verdict. Audit log stays on local disk (off by default).
@@ -172,7 +172,7 @@ DO THIS, IN ORDER, AND VERIFY EACH STEP:
 CONSTRAINTS:
 - Do NOT use `AGENTGUARD_DISABLE=1` except as emergency kill-switch (fail-closed recovery).
 - Packs (cloud/db/container + community) are OFF by default — enable only if needed.
-- Sandbox is Linux-only (seccomp+Landlock, >=5.13, fail-closed elsewhere).
+- Sandbox is Linux-only (seccomp+Landlock, Landlock ABI >=3, normally Linux >=6.2; fail-closed elsewhere).
 
 IF ANY STEP FAILS: surface the exact stderr/exit code — do not fall back to unverified binaries.
 ```

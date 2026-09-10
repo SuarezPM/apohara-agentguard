@@ -19,15 +19,16 @@
 //!   - Everything else outside the workspace: DENIED (fail-closed), including
 //!     `/etc/passwd` and `$HOME/.ssh`.
 //!
-//! ABI is auto-detected via the `landlock` crate's `CompatLevel::BestEffort`,
-//! so we use the best feature set the running kernel supports while keeping the
-//! ruleset enforceable on older kernels.
+//! Both enforcing tiers require Landlock ABI v3. This is the first ABI that
+//! mediates `truncate(2)`, `ftruncate(2)`, `creat(2)`, and `open(2)` with
+//! `O_TRUNC`. Older kernels are rejected rather than silently dropping that
+//! access right and running with weaker confinement.
 //!
 //! ## Fail-closed errno taxonomy
 //!
 //! If the kernel can't enforce Landlock we REFUSE to run (never silently
 //! unconfined). The kernel error is mapped to an actionable message:
-//!   - ENOSYS  -> "kernel too old (need Linux >= 5.13 for Landlock)"
+//!   - ENOSYS  -> "Landlock unavailable (need ABI v3 or newer)"
 //!   - EOPNOTSUPP -> "Landlock disabled at boot; add lsm=landlock to the
 //!     kernel cmdline"
 //!   - EPERM on a Landlock syscall -> "internal: seccomp installed before
@@ -39,18 +40,19 @@
 //! cannot weaken its own ruleset.
 
 use landlock::{
-    Access, AccessFs, CompatLevel, Compatible, Errno, LandlockStatus, PathBeneath, PathFd, Ruleset,
-    RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetStatus, ABI,
+    Access, AccessError, AccessFs, CompatError, CompatLevel, Compatible, Errno, HandleAccessError,
+    HandleAccessesError, LandlockStatus, PathBeneath, PathFd, Ruleset, RulesetAttr, RulesetCreated,
+    RulesetCreatedAttr, RulesetError, RulesetStatus, ABI,
 };
 use std::path::Path;
 
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::permission::PermissionTier;
+use crate::sandbox::REQUIRED_LANDLOCK_ABI;
 
-/// Minimum Landlock ABI we target. V1 already covers read/write/create/remove
-/// of files and directories, which is all the tiers need. BestEffort lets a
-/// newer kernel transparently use a higher ABI.
-const TARGET_ABI: ABI = ABI::V1;
+/// Minimum Landlock ABI we target. V3 adds `AccessFs::Truncate`; requesting it
+/// with `HardRequirement` prevents silent downgrade on ABI v1/v2 kernels.
+const TARGET_ABI: ABI = ABI::V3;
 
 /// System paths the sandboxed process needs READ + EXECUTE access to in order to
 /// run *any* binary at all: the binary itself, the dynamic loader, shared
@@ -187,7 +189,7 @@ pub(crate) fn apply(tier: PermissionTier, workspace_root: &Path) -> Result<()> {
     let system_rx = AccessFs::from_read(TARGET_ABI);
 
     let mut created: RulesetCreated = Ruleset::default()
-        .set_compatibility(CompatLevel::BestEffort)
+        .set_compatibility(CompatLevel::HardRequirement)
         .handle_access(handled)
         .map_err(map_ruleset_err)?
         .create()
@@ -200,9 +202,13 @@ pub(crate) fn apply(tier: PermissionTier, workspace_root: &Path) -> Result<()> {
     // exist on this distro is skipped (it can't be a confinement hole).
     for p in SYSTEM_RX_PATHS {
         if let Ok(fd) = PathFd::new(p) {
-            created = created
-                .add_rule(PathBeneath::new(fd, system_rx))
-                .map_err(map_ruleset_err)?;
+            // `SYSTEM_RX_PATHS` intentionally mixes directories with regular
+            // files and devices. Keep the ruleset's handled rights strict, but
+            // let this individual rule drop directory-only rights (ReadDir,
+            // Refer, etc.) when its FD is not a directory. The ABI v3
+            // requirement was already enforced by `handle_access` above.
+            let rule = PathBeneath::new(fd, system_rx).set_compatibility(CompatLevel::BestEffort);
+            created = created.add_rule(rule).map_err(map_ruleset_err)?;
         }
     }
 
@@ -237,9 +243,10 @@ pub(crate) fn apply(tier: PermissionTier, workspace_root: &Path) -> Result<()> {
     // kernel that lacks Landlock surfaces here as NotImplemented / NotEnabled
     // and we fail-closed with the taxonomy message.
     match status.landlock {
-        LandlockStatus::NotImplemented => Err(SandboxError::Landlock(
-            "Landlock refused (ENOSYS): kernel too old (need Linux >= 5.13 for Landlock)".into(),
-        )),
+        LandlockStatus::NotImplemented => Err(SandboxError::Landlock(format!(
+            "Landlock refused (ENOSYS): unavailable; need ABI v{REQUIRED_LANDLOCK_ABI} or newer \
+                 (normally Linux >= 6.2)"
+        ))),
         LandlockStatus::NotEnabled => Err(SandboxError::Landlock(
             "Landlock refused (EOPNOTSUPP): Landlock disabled at boot; \
              add lsm=landlock to the kernel cmdline"
@@ -305,16 +312,29 @@ pub fn set_post_restrict_skip_check(skip: bool) {
 /// Map a `landlock::RulesetError` into our taxonomy. The crate's `Errno` helper
 /// extracts the underlying kernel errno; EPERM on a Landlock syscall is the
 /// self-diagnosing signal that seccomp was (wrongly) installed first.
-fn map_ruleset_err<E>(err: E) -> SandboxError
-where
-    E: std::error::Error + 'static,
-{
+fn map_ruleset_err(err: RulesetError) -> SandboxError {
+    if matches!(
+        &err,
+        RulesetError::HandleAccesses(HandleAccessesError::Fs(HandleAccessError::Compat(
+            CompatError::Access(
+                AccessError::Incompatible { .. } | AccessError::PartiallyCompatible { .. }
+            )
+        )))
+    ) {
+        return SandboxError::Landlock(format!(
+            "Landlock refused: need ABI v{REQUIRED_LANDLOCK_ABI} or newer \
+             (normally Linux >= 6.2) to confine truncate/ftruncate; the running kernel \
+             does not support all required filesystem access rights"
+        ));
+    }
+
     let display = err.to_string();
     let errno = *Errno::from(err);
     match errno {
-        libc::ENOSYS => SandboxError::Landlock(
-            "Landlock refused (ENOSYS): kernel too old (need Linux >= 5.13 for Landlock)".into(),
-        ),
+        libc::ENOSYS => SandboxError::Landlock(format!(
+            "Landlock refused (ENOSYS): unavailable; need ABI v{REQUIRED_LANDLOCK_ABI} or newer \
+                 (normally Linux >= 6.2)"
+        )),
         libc::EOPNOTSUPP => SandboxError::Landlock(
             "Landlock refused (EOPNOTSUPP): Landlock disabled at boot; \
              add lsm=landlock to the kernel cmdline"
@@ -339,5 +359,11 @@ mod tests {
     fn danger_is_noop() {
         // DangerFullAccess never touches the kernel; any path is fine.
         apply(PermissionTier::DangerFullAccess, Path::new("/nonexistent")).unwrap();
+    }
+
+    #[test]
+    fn target_abi_handles_truncate() {
+        assert_eq!(TARGET_ABI as u32, REQUIRED_LANDLOCK_ABI);
+        assert!(AccessFs::from_all(TARGET_ABI).contains(AccessFs::Truncate));
     }
 }
