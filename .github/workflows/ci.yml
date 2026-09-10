@@ -293,7 +293,7 @@ jobs:
 
       # ----- Linux kernel-capability sandbox gate (non-blocking on CI) -----
       # The seccomp + Landlock + build-e2e tests require an unprivileged user
-      # namespace AND a Landlock-capable kernel (Linux >= 5.13 with Landlock
+      # namespace AND Landlock ABI >= 3 (normally Linux >= 6.2, with Landlock
       # enabled). GitHub-hosted runners do not reliably provide both, so a
       # capability gap here must NOT hard-fail CI. These tests are NOT marked
       # #[ignore] — they compile and RUN; we only mark this STEP

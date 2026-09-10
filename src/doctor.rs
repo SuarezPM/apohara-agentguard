@@ -415,16 +415,11 @@ fn wiring_checks(hosts: &[init::HostWiring], exe: &Path) -> Vec<Check> {
 #[cfg(target_os = "linux")]
 fn sandbox_check() -> Check {
     match landlock_abi_probe() {
-        Ok(version) => pass_check(
-            "sandbox",
-            format!(
-                "Landlock available (kernel ABI v{version}) — tiers enforce seccomp + Landlock"
-            ),
-        ),
+        Ok(version) => landlock_abi_check(version),
         Err(e) => match e.raw_os_error() {
             Some(libc::ENOSYS) => warn_check(
                 "sandbox",
-                "Landlock unavailable: kernel too old (need Linux >= 5.13); \
+                "Landlock unavailable: need ABI v3 or newer (normally Linux >= 6.2); \
                  sandbox commands will refuse to run (fail-closed)",
             ),
             Some(libc::EOPNOTSUPP) => warn_check(
@@ -437,6 +432,27 @@ fn sandbox_check() -> Check {
                 format!("Landlock probe failed (best-effort): {e}"),
             ),
         },
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn landlock_abi_check(version: u32) -> Check {
+    if version < crate::sandbox::REQUIRED_LANDLOCK_ABI {
+        warn_check(
+            "sandbox",
+            format!(
+                "Landlock kernel ABI v{version} is below required v{} \
+                 (normally Linux >= 6.2); sandbox commands will refuse to run (fail-closed)",
+                crate::sandbox::REQUIRED_LANDLOCK_ABI
+            ),
+        )
+    } else {
+        pass_check(
+            "sandbox",
+            format!(
+                "Landlock available (kernel ABI v{version}) — tiers enforce seccomp + Landlock"
+            ),
+        )
     }
 }
 
@@ -692,5 +708,17 @@ mod tests {
         assert_eq!(one_line("a\r\n  b"), "a b");
         assert_eq!(one_line("plain"), "plain");
         assert_eq!(one_line("  spaced  out  "), "spaced out");
+    }
+
+    #[test]
+    fn landlock_abi_check_requires_v3() {
+        let old = landlock_abi_check(2);
+        assert_eq!(old.status, Status::Warn);
+        assert!(old.detail.contains("ABI v2 is below required v3"));
+        assert!(old.detail.contains("refuse to run"));
+
+        let supported = landlock_abi_check(3);
+        assert_eq!(supported.status, Status::Pass);
+        assert!(supported.detail.contains("kernel ABI v3"));
     }
 }

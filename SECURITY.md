@@ -164,7 +164,10 @@ seccomp (last)**.
   `socket(AF_INET, …)` returns EPERM.
 - **Filesystem scoping.** Landlock confines reads/writes to the workspace root
   (plus specific, read-only system/toolchain paths needed to run a binary). The
-  non-vacuous test asserts `/etc/passwd` and `$HOME/.ssh` stay denied.
+  ABI v3 `TRUNCATE` right also confines `truncate(2)`, `ftruncate(2)`,
+  `creat(2)`, and `open(2)` with `O_TRUNC`. The non-vacuous tests assert these
+  operations work inside the workspace while external files stay unchanged,
+  and that `/etc/passwd` and `$HOME/.ssh` stay denied.
 - **Fail-closed setup.** If the kernel cannot enforce Landlock (too old,
   disabled at boot) or seccomp install fails, the sandbox **refuses to run**
   (non-zero exit) — it never falls back to an unconfined process.
@@ -186,8 +189,13 @@ seccomp (last)**.
   sockets / ptrace" surface is not. The allowlist is scoped for
   running build tools, not for resisting a determined in-process
   escape; this is **not** a sandbox-escape-proof jail.
-- **Non-Linux platforms.** seccomp + Landlock are **Linux-only** (need Linux ≥
-  5.13 with Landlock enabled, `lsm=landlock`). On macOS/Windows the sandbox
+- **Metadata-only filesystem mutations.** Landlock ABI v3 does not mediate
+  `chmod`, `chown`, or timestamp changes. `WorkspaceWrite` permits their syscall
+  families for build-tool compatibility; auditing or narrowing that separate
+  boundary is outside the truncation guarantee above.
+- **Non-Linux platforms.** seccomp + Landlock are **Linux-only** and require
+  Landlock ABI ≥3 (normally Linux ≥6.2, though backports may qualify) with
+  Landlock enabled (`lsm=landlock`). On macOS/Windows the sandbox
   subcommand **fails closed** (refuses to run); the gate, path-guard, and
   firewall still work.
 

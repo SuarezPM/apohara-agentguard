@@ -14,4 +14,4 @@
 
 - `cargo install apohara-agentguard --locked`, then `apohara-agentguard init` (dry-run), `apohara-agentguard init --yes` (apply), `apohara-agentguard doctor` (green = guarded)
 - Verify enforcement: `apohara-agentguard check 'x=rm; $x -rf ~'` must block with exit 2
-- Constraints: packs OFF by default; sandbox Linux-only (>=5.13, fail-closed elsewhere); `AGENTGUARD_DISABLE=1` is emergency kill-switch only
+- Constraints: packs OFF by default; sandbox Linux-only (Landlock ABI >=3, normally Linux >=6.2; fail-closed elsewhere); `AGENTGUARD_DISABLE=1` is emergency kill-switch only

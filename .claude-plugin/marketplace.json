@@ -58,7 +58,7 @@
   "installation": {
     "binary": "Pre-built binaries for 7 targets (x86_64/aarch64 Linux gnu+musl, x86_64/aarch64 macOS, x86_64 Windows) are published in the GitHub Releases. SLSA Build L3 signed.",
     "from_source": "cargo install apohara-agentguard",
-    "minimum_requirements": "Linux: kernel >= 5.13 with Landlock enabled (lsm=landlock). macOS/Windows: gate + path-guard + firewall work; sandbox subcommand fails closed."
+    "minimum_requirements": "Linux: Landlock ABI >= 3 (normally kernel >= 6.2; backports may qualify) with Landlock enabled (lsm=landlock). macOS/Windows: gate + path-guard + firewall work; sandbox subcommand fails closed."
   },
   "links": {
     "readme": "https://github.com/SuarezPM/apohara-agentguard#readme",
