@@ -178,10 +178,13 @@ fn workspace_write_confines_to_root_nonvacuous() {
     );
 }
 
-/// ABI v3 regression: pathname/descriptor truncation and Linux's unusual
+/// ABI v3 regression: pathname truncation and Linux's unusual
 /// `open(O_RDONLY | O_TRUNC)` behavior must work inside the workspace while the
-/// same operations are denied outside. Each outside attempt also proves the
-/// file's content, size, and stable metadata were preserved.
+/// same operations are denied outside. The `ftruncate` case verifies it works
+/// inside and that the real runner cannot obtain a writable external FD after
+/// enforcement; `ftruncate_fd_is_scoped_to_workspace` separately exercises the
+/// descriptor-associated `Truncate` right non-vacuously. Each outside attempt
+/// also proves the file's content, size, and stable metadata were preserved.
 #[test]
 fn truncation_operations_are_scoped_to_workspace() {
     let Some(python) = python3() else {
@@ -204,7 +207,10 @@ fn truncation_operations_are_scoped_to_workspace() {
                   \x20 libc.open.argtypes=[ctypes.c_char_p,ctypes.c_int]\n\
                   \x20 libc.open.restype=ctypes.c_int\n\
                   \x20 fd=libc.open(path,os.O_WRONLY)\n\
-                  \x20 if fd<0: result=fd\n\
+                  \x20 if fd<0:\n\
+                  \x20\x20 error=ctypes.get_errno()\n\
+                  \x20\x20 print('OPEN_DENIED:%d'%error if error in (1,13) else 'OPEN_OTHER:%d'%error)\n\
+                  \x20\x20 sys.exit(0)\n\
                   \x20 else:\n\
                   \x20\x20 libc.ftruncate.argtypes=[ctypes.c_int,ctypes.c_long]\n\
                   \x20\x20 libc.ftruncate.restype=ctypes.c_int\n\
@@ -269,8 +275,13 @@ fn truncation_operations_are_scoped_to_workspace() {
             "{operation} probe outside workspace failed; stderr={:?} violations={:?}",
             denied.stderr, denied.violations
         );
+        let expected_denial = if operation == "ftruncate" {
+            "OPEN_DENIED:13"
+        } else {
+            "DENIED:13"
+        };
         assert!(
-            denied.stdout.contains("DENIED:13"),
+            denied.stdout.contains(expected_denial),
             "{operation} must be denied with EACCES outside workspace; stdout={:?}",
             denied.stdout
         );
