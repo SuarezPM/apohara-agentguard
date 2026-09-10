@@ -419,8 +419,11 @@ fn sandbox_check() -> Check {
         Err(e) => match e.raw_os_error() {
             Some(libc::ENOSYS) => warn_check(
                 "sandbox",
-                "Landlock unavailable: need ABI v3 or newer (normally Linux >= 6.2); \
-                 sandbox commands will refuse to run (fail-closed)",
+                format!(
+                    "Landlock unavailable: need ABI v{} or newer (normally Linux >= 6.2); \
+                     sandbox commands will refuse to run (fail-closed)",
+                    crate::sandbox::REQUIRED_LANDLOCK_ABI
+                ),
             ),
             Some(libc::EOPNOTSUPP) => warn_check(
                 "sandbox",
