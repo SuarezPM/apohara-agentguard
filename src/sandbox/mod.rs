@@ -26,6 +26,12 @@ mod fallback;
 pub use error::{Result, SandboxError};
 pub use permission::PermissionTier;
 
+/// Minimum Landlock ABI required by the enforcing sandbox tiers. ABI v3 adds
+/// `LANDLOCK_ACCESS_FS_TRUNCATE`, which is required to keep all allowed
+/// truncation syscalls scoped to the workspace.
+#[cfg(any(target_os = "linux", test))]
+pub(crate) const REQUIRED_LANDLOCK_ABI: u32 = 3;
+
 /// A request to run a command under the sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxRequest {
