@@ -126,22 +126,18 @@ fn parse_first_token(s: &str) -> Option<(&str, &str)> {
 
 /// Strip `echo` (or `'echo'` / `"echo"`) and any leading flags (`-n`, `-e`, `-E`, `--`).
 fn strip_echo(s: &str) -> Option<&str> {
-    let rest = if let Some(r) = s.strip_prefix("echo") {
-        r
-    } else if let Some(r) = s.strip_prefix("'echo'") {
-        r
-    } else if let Some(r) = s.strip_prefix("\"echo\"") {
-        r
-    } else {
-        return None;
-    };
+    let rest = s
+        .strip_prefix("echo")
+        .or_else(|| s.strip_prefix("'echo'"))
+        .or_else(|| s.strip_prefix("\"echo\""))?;
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
 
     let mut curr = rest.trim_start();
     loop {
-        if curr.starts_with("--") && (curr.len() == 2 || curr[2..].starts_with(char::is_whitespace)) {
+        if curr.starts_with("--") && (curr.len() == 2 || curr[2..].starts_with(char::is_whitespace))
+        {
             curr = curr[2..].trim_start();
             break;
         }
@@ -165,15 +161,10 @@ fn strip_echo(s: &str) -> Option<&str> {
 
 /// Strip `printf` (or `'printf'` / `"printf"`), skipping options and extracting arguments or format string.
 fn strip_printf(s: &str) -> Option<&str> {
-    let rest = if let Some(r) = s.strip_prefix("printf") {
-        r
-    } else if let Some(r) = s.strip_prefix("'printf'") {
-        r
-    } else if let Some(r) = s.strip_prefix("\"printf\"") {
-        r
-    } else {
-        return None;
-    };
+    let rest = s
+        .strip_prefix("printf")
+        .or_else(|| s.strip_prefix("'printf'"))
+        .or_else(|| s.strip_prefix("\"printf\""))?;
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
