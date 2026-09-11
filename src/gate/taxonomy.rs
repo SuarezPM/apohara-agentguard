@@ -48,16 +48,26 @@ macro_rules! re {
 #[inline]
 fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     let needle_bytes = needle.as_bytes();
-    if needle_bytes.is_empty() {
+    let haystack_bytes = haystack.as_bytes();
+    let n_len = needle_bytes.len();
+    if n_len == 0 {
         return true;
     }
-    if haystack.len() < needle_bytes.len() {
+    if haystack_bytes.len() < n_len {
         return false;
     }
-    haystack
-        .as_bytes()
-        .windows(needle_bytes.len())
-        .any(|window| window.eq_ignore_ascii_case(needle_bytes))
+    let first_lower = needle_bytes[0].to_ascii_lowercase();
+    let first_upper = needle_bytes[0].to_ascii_uppercase();
+    let max_idx = haystack_bytes.len() - n_len;
+    for i in 0..=max_idx {
+        let b = haystack_bytes[i];
+        if (b == first_lower || b == first_upper)
+            && haystack_bytes[i + 1..i + n_len].eq_ignore_ascii_case(&needle_bytes[1..])
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn m_rm_rf(s: &str) -> bool {
