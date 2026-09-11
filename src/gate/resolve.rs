@@ -75,31 +75,173 @@ fn parse_assignment(leg: &str) -> Option<(&str, Cow<'_, str>)> {
     Some((name, val_clean))
 }
 
+/// Parse the first shell token from `s` (handling single or double quotes).
+/// Returns `Some((token, rest))` or `None` if `s` is empty.
+fn parse_first_token(s: &str) -> Option<(&str, &str)> {
+    let trimmed = s.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut chars = trimmed.char_indices();
+    let (_, first_char) = chars.next()?;
+
+    if first_char == '\'' {
+        for (idx, ch) in chars {
+            if ch == '\'' {
+                let token = &trimmed[..=idx];
+                let rest = &trimmed[idx + 1..];
+                return Some((token, rest));
+            }
+        }
+        Some((trimmed, ""))
+    } else if first_char == '"' {
+        let mut escaped = false;
+        for (idx, ch) in chars {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' {
+                escaped = true;
+                continue;
+            }
+            if ch == '"' {
+                let token = &trimmed[..=idx];
+                let rest = &trimmed[idx + 1..];
+                return Some((token, rest));
+            }
+        }
+        Some((trimmed, ""))
+    } else {
+        for (idx, ch) in chars {
+            if ch.is_whitespace() {
+                let token = &trimmed[..idx];
+                let rest = &trimmed[idx..];
+                return Some((token, rest));
+            }
+        }
+        Some((trimmed, ""))
+    }
+}
+
+/// Strip `echo` (or `'echo'` / `"echo"`) and any leading flags (`-n`, `-e`, `-E`, `--`).
+fn strip_echo(s: &str) -> Option<&str> {
+    let rest = if let Some(r) = s.strip_prefix("echo") {
+        r
+    } else if let Some(r) = s.strip_prefix("'echo'") {
+        r
+    } else if let Some(r) = s.strip_prefix("\"echo\"") {
+        r
+    } else {
+        return None;
+    };
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let mut curr = rest.trim_start();
+    loop {
+        if curr.starts_with("--") && (curr.len() == 2 || curr[2..].starts_with(char::is_whitespace)) {
+            curr = curr[2..].trim_start();
+            break;
+        }
+        if curr.starts_with('-') {
+            if let Some((token, rest_after)) = parse_first_token(curr) {
+                let raw_token = strip_quotes_borrowed(token);
+                if raw_token.starts_with('-')
+                    && raw_token.len() > 1
+                    && raw_token[1..].chars().all(|c| matches!(c, 'n' | 'e' | 'E'))
+                {
+                    curr = rest_after.trim_start();
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+
+    Some(curr)
+}
+
+/// Strip `printf` (or `'printf'` / `"printf"`), skipping options and extracting arguments or format string.
+fn strip_printf(s: &str) -> Option<&str> {
+    let rest = if let Some(r) = s.strip_prefix("printf") {
+        r
+    } else if let Some(r) = s.strip_prefix("'printf'") {
+        r
+    } else if let Some(r) = s.strip_prefix("\"printf\"") {
+        r
+    } else {
+        return None;
+    };
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+
+    let mut curr = rest.trim_start();
+
+    if curr.starts_with("--") && (curr.len() == 2 || curr[2..].starts_with(char::is_whitespace)) {
+        curr = curr[2..].trim_start();
+    } else if curr.starts_with("-v") {
+        if let Some((tok, r)) = parse_first_token(curr) {
+            if tok == "-v" {
+                if let Some((_var, r2)) = parse_first_token(r) {
+                    curr = r2.trim_start();
+                } else {
+                    curr = "";
+                }
+            } else {
+                curr = r.trim_start();
+            }
+        }
+    }
+
+    if curr.is_empty() {
+        return Some("");
+    }
+
+    if let Some((format_tok, args)) = parse_first_token(curr) {
+        let trimmed_args = args.trim_start();
+        if !trimmed_args.is_empty() {
+            return Some(trimmed_args);
+        } else {
+            return Some(format_tok);
+        }
+    }
+
+    Some(curr)
+}
+
 /// Unwrap substitution envelopes (`$(cmd)`, `` `cmd` ``, `<(cmd)`, `>(cmd)`) to expose inner command text.
 /// If the inner command is a simple output emitter like `echo text` or `printf text`, extract `text` as the evaluated value.
 fn unwrap_substitution(val: &str) -> &str {
     let mut s = val.trim();
-    if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
-        || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
-    {
-        s = s[1..s.len() - 1].trim();
-    }
+    for _ in 0..8 {
+        let prev = s;
+        if (s.starts_with('"') && s.ends_with('"') && s.len() >= 2)
+            || (s.starts_with('\'') && s.ends_with('\'') && s.len() >= 2)
+        {
+            s = s[1..s.len() - 1].trim();
+        }
 
-    if s.starts_with("$(") && s.ends_with(')') && s.len() >= 3 {
-        s = s[2..s.len() - 1].trim();
-    } else if s.starts_with('`') && s.ends_with('`') && s.len() >= 2 {
-        s = s[1..s.len() - 1].trim();
-    } else if (s.starts_with("<(") || s.starts_with(">(")) && s.ends_with(')') && s.len() >= 3 {
-        s = s[2..s.len() - 1].trim();
-    }
+        if s.starts_with("$(") && s.ends_with(')') && s.len() >= 3 {
+            s = s[2..s.len() - 1].trim();
+        } else if s.starts_with('`') && s.ends_with('`') && s.len() >= 2 {
+            s = s[1..s.len() - 1].trim();
+        } else if (s.starts_with("<(") || s.starts_with(">(")) && s.ends_with(')') && s.len() >= 3 {
+            s = s[2..s.len() - 1].trim();
+        }
 
-    if let Some(rest) = s.strip_prefix("echo ") {
-        return rest.trim();
-    }
-    if let Some(rest) = s.strip_prefix("printf ") {
-        return rest.trim();
-    }
+        if let Some(rest) = strip_echo(s) {
+            s = rest.trim();
+        } else if let Some(rest) = strip_printf(s) {
+            s = rest.trim();
+        }
 
+        if s == prev {
+            break;
+        }
+    }
     s
 }
 
@@ -396,6 +538,21 @@ mod tests {
         assert_eq!(out2[1], "rm -rf ~");
 
         let input3 = legs(&["cmd=<(echo rm)", "$cmd -rf ~"]);
+        let out3 = resolve_assignments(&input3);
+        assert_eq!(out3[1], "rm -rf ~");
+    }
+
+    #[test]
+    fn resolves_echo_flags_and_printf_substitutions() {
+        let input = legs(&["cmd=$(echo -n rm)", "$cmd -rf ~"]);
+        let out = resolve_assignments(&input);
+        assert_eq!(out[1], "rm -rf ~");
+
+        let input2 = legs(&["cmd=$(echo -e 'rm')", "$cmd -rf ~"]);
+        let out2 = resolve_assignments(&input2);
+        assert_eq!(out2[1], "rm -rf ~");
+
+        let input3 = legs(&["cmd=$(printf '%s' rm)", "$cmd -rf ~"]);
         let out3 = resolve_assignments(&input3);
         assert_eq!(out3[1], "rm -rf ~");
     }
