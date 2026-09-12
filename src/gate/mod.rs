@@ -342,10 +342,7 @@ fn scan_substitution_body<'a>(
 /// True iff the leg still contains a base64-decode stage we refused to expand
 /// (used to decide whether hitting the cap warrants a WARN).
 fn has_unresolved_decode(leg: &str) -> bool {
-    leg.split('|').any(|stage| {
-        let mut t = stage.split_whitespace();
-        t.next() == Some("base64") && t.any(|x| x == "-d" || x == "--decode")
-    })
+    decode::has_base64_decode_stage(leg)
 }
 
 /// Match a custom block against a leg: `*`-glob if it contains `*`, else
@@ -560,8 +557,24 @@ mod tests {
 
     #[test]
     fn base64_bypass_blocks() {
-        let v = evaluate("echo cm0gLXJmIH4K | base64 -d | sh", &Config::default());
-        assert_eq!(v.tier, Tier::Block);
+        let bypasses = [
+            "echo cm0gLXJmIH4K | base64 -d | sh",
+            "echo cm0gLXJmIH4K | base64 -di | sh",
+            "echo cm0gLXJmIH4K | base64 -D | sh",
+            "echo cm0gLXJmIH4K | /usr/bin/base64 -d | sh",
+            "echo cm0gLXJmIH4K | /bin/base64 -di | sh",
+            "echo cm0gLXJmIH4K | env base64 -d | sh",
+            "echo cm0gLXJmIH4K | FOO=1 base64 -d | sh",
+            "echo cm0gLXJmIH4K | openssl base64 -d | sh",
+            "printf cm0gLXJmIH4K | base64 -d | sh",
+            "printf '%s' cm0gLXJmIH4K | base64 -d | sh",
+            "echo -ne cm0gLXJmIH4K | base64 -d | sh",
+            "cat <<< cm0gLXJmIH4K | base64 -d | sh",
+        ];
+        for cmd in bypasses {
+            let v = evaluate(cmd, &Config::default());
+            assert_eq!(v.tier, Tier::Block, "expected Block for base64 bypass: `{cmd}`");
+        }
     }
 
     #[test]
