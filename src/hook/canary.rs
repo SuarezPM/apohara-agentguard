@@ -177,16 +177,36 @@ fn create_dir_private(dir: &std::path::Path) -> std::io::Result<()> {
                 Ok(())
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o700)
-                    .create(dir)?;
+                if let Some(parent) = dir.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(err) => return Err(err),
+                }
                 let meta = std::fs::symlink_metadata(dir)?;
-                if !meta.file_type().is_dir() || meta.uid() != current_uid {
+                if !meta.file_type().is_dir() {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::PermissionDenied,
-                        "canary directory creation verification failed",
+                        "canary directory is not a directory or is a symlink",
                     ));
+                }
+                if meta.uid() != current_uid {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "canary directory is owned by another user",
+                    ));
+                }
+                if (meta.mode() & 0o077) != 0 {
+                    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+                    let new_meta = std::fs::symlink_metadata(dir)?;
+                    if (new_meta.mode() & 0o077) != 0 {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "canary directory has insecure permissions",
+                        ));
+                    }
                 }
                 Ok(())
             }
@@ -357,6 +377,43 @@ mod tests {
         assert_eq!(
             res.unwrap_err().kind(),
             std::io::ErrorKind::PermissionDenied
+        );
+
+        let _ = std::fs::remove_dir_all(&test_base);
+        drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_dir_private_handles_racing_creation() {
+        use std::os::unix::fs::DirBuilderExt as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let guard = TMPDIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let test_base = std::env::temp_dir().join(format!(
+            "agentguard-canary-race-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&test_base);
+        std::fs::create_dir_all(&test_base).unwrap();
+
+        let race_dir = test_base.join("race_dir");
+
+        // Pre-create the directory with loose permissions (simulating a race where the dir was created concurrently)
+        std::fs::DirBuilder::new()
+            .mode(0o777)
+            .create(&race_dir)
+            .unwrap();
+
+        // create_dir_private should detect the pre-existing dir and adjust permissions to 0o700
+        let res = create_dir_private(&race_dir);
+        assert!(res.is_ok(), "create_dir_private must succeed on pre-existing directory owned by same user");
+
+        let meta = std::fs::symlink_metadata(&race_dir).unwrap();
+        assert_eq!(
+            meta.permissions().mode() & 0o077,
+            0,
+            "permissions must be fixed to 0o700"
         );
 
         let _ = std::fs::remove_dir_all(&test_base);
