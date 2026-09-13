@@ -407,7 +407,10 @@ mod tests {
 
         // create_dir_private should detect the pre-existing dir and adjust permissions to 0o700
         let res = create_dir_private(&race_dir);
-        assert!(res.is_ok(), "create_dir_private must succeed on pre-existing directory owned by same user");
+        assert!(
+            res.is_ok(),
+            "create_dir_private must succeed on pre-existing directory owned by same user"
+        );
 
         let meta = std::fs::symlink_metadata(&race_dir).unwrap();
         assert_eq!(
