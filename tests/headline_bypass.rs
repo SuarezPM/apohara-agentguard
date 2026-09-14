@@ -28,6 +28,22 @@ fn blocks_base64_smuggled_bypass() {
 }
 
 #[test]
+fn blocks_base64_evasions_with_wrappers_and_paths() {
+    let cases = [
+        "echo cm0gLXJmIH4K | /usr/bin/base64 -di | sh",
+        "echo cm0gLXJmIH4K | env base64 -D | sh",
+        "echo cm0gLXJmIH4K | openssl base64 -d | sh",
+        "printf '%s' 'cm0gLXJmIH4K' | base64 -d | sh",
+        "base64 -d <<< 'cm0gLXJmIH4K' | sh",
+    ];
+
+    for cmd in cases {
+        let v = evaluate(cmd, &Config::default());
+        assert_eq!(v.tier, Tier::Block, "base64 evasion must block: `{cmd}`");
+    }
+}
+
+#[test]
 fn blocks_find_delete_bypass() {
     // `find . -delete` deletes recursively but never contains the `rm` token
     // the fixed list keys on.
