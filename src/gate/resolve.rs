@@ -17,7 +17,11 @@ use std::collections::HashMap;
 /// Resolve `$VAR` / `${VAR}` references using `VAR=value` assignments seen in
 /// earlier legs. Returns the legs with references expanded.
 pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Cow<'a, [Cow<'a, str>]> {
-    if !legs.iter().any(|l| l.contains('=') || l.contains('$')) {
+    // PERF: Single-pass byte scan over legs for assignment ('=') or variable ('$') markers.
+    if !legs
+        .iter()
+        .any(|l| l.bytes().any(|b| b == b'=' || b == b'$'))
+    {
         return Cow::Borrowed(legs);
     }
 

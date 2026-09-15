@@ -60,6 +60,23 @@ pub fn normalize_command<'a>(cmd: &'a str) -> Normalized<'a> {
         };
     }
 
+    // PERF: Fast-path probe for normalization triggers.
+    // Pass 1 checks '\\'
+    // Pass 2 checks "$'" (requires '$')
+    // Pass 3 checks "printf" (requires 'p') and "\\x" (requires '\\')
+    // Pass 4 checks "$(" or '`'
+    // Pass 5 checks "IFS=" (requires 'I')
+    // If none of [b'\\', b'$', b'p', b'`', b'I'] are present, no pass can rewrite anything.
+    if !cmd
+        .bytes()
+        .any(|b| matches!(b, b'\\' | b'$' | b'p' | b'`' | b'I'))
+    {
+        return Normalized {
+            command: Cow::Borrowed(cmd),
+            extra_separators: Vec::new(),
+        };
+    }
+
     let mut budget = Budget {
         rewrites: 0,
         max_bytes: MAX_NORMALIZE_BYTES,
