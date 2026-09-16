@@ -62,6 +62,18 @@ fn read_secret_blocks() {
         check_path("Read", "aws_credentials", false).tier,
         Tier::Block
     );
+    assert_eq!(check_path("Read", ".netrc", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", ".pgpass", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", ".npmrc", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", ".dockercfg", false).tier, Tier::Block);
+    assert_eq!(
+        check_path("Read", "id_ed25519_sk", false).tier,
+        Tier::Block
+    );
+    assert_eq!(
+        check_path("Read", "id_ecdsa_sk", false).tier,
+        Tier::Block
+    );
     if !cfg!(windows) {
         assert_eq!(
             check_path("Read", "/private/etc/passwd", false).tier,

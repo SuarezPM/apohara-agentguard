@@ -176,11 +176,22 @@ fn secret_read_target(norm: &str) -> Option<&'static str> {
         return Some("key material (.pem/.key)");
     }
     // Common private key file names.
-    if file == "id_rsa" || file == "id_ed25519" || file == "id_dsa" || file == "id_ecdsa" {
+    if file == "id_rsa"
+        || file == "id_ed25519"
+        || file == "id_dsa"
+        || file == "id_ecdsa"
+        || file == "id_ed25519_sk"
+        || file == "id_ecdsa_sk"
+    {
         return Some("ssh private key");
     }
     // Credential stores.
-    if file.contains("credentials") {
+    if file == ".netrc"
+        || file == ".pgpass"
+        || file == ".npmrc"
+        || file == ".dockercfg"
+        || file.contains("credentials")
+    {
         return Some("credentials file");
     }
 
@@ -303,9 +314,21 @@ mod tests {
             Tier::Block
         );
         assert_eq!(
+            check_path("Read", "/home/u/.ssh/id_ed25519_sk", false).tier,
+            Tier::Block
+        );
+        assert_eq!(
+            check_path("Read", "/home/u/.ssh/id_ecdsa_sk", false).tier,
+            Tier::Block
+        );
+        assert_eq!(
             check_path("Read", "aws_credentials.txt", false).tier,
             Tier::Block
         );
+        assert_eq!(check_path("Read", ".netrc", false).tier, Tier::Block);
+        assert_eq!(check_path("Read", ".pgpass", false).tier, Tier::Block);
+        assert_eq!(check_path("Read", ".npmrc", false).tier, Tier::Block);
+        assert_eq!(check_path("Read", ".dockercfg", false).tier, Tier::Block);
     }
 
     #[test]
