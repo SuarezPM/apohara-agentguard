@@ -152,16 +152,8 @@ fn m_fork_bomb(s: &str) -> bool {
     if !s.chars().any(char::is_whitespace) {
         return fork_bomb_slots_same(s);
     }
-    if s.is_ascii() {
-        let mut buf: smallvec::SmallVec<[u8; 256]> = smallvec::SmallVec::new();
-        buf.extend(s.bytes().filter(|b| !b.is_ascii_whitespace()));
-        // SAFETY: `s` is verified ASCII, so filtering ASCII whitespace leaves valid UTF-8.
-        let compact = unsafe { std::str::from_utf8_unchecked(&buf) };
-        fork_bomb_slots_same(compact)
-    } else {
-        let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-        fork_bomb_slots_same(&compact)
-    }
+    let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    fork_bomb_slots_same(&compact)
 }
 
 /// Verify the compacted fork-bomb shape `X(){X|X&};X` where all four slots
