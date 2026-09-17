@@ -76,6 +76,7 @@ dependencies = [
  "clap",
  "landlock",
  "libc",
+ "memchr",
  "nix",
  "proptest",
  "regex",

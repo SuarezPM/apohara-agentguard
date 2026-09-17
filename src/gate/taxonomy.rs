@@ -58,14 +58,25 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     }
     let first_lower = needle_bytes[0].to_ascii_lowercase();
     let first_upper = needle_bytes[0].to_ascii_uppercase();
-    let max_idx = haystack_bytes.len() - n_len;
-    for i in 0..=max_idx {
-        let b = haystack_bytes[i];
-        if (b == first_lower || b == first_upper)
-            && haystack_bytes[i + 1..i + n_len].eq_ignore_ascii_case(&needle_bytes[1..])
-        {
+    let rest_needle = &needle_bytes[1..];
+    let max_search = haystack_bytes.len() - n_len + 1;
+    let mut offset = 0usize;
+
+    while offset < max_search {
+        let slice = &haystack_bytes[offset..max_search];
+        let pos = if first_lower == first_upper {
+            memchr::memchr(first_lower, slice)
+        } else {
+            memchr::memchr2(first_lower, first_upper, slice)
+        };
+        let Some(p) = pos else {
+            return false;
+        };
+        let idx = offset + p;
+        if haystack_bytes[idx + 1..idx + n_len].eq_ignore_ascii_case(rest_needle) {
             return true;
         }
+        offset = idx + 1;
     }
     false
 }
@@ -408,23 +419,40 @@ fn strip_quoted_spans(leg: &str) -> String {
     let bytes = leg.as_bytes();
     let mut out = String::with_capacity(leg.len());
     let mut i = 0usize;
+    let mut copy_start = 0usize;
     while i < bytes.len() {
         let c = bytes[i];
         if c == b'"' || c == b'\'' {
-            // Emit the opening quote, skip the body, emit the closing quote.
-            out.push(c as char);
+            if i > copy_start {
+                out.push_str(&leg[copy_start..i]);
+            }
+            if c == b'"' {
+                out.push('"');
+            } else {
+                out.push('\'');
+            }
             i += 1;
             while i < bytes.len() && bytes[i] != c {
                 i += 1;
             }
             if i < bytes.len() {
-                out.push(c as char); // closing quote
+                if c == b'"' {
+                    out.push('"');
+                } else {
+                    out.push('\'');
+                }
                 i += 1;
             }
+            copy_start = i;
             continue;
         }
-        out.push(c as char);
         i += 1;
+    }
+    if copy_start == 0 {
+        return leg.to_string();
+    }
+    if copy_start < bytes.len() {
+        out.push_str(&leg[copy_start..]);
     }
     out
 }

@@ -60,6 +60,19 @@ pub fn normalize_command<'a>(cmd: &'a str) -> Normalized<'a> {
         };
     }
 
+    // Fast path: if the command contains none of the characters that trigger
+    // line continuation, ANSI-C decoding, printf hex decoding, command
+    // substitution, or IFS assignments, skip all 5 passes completely.
+    if !cmd
+        .bytes()
+        .any(|b| matches!(b, b'\\' | b'$' | b'p' | b'`' | b'I'))
+    {
+        return Normalized {
+            command: Cow::Borrowed(cmd),
+            extra_separators: Vec::new(),
+        };
+    }
+
     let mut budget = Budget {
         rewrites: 0,
         max_bytes: MAX_NORMALIZE_BYTES,
@@ -112,24 +125,34 @@ fn join_line_continuations<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, 
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0usize;
+    let mut copy_start = 0usize;
     while i < bytes.len() {
         if bytes[i] == b'\\' {
             // `\` + `\n`
-            if bytes.get(i + 1) == Some(&b'\n') && budget.allow(out.len()) {
+            if bytes.get(i + 1) == Some(&b'\n') && budget.allow(out.len() + (i - copy_start)) {
+                out.push_str(&s[copy_start..i]);
                 i += 2;
+                copy_start = i;
                 continue;
             }
             // `\` + `\r\n`
             if bytes.get(i + 1) == Some(&b'\r')
                 && bytes.get(i + 2) == Some(&b'\n')
-                && budget.allow(out.len())
+                && budget.allow(out.len() + (i - copy_start))
             {
+                out.push_str(&s[copy_start..i]);
                 i += 3;
+                copy_start = i;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
         i += 1;
+    }
+    if copy_start == 0 {
+        return s;
+    }
+    if copy_start < bytes.len() {
+        out.push_str(&s[copy_start..]);
     }
     Cow::Owned(out)
 }
@@ -147,6 +170,7 @@ fn decode_ansi_c<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0usize;
+    let mut copy_start = 0usize;
     let mut in_single = false;
     let mut in_double = false;
 
@@ -158,14 +182,14 @@ fn decode_ansi_c<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
             if let Some((decoded, end)) = read_ansi_c_span(bytes, i) {
                 let src_len = end - i;
                 let within_ratio = decoded.len() <= src_len.saturating_mul(MAX_EXPANSION_RATIO);
+                out.push_str(&s[copy_start..i]);
                 if within_ratio && budget.allow(out.len() + decoded.len()) {
                     out.push_str(&decoded);
-                    i = end;
-                    continue;
+                } else {
+                    out.push_str(&s[i..end]);
                 }
-                // Cap exceeded: leave the span verbatim.
-                out.push_str(&s[i..end]);
                 i = end;
+                copy_start = i;
                 continue;
             }
         }
@@ -177,8 +201,13 @@ fn decode_ansi_c<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
             in_double = !in_double;
         }
 
-        out.push(c as char);
         i += 1;
+    }
+    if copy_start == 0 {
+        return s;
+    }
+    if copy_start < bytes.len() {
+        out.push_str(&s[copy_start..]);
     }
     Cow::Owned(out)
 }
@@ -190,25 +219,37 @@ fn read_ansi_c_span(bytes: &[u8], start: usize) -> Option<(String, usize)> {
     // bytes[start] == '$', bytes[start+1] == '\''
     let mut i = start + 2;
     let mut decoded = String::new();
+    let mut copy_start = i;
     while i < bytes.len() {
         let c = bytes[i];
         if c == b'\'' {
+            if copy_start < i {
+                let chunk = std::str::from_utf8(&bytes[copy_start..i]).ok()?;
+                decoded.push_str(chunk);
+            }
             return Some((decoded, i + 1));
         }
         if c == b'\\' && i + 1 < bytes.len() {
+            if copy_start < i {
+                let chunk = std::str::from_utf8(&bytes[copy_start..i]).ok()?;
+                decoded.push_str(chunk);
+            }
             let (ch, advance) = decode_escape(bytes, i + 1);
             if let Some(ch) = ch {
                 decoded.push(ch);
                 i = advance;
+                copy_start = i;
                 continue;
             }
             // Unknown escape: keep the backslash + char literally.
             decoded.push('\\');
-            decoded.push(bytes[i + 1] as char);
-            i += 2;
+            let s = std::str::from_utf8(&bytes[i + 1..]).ok()?;
+            let ch = s.chars().next()?;
+            decoded.push(ch);
+            i += 1 + ch.len_utf8();
+            copy_start = i;
             continue;
         }
-        decoded.push(c as char);
         i += 1;
     }
     None // unterminated span
@@ -338,6 +379,7 @@ fn decode_printf_pipe_shell<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a,
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0usize;
+    let mut copy_start = 0usize;
     let mut in_single = false;
     let mut in_double = false;
 
@@ -347,16 +389,18 @@ fn decode_printf_pipe_shell<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a,
         if c == b'p'
             && !in_single
             && !in_double
-            && at_leg_head(&out)
+            && at_leg_head(&out, &s, copy_start, i)
             && bytes[i..].starts_with(b"printf")
         {
             if let Some((decoded, end)) = try_decode_printf_head(bytes, i) {
                 let src_len = end - i;
                 // Decoding shrinks (\xHH → one byte); enforce the shared cap anyway.
                 let within_ratio = decoded.len() <= src_len.saturating_mul(MAX_EXPANSION_RATIO);
-                if within_ratio && budget.allow(out.len() + decoded.len()) {
+                if within_ratio && budget.allow(out.len() + (i - copy_start) + decoded.len()) {
+                    out.push_str(&s[copy_start..i]);
                     out.push_str(&decoded);
                     i = end;
+                    copy_start = i;
                     continue;
                 }
             }
@@ -369,8 +413,13 @@ fn decode_printf_pipe_shell<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a,
             in_double = !in_double;
         }
 
-        out.push(c as char);
         i += 1;
+    }
+    if copy_start == 0 {
+        return s;
+    }
+    if copy_start < bytes.len() {
+        out.push_str(&s[copy_start..]);
     }
     Cow::Owned(out)
 }
@@ -477,13 +526,14 @@ fn splice_echo_substitution<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a,
     let bytes = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0usize;
+    let mut copy_start = 0usize;
     let mut in_single = false;
     let mut in_double = false;
 
     while i < bytes.len() {
         let c = bytes[i];
 
-        if !in_single && !in_double && at_leg_head(&out) {
+        if !in_single && !in_double && at_leg_head(&out, &s, copy_start, i) {
             // `$(...)`
             if c == b'$' && bytes.get(i + 1) == Some(&b'(') {
                 if let Some((body, end)) = read_paren_body(bytes, i + 2) {
@@ -491,9 +541,13 @@ fn splice_echo_substitution<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a,
                         let src_len = end - i;
                         let within_ratio =
                             literal.len() <= src_len.saturating_mul(MAX_EXPANSION_RATIO);
-                        if within_ratio && budget.allow(out.len() + literal.len()) {
+                        if within_ratio
+                            && budget.allow(out.len() + (i - copy_start) + literal.len())
+                        {
+                            out.push_str(&s[copy_start..i]);
                             out.push_str(&literal);
                             i = end;
+                            copy_start = i;
                             continue;
                         }
                     }
@@ -506,9 +560,13 @@ fn splice_echo_substitution<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a,
                         let src_len = end - i;
                         let within_ratio =
                             literal.len() <= src_len.saturating_mul(MAX_EXPANSION_RATIO);
-                        if within_ratio && budget.allow(out.len() + literal.len()) {
+                        if within_ratio
+                            && budget.allow(out.len() + (i - copy_start) + literal.len())
+                        {
+                            out.push_str(&s[copy_start..i]);
                             out.push_str(&literal);
                             i = end;
+                            copy_start = i;
                             continue;
                         }
                     }
@@ -522,24 +580,38 @@ fn splice_echo_substitution<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a,
             in_double = !in_double;
         }
 
-        out.push(c as char);
         i += 1;
+    }
+    if copy_start == 0 {
+        return s;
+    }
+    if copy_start < bytes.len() {
+        out.push_str(&s[copy_start..]);
     }
     Cow::Owned(out)
 }
 
 /// True iff the text emitted so far ends at a leg head — i.e. the current
 /// position is the first token of a leg (only separators/whitespace since the
-/// last leg boundary). This is what makes pass 3 fire only in verb position.
-fn at_leg_head(out: &str) -> bool {
-    for ch in out.chars().rev() {
-        match ch {
-            ' ' | '\t' => {}                             // leading whitespace, keep scanning
-            ';' | '|' | '&' | '\n' | '(' => return true, // leg/group boundary
-            _ => return false,                           // a real token precedes us → argument
+/// last leg boundary).
+fn at_leg_head(out: &str, s: &str, copy_start: usize, i: usize) -> bool {
+    if copy_start < i {
+        for ch in s[copy_start..i].chars().rev() {
+            match ch {
+                ' ' | '\t' => {}
+                ';' | '|' | '&' | '\n' | '(' => return true,
+                _ => return false,
+            }
         }
     }
-    true // nothing before us → very first token
+    for ch in out.chars().rev() {
+        match ch {
+            ' ' | '\t' => {}
+            ';' | '|' | '&' | '\n' | '(' => return true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Read a `$(...)`-style paren body starting at `start` (just past `(`),
@@ -548,7 +620,7 @@ fn at_leg_head(out: &str) -> bool {
 fn read_paren_body(bytes: &[u8], start: usize) -> Option<(String, usize)> {
     let mut i = start;
     let mut depth = 1usize;
-    let mut inner = String::new();
+    let body_start = start;
     while i < bytes.len() {
         let c = bytes[i];
         if c == b'(' {
@@ -556,10 +628,10 @@ fn read_paren_body(bytes: &[u8], start: usize) -> Option<(String, usize)> {
         } else if c == b')' {
             depth -= 1;
             if depth == 0 {
+                let inner = std::str::from_utf8(&bytes[body_start..i]).ok()?.to_string();
                 return Some((inner, i + 1));
             }
         }
-        inner.push(c as char);
         i += 1;
     }
     None
@@ -568,12 +640,12 @@ fn read_paren_body(bytes: &[u8], start: usize) -> Option<(String, usize)> {
 /// Read a backtick body starting at `start` (just past the opening backtick).
 fn read_backtick_body(bytes: &[u8], start: usize) -> Option<(String, usize)> {
     let mut i = start;
-    let mut inner = String::new();
+    let body_start = start;
     while i < bytes.len() {
         if bytes[i] == b'`' {
+            let inner = std::str::from_utf8(&bytes[body_start..i]).ok()?.to_string();
             return Some((inner, i + 1));
         }
-        inner.push(bytes[i] as char);
         i += 1;
     }
     None
@@ -661,13 +733,13 @@ fn collect_ifs_separators(s: &str) -> Vec<char> {
 
 /// Split `s` into top-level legs on `;`, `\n`, and `&` (quote-aware), WITHOUT
 /// recursing into substitutions. Used only to spot a leading `IFS=` leg.
-fn top_level_legs(s: &str) -> Vec<String> {
+fn top_level_legs(s: &str) -> Vec<&str> {
     let bytes = s.as_bytes();
     let mut legs = Vec::new();
-    let mut current = String::new();
     let mut in_single = false;
     let mut in_double = false;
     let mut i = 0usize;
+    let mut leg_start = 0usize;
     while i < bytes.len() {
         let c = bytes[i];
         if c == b'\'' && !in_double {
@@ -676,20 +748,19 @@ fn top_level_legs(s: &str) -> Vec<String> {
             in_double = !in_double;
         }
         if !in_single && !in_double && (c == b';' || c == b'\n' || c == b'&') {
-            let t = current.trim();
+            let t = s[leg_start..i].trim();
             if !t.is_empty() {
-                legs.push(t.to_string());
+                legs.push(t);
             }
-            current.clear();
             i += 1;
+            leg_start = i;
             continue;
         }
-        current.push(c as char);
         i += 1;
     }
-    let t = current.trim();
+    let t = s[leg_start..].trim();
     if !t.is_empty() {
-        legs.push(t.to_string());
+        legs.push(t);
     }
     legs
 }
@@ -748,6 +819,11 @@ mod tests {
     #[test]
     fn decodes_ansi_c_named_escapes() {
         assert_eq!(norm(r"$'a\tb'"), "a\tb");
+    }
+
+    #[test]
+    fn decodes_ansi_c_unknown_escape_preserved() {
+        assert_eq!(norm(r"$'foo\zbar'"), r"foo\zbar");
     }
 
     #[test]
