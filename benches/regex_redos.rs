@@ -88,15 +88,27 @@ fn main() {
     // A quadratic regression would push the ratio toward 16+; linear stays ~4.
     let big = small * 4;
     for ((label, small_text), (_, big_text)) in inputs(small).into_iter().zip(inputs(big)) {
-        // Median of 3 to damp jitter on the small (fast) measurement.
+        // Median of 5 for both small and big to damp VM preemption jitter on CI runners.
         let mut small_runs = [
+            time_scan(&small_text),
+            time_scan(&small_text),
             time_scan(&small_text),
             time_scan(&small_text),
             time_scan(&small_text),
         ];
         small_runs.sort_unstable();
-        let small_t = small_runs[1].max(Duration::from_micros(1));
-        let big_t = time_scan(&big_text);
+        let small_t = small_runs[2].max(Duration::from_micros(10));
+
+        let mut big_runs = [
+            time_scan(&big_text),
+            time_scan(&big_text),
+            time_scan(&big_text),
+            time_scan(&big_text),
+            time_scan(&big_text),
+        ];
+        big_runs.sort_unstable();
+        let big_t = big_runs[2];
+
         let ratio = big_t.as_secs_f64() / small_t.as_secs_f64();
         println!("  linearity {label:<16}: 4x input => {ratio:.1}x time (small {small_t:?}, big {big_t:?})");
         assert!(
