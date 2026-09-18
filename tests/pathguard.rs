@@ -58,10 +58,17 @@ fn read_secret_blocks() {
     );
     assert_eq!(check_path("Read", "server.pem", false).tier, Tier::Block);
     assert_eq!(check_path("Read", "id_rsa", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", "id_ed25519_sk", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", "id_ecdsa_sk", false).tier, Tier::Block);
     assert_eq!(
         check_path("Read", "aws_credentials", false).tier,
         Tier::Block
     );
+    assert_eq!(check_path("Read", ".netrc", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", "_netrc", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", ".pgpass", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", ".npmrc", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", ".dockercfg", false).tier, Tier::Block);
     if !cfg!(windows) {
         assert_eq!(
             check_path("Read", "/private/etc/passwd", false).tier,
@@ -71,6 +78,23 @@ fn read_secret_blocks() {
             check_path("Read", "/private/etc/sudoers", false).tier,
             Tier::Block
         );
+    }
+}
+
+#[test]
+fn read_credential_stores_at_tool_level_blocks() {
+    for store in [".netrc", "_netrc", ".pgpass", ".npmrc", ".dockercfg"] {
+        let input = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": { "file_path": store },
+        })
+        .to_string();
+
+        let (out, code) = run(&input, &Config::default());
+        assert_eq!(code, 2, "{store} read must block (exit 2)");
+        let v: Value = serde_json::from_str(&out.expect("deny JSON")).expect("valid JSON");
+        assert_eq!(v["hookSpecificOutput"]["permissionDecision"], "deny");
     }
 }
 
