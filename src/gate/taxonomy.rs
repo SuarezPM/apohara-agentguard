@@ -45,6 +45,8 @@ macro_rules! re {
 }
 
 /// Zero-allocation, case-insensitive ASCII substring search helper.
+/// Uses `memchr::memchr` / `memchr::memchr2` SIMD byte searching to jump to
+/// candidate match locations across the haystack.
 #[inline]
 fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     let needle_bytes = needle.as_bytes();
@@ -59,12 +61,23 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     let first_lower = needle_bytes[0].to_ascii_lowercase();
     let first_upper = needle_bytes[0].to_ascii_uppercase();
     let max_idx = haystack_bytes.len() - n_len;
-    for i in 0..=max_idx {
-        let b = haystack_bytes[i];
-        if (b == first_lower || b == first_upper)
-            && haystack_bytes[i + 1..i + n_len].eq_ignore_ascii_case(&needle_bytes[1..])
-        {
-            return true;
+    let mut offset = 0;
+    while offset <= max_idx {
+        let slice = &haystack_bytes[offset..=max_idx];
+        let found = if first_lower == first_upper {
+            memchr::memchr(first_lower, slice)
+        } else {
+            memchr::memchr2(first_lower, first_upper, slice)
+        };
+        match found {
+            Some(pos) => {
+                let idx = offset + pos;
+                if haystack_bytes[idx + 1..idx + n_len].eq_ignore_ascii_case(&needle_bytes[1..]) {
+                    return true;
+                }
+                offset = idx + 1;
+            }
+            None => return false,
         }
     }
     false

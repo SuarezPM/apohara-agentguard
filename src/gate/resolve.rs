@@ -17,7 +17,10 @@ use std::collections::HashMap;
 /// Resolve `$VAR` / `${VAR}` references using `VAR=value` assignments seen in
 /// earlier legs. Returns the legs with references expanded.
 pub(crate) fn resolve_assignments<'a>(legs: &'a [Cow<'a, str>]) -> Cow<'a, [Cow<'a, str>]> {
-    if !legs.iter().any(|l| l.contains('=') || l.contains('$')) {
+    if !legs
+        .iter()
+        .any(|l| memchr::memchr2(b'=', b'$', l.as_bytes()).is_some())
+    {
         return Cow::Borrowed(legs);
     }
 
@@ -354,7 +357,7 @@ fn evaluate_param_expansion(
 }
 
 fn expand_vars_pass(text: &str, vars: &mut HashMap<String, String>) -> (String, bool) {
-    if !text.contains('$') {
+    if memchr::memchr(b'$', text.as_bytes()).is_none() {
         return (text.to_string(), false);
     }
     let bytes = text.as_bytes();
@@ -428,7 +431,11 @@ fn expand_vars(text: &str, vars: &mut HashMap<String, String>) -> (String, bool)
 }
 
 fn find_byte(bytes: &[u8], from: usize, target: u8) -> Option<usize> {
-    (from..bytes.len()).find(|&k| bytes[k] == target)
+    if from >= bytes.len() {
+        None
+    } else {
+        memchr::memchr(target, &bytes[from..]).map(|pos| from + pos)
+    }
 }
 
 #[cfg(test)]

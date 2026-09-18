@@ -60,6 +60,18 @@ pub fn normalize_command<'a>(cmd: &'a str) -> Normalized<'a> {
         };
     }
 
+    // PERF: Fast-path probe for normalization trigger bytes.
+    // If none exist, return borrowed command directly without allocating or calling passes.
+    if !cmd
+        .bytes()
+        .any(|b| matches!(b, b'\\' | b'$' | b'p' | b'`' | b'I'))
+    {
+        return Normalized {
+            command: Cow::Borrowed(cmd),
+            extra_separators: Vec::new(),
+        };
+    }
+
     let mut budget = Budget {
         rewrites: 0,
         max_bytes: MAX_NORMALIZE_BYTES,
@@ -106,7 +118,7 @@ impl Budget {
 /// the line). A lone trailing `\` not before a newline is left untouched, and a
 /// `\x`-style escape (not before a newline) is left for the ANSI-C pass.
 fn join_line_continuations<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
-    if !s.contains('\\') {
+    if memchr::memchr(b'\\', s.as_bytes()).is_none() {
         return s;
     }
     let bytes = s.as_bytes();
@@ -141,7 +153,7 @@ fn join_line_continuations<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, 
 /// cap; a span that violates a cap (or contains a malformed escape we choose not
 /// to expand) is left intact.
 fn decode_ansi_c<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
-    if !s.contains("$'") {
+    if memchr::memmem::find(s.as_bytes(), b"$'").is_none() {
         return s;
     }
     let bytes = s.as_bytes();
@@ -287,7 +299,7 @@ fn hex_val(b: u8) -> u32 {
 /// escape is truncated or unrecognized; callers treat that as "leave the
 /// construct intact" (fail-closed).
 fn decode_printf_escapes(lit: &str) -> Option<String> {
-    if !lit.contains('\\') {
+    if memchr::memchr(b'\\', lit.as_bytes()).is_none() {
         return Some(lit.to_string());
     }
     let bytes = lit.as_bytes();
@@ -332,7 +344,9 @@ const SHELL_INTERPRETERS: &[&str] = &["sh", "bash", "zsh", "ksh", "dash", "ash",
 fn decode_printf_pipe_shell<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
     // Cheap guards before walking bytes (hot path): both are necessary
     // conditions of the shape, so missing either skips the pass entirely.
-    if !s.contains("printf") || !s.contains(r"\x") {
+    if memchr::memmem::find(s.as_bytes(), b"printf").is_none()
+        || memchr::memmem::find(s.as_bytes(), b"\\x").is_none()
+    {
         return s;
     }
     let bytes = s.as_bytes();
@@ -471,7 +485,9 @@ fn try_decode_printf_head(bytes: &[u8], start: usize) -> Option<(String, usize)>
 /// emit. ONLY fires in VERB/command position (the leg head), never as an
 /// argument — so `git commit -m "$(echo rm -rf)"` is untouched.
 fn splice_echo_substitution<'a>(s: Cow<'a, str>, budget: &mut Budget) -> Cow<'a, str> {
-    if !s.contains("$(") && !s.contains('`') {
+    if memchr::memmem::find(s.as_bytes(), b"$(").is_none()
+        && memchr::memchr(b'`', s.as_bytes()).is_none()
+    {
         return s;
     }
     let bytes = s.as_bytes();
@@ -639,7 +655,7 @@ fn strip_quotes(s: &str) -> String {
 /// Empty `IFS=` is a no-op. `IFS=` inside a quoted string is ignored. The
 /// returned separators are applied (gated on surfacing a hit) by the caller.
 fn collect_ifs_separators(s: &str) -> Vec<char> {
-    if !s.contains("IFS=") {
+    if memchr::memmem::find(s.as_bytes(), b"IFS=").is_none() {
         return Vec::new();
     }
     let mut extra: Vec<char> = Vec::new();
