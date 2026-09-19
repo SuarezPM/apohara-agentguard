@@ -175,12 +175,25 @@ fn secret_read_target(norm: &str) -> Option<&'static str> {
     if file.ends_with(".pem") || file.ends_with(".key") {
         return Some("key material (.pem/.key)");
     }
-    // Common private key file names.
-    if file == "id_rsa" || file == "id_ed25519" || file == "id_dsa" || file == "id_ecdsa" {
+    // Common private key file names (including FIDO2 / security key SSH keys).
+    if file == "id_rsa"
+        || file == "id_ed25519"
+        || file == "id_dsa"
+        || file == "id_ecdsa"
+        || file == "id_ed25519_sk"
+        || file == "id_ecdsa_sk"
+        || file == "id_dsa_sk"
+        || file == "id_rsa_sk"
+    {
         return Some("ssh private key");
     }
     // Credential stores.
-    if file.contains("credentials") {
+    if file.contains("credentials")
+        || file == ".netrc"
+        || file == ".pgpass"
+        || file == ".npmrc"
+        || file == ".dockercfg"
+    {
         return Some("credentials file");
     }
 
@@ -303,9 +316,28 @@ mod tests {
             Tier::Block
         );
         assert_eq!(
+            check_path("Read", "id_ed25519_sk", false).tier,
+            Tier::Block
+        );
+        assert_eq!(
+            check_path("Read", "id_ecdsa_sk", false).tier,
+            Tier::Block
+        );
+        assert_eq!(
             check_path("Read", "aws_credentials.txt", false).tier,
             Tier::Block
         );
+    }
+
+    #[test]
+    fn read_credential_stores_blocks() {
+        for path in [".netrc", ".pgpass", ".npmrc", ".dockercfg", "home/user/.netrc"] {
+            assert_eq!(
+                check_path("Read", path, false).tier,
+                Tier::Block,
+                "credential store must block: {path}"
+            );
+        }
     }
 
     #[test]

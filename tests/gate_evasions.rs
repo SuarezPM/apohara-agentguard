@@ -59,6 +59,31 @@ fn param_default_eq_currently_blocks_incidentally() {
     );
 }
 
+/// Base64 decode evasions: obfuscated destructive commands fed through `base64`
+/// using combined flags (`-di`, `-D`), binary paths (`/usr/bin/base64`),
+/// wrappers (`openssl`, `env`), `printf`, and herestrings (`cat <<<`).
+#[test]
+fn base64_smuggled_evasions_block() {
+    let cases = [
+        "echo cm0gLXJmIH4K | base64 -di | sh",
+        "echo cm0gLXJmIH4K | base64 -D | sh",
+        "echo cm0gLXJmIH4K | /usr/bin/base64 -d | sh",
+        "echo cm0gLXJmIH4K | openssl base64 -d | sh",
+        "echo cm0gLXJmIH4K | env base64 -d | sh",
+        "printf cm0gLXJmIH4K | base64 -d | sh",
+        "printf '%s' cm0gLXJmIH4K | base64 -d | sh",
+        "cat <<< cm0gLXJmIH4K | base64 -d | sh",
+    ];
+    for cmd in cases {
+        let v = evaluate(cmd, &Config::default());
+        assert_eq!(
+            v.tier,
+            Tier::Block,
+            "base64 smuggled evasion must Block: `{cmd}`"
+        );
+    }
+}
+
 /// Command-substitution-produced verb: `$(echo rm) -rf ~`. The normalize
 /// pre-pass splices a leg-head `echo`/`printf` literal substitution in place ->
 /// now DELIBERATELY Blocks (v0.1.x). Both `$(...)` and backtick forms.

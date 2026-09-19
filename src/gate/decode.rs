@@ -46,41 +46,105 @@ pub(crate) fn decode_and_expand(leg: &str, depth: u8) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
-/// True iff `leg` pipes into a `base64 -d` / `base64 --decode` stage.
+/// True iff `leg` pipes into a base64 decode stage (e.g. `base64 -d`, `base64 -di`,
+/// `base64 -D`, `/usr/bin/base64 -d`, `openssl base64 -d`, `env base64 -d`, `sudo base64 -d`).
 fn has_base64_decode_stage(leg: &str) -> bool {
     if !leg.contains("base64") {
         return false;
     }
     leg.split('|').any(|stage| {
         let s = stage.trim();
-        let mut tokens = s.split_whitespace();
-        if tokens.next() != Some("base64") {
+        let mut tokens = s.split_whitespace().peekable();
+
+        // Skip command wrappers like `env`, `sudo` and flags
+        while let Some(&t) = tokens.peek() {
+            if t == "env" || t == "sudo" || (t.starts_with('-') && !t.contains("base64")) {
+                tokens.next();
+            } else {
+                break;
+            }
+        }
+
+        let head = match tokens.next() {
+            Some(h) => h,
+            None => return false,
+        };
+
+        let is_base64_cmd = head == "base64" || head.ends_with("/base64");
+        let is_openssl_cmd = head == "openssl" && tokens.peek().copied() == Some("base64");
+        if is_openssl_cmd {
+            tokens.next(); // consume "base64"
+        }
+
+        if !is_base64_cmd && !is_openssl_cmd {
             return false;
         }
-        tokens.any(|t| t == "-d" || t == "--decode")
+
+        tokens.any(is_decode_flag)
     })
 }
 
-/// Extract the base64 payload feeding the pipe. Handles two shapes:
-/// - `echo <payload> | base64 -d ...` — payload is the echo argument.
-/// - `<payload> | base64 -d ...`      — payload is a bare leading token.
+fn is_decode_flag(t: &str) -> bool {
+    if t == "--decode" || t.starts_with("--decode=") {
+        return true;
+    }
+    if t.starts_with('-') && !t.starts_with("--") {
+        return t.contains('d') || t.contains('D');
+    }
+    false
+}
+
+/// Extract the base64 payload feeding the pipe. Handles multiple shapes:
+/// - `echo [flags] <payload> | base64 -d ...`
+/// - `printf [flags] [%s] <payload> | base64 -d ...`
+/// - `cat <<< <payload> | base64 -d ...`
+/// - `<payload> | base64 -d ...` (bare literal)
 fn extract_payload(leg: &str) -> Option<String> {
     let first_stage = leg.split('|').next()?.trim();
     let mut tokens = first_stage.split_whitespace();
     let head = tokens.next()?;
 
-    if head == "echo" {
-        // Join remaining tokens, skipping a leading `-n` flag; strip quotes.
+    let payload_raw = if head == "echo" {
         let rest: Vec<&str> = tokens.collect();
-        let rest = match rest.first() {
-            Some(&"-n") | Some(&"-e") => &rest[1..],
-            _ => &rest[..],
-        };
-        let joined = rest.join(" ");
-        Some(strip_quotes(joined.trim()))
+        let mut idx = 0;
+        while idx < rest.len() && rest[idx].starts_with('-') {
+            if rest[idx] == "--" {
+                idx += 1;
+                break;
+            }
+            idx += 1;
+        }
+        rest[idx..].join(" ")
+    } else if head == "printf" {
+        let rest: Vec<&str> = tokens.collect();
+        let mut idx = 0;
+        while idx < rest.len() && rest[idx].starts_with('-') {
+            if rest[idx] == "--" {
+                idx += 1;
+                break;
+            }
+            idx += 1;
+        }
+        if idx < rest.len() && rest[idx].contains('%') {
+            idx += 1;
+        }
+        rest[idx..].join(" ")
+    } else if head == "cat" {
+        let rest = tokens.collect::<Vec<_>>().join(" ");
+        if let Some(after) = rest.strip_prefix("<<<") {
+            after.trim().to_string()
+        } else {
+            return None;
+        }
     } else {
-        // Bare literal payload (single token).
-        Some(strip_quotes(head))
+        head.to_string()
+    };
+
+    let trimmed = payload_raw.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(strip_quotes(trimmed))
     }
 }
 
@@ -105,6 +169,24 @@ mod tests {
         let leg = "echo cm0gLXJmIH4K | base64 -d | sh";
         let out = decode_and_expand(leg, 0).expect("decode");
         assert_eq!(out.trim(), "rm -rf ~");
+    }
+
+    #[test]
+    fn decodes_combined_flags_and_path_variants() {
+        let cases = [
+            "echo cm0gLXJmIH4K | base64 -di | sh",
+            "echo cm0gLXJmIH4K | base64 -D | sh",
+            "echo cm0gLXJmIH4K | /usr/bin/base64 -d | sh",
+            "echo cm0gLXJmIH4K | openssl base64 -d | sh",
+            "echo cm0gLXJmIH4K | env base64 -d | sh",
+            "printf cm0gLXJmIH4K | base64 -d | sh",
+            "printf '%s' cm0gLXJmIH4K | base64 -d | sh",
+            "cat <<< cm0gLXJmIH4K | base64 -d | sh",
+        ];
+        for leg in cases {
+            let out = decode_and_expand(leg, 0).expect("decode");
+            assert_eq!(out.trim(), "rm -rf ~", "failed for: {leg}");
+        }
     }
 
     #[test]
