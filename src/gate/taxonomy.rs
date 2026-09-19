@@ -149,6 +149,9 @@ fn m_fork_bomb(s: &str) -> bool {
     // as the structural shape `X(){X|X&};X` with the SAME token X in all four
     // slots, verified by [`fork_bomb_slots_same`] (the Rust regex crate has no
     // backreferences, so slot sameness cannot be expressed as one regex).
+    if !s.chars().any(char::is_whitespace) {
+        return fork_bomb_slots_same(s);
+    }
     let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     fork_bomb_slots_same(&compact)
 }
