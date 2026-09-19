@@ -60,6 +60,20 @@ pub fn normalize_command<'a>(cmd: &'a str) -> Normalized<'a> {
         };
     }
 
+    // PERF: Fast-path probe for normalization triggers:
+    // Pass 1 needs '\\', Pass 2 needs '$', Pass 3 needs 'p' (for printf) and '\\' (for \x),
+    // Pass 4 needs '$' or '`', Pass 5 needs 'I' (for IFS=).
+    // If none of these bytes exist, none of the 5 passes can modify the command.
+    if !cmd
+        .bytes()
+        .any(|b| matches!(b, b'\\' | b'$' | b'`' | b'p' | b'I'))
+    {
+        return Normalized {
+            command: Cow::Borrowed(cmd),
+            extra_separators: Vec::new(),
+        };
+    }
+
     let mut budget = Budget {
         rewrites: 0,
         max_bytes: MAX_NORMALIZE_BYTES,

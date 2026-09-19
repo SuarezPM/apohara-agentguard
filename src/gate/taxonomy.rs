@@ -44,7 +44,7 @@ macro_rules! re {
     }};
 }
 
-/// Zero-allocation, case-insensitive ASCII substring search helper.
+/// Zero-allocation, case-insensitive ASCII substring search helper using SIMD byte searching via `memchr`.
 #[inline]
 fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     let needle_bytes = needle.as_bytes();
@@ -58,14 +58,27 @@ fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
     }
     let first_lower = needle_bytes[0].to_ascii_lowercase();
     let first_upper = needle_bytes[0].to_ascii_uppercase();
-    let max_idx = haystack_bytes.len() - n_len;
-    for i in 0..=max_idx {
-        let b = haystack_bytes[i];
-        if (b == first_lower || b == first_upper)
-            && haystack_bytes[i + 1..i + n_len].eq_ignore_ascii_case(&needle_bytes[1..])
+
+    let mut offset = 0;
+    while offset + n_len <= haystack_bytes.len() {
+        let search_slice = &haystack_bytes[offset..];
+        let pos = if first_lower == first_upper {
+            memchr::memchr(first_lower, search_slice)
+        } else {
+            memchr::memchr2(first_lower, first_upper, search_slice)
+        };
+        let match_idx = match pos {
+            Some(p) => offset + p,
+            None => return false,
+        };
+        if match_idx + n_len > haystack_bytes.len() {
+            return false;
+        }
+        if haystack_bytes[match_idx + 1..match_idx + n_len].eq_ignore_ascii_case(&needle_bytes[1..])
         {
             return true;
         }
+        offset = match_idx + 1;
     }
     false
 }
@@ -386,6 +399,14 @@ pub(crate) fn live_substitution_bodies(leg: &str) -> Vec<&str> {
 /// command to execute.
 pub(crate) fn is_non_executing_verb(leg: &str) -> bool {
     let trimmed = leg.trim_start();
+    let bytes = trimmed.as_bytes();
+    if bytes.is_empty() {
+        return false;
+    }
+    let b = bytes[0];
+    if b != b'e' && b != b'p' && b != b'g' {
+        return false;
+    }
     let mut tokens = trimmed.split_whitespace();
     let verb = match tokens.next() {
         Some(v) => v,
