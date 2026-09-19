@@ -399,14 +399,6 @@ pub(crate) fn live_substitution_bodies(leg: &str) -> Vec<&str> {
 /// command to execute.
 pub(crate) fn is_non_executing_verb(leg: &str) -> bool {
     let trimmed = leg.trim_start();
-    let bytes = trimmed.as_bytes();
-    if bytes.is_empty() {
-        return false;
-    }
-    let b = bytes[0];
-    if b != b'e' && b != b'p' && b != b'g' {
-        return false;
-    }
     let mut tokens = trimmed.split_whitespace();
     let verb = match tokens.next() {
         Some(v) => v,
