@@ -321,17 +321,18 @@ fn is_blocking_event(event: &str) -> bool {
 /// neutralize+cap discipline for every transport.
 pub(crate) fn cap_reason(reason: &str) -> String {
     let neutralized = neutralize(reason);
-    let reason: &str = neutralized.as_ref();
-    if reason.len() <= MAX_CONTEXT_BYTES {
-        return reason.to_string();
+    let reason_str: &str = neutralized.as_ref();
+    if reason_str.len() <= MAX_CONTEXT_BYTES {
+        neutralized.into_owned()
+    } else {
+        // Reserve room for the ellipsis and back off to a char boundary.
+        let budget = MAX_CONTEXT_BYTES.saturating_sub(ELLIPSIS.len());
+        let mut end = budget;
+        while end > 0 && !reason_str.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}{}", &reason_str[..end], ELLIPSIS)
     }
-    // Reserve room for the ellipsis and back off to a char boundary.
-    let budget = MAX_CONTEXT_BYTES.saturating_sub(ELLIPSIS.len());
-    let mut end = budget;
-    while end > 0 && !reason.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}{}", &reason[..end], ELLIPSIS)
 }
 
 #[cfg(test)]

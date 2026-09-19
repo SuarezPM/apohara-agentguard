@@ -483,9 +483,9 @@ fn build_verdict(tier: Tier, hit: &Hit<'_>) -> Verdict {
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
+fn truncate(s: &str, max: usize) -> Cow<'_, str> {
     if s.len() <= max {
-        s.to_string()
+        Cow::Borrowed(s)
     } else {
         // `max` may land inside a multi-byte UTF-8 char; slicing there panics.
         // Step back to the largest char boundary at or below `max`.
@@ -493,7 +493,7 @@ fn truncate(s: &str, max: usize) -> String {
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}…", &s[..end])
+        Cow::Owned(format!("{}…", &s[..end]))
     }
 }
 
