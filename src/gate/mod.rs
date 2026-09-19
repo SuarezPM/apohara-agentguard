@@ -342,10 +342,7 @@ fn scan_substitution_body<'a>(
 /// True iff the leg still contains a base64-decode stage we refused to expand
 /// (used to decide whether hitting the cap warrants a WARN).
 fn has_unresolved_decode(leg: &str) -> bool {
-    leg.split('|').any(|stage| {
-        let mut t = stage.split_whitespace();
-        t.next() == Some("base64") && t.any(|x| x == "-d" || x == "--decode")
-    })
+    decode::has_base64_decode_stage(leg)
 }
 
 /// Match a custom block against a leg: `*`-glob if it contains `*`, else
