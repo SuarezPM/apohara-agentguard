@@ -182,6 +182,8 @@ fn secret_read_target(norm: &str) -> Option<&'static str> {
         || file == "id_ecdsa"
         || file == "id_ed25519_sk"
         || file == "id_ecdsa_sk"
+        || file == "id_rsa_sk"
+        || file == "id_dsa_sk"
     {
         return Some("ssh private key");
     }
@@ -316,6 +318,8 @@ mod tests {
         );
         assert_eq!(check_path("Read", "id_ed25519_sk", false).tier, Tier::Block);
         assert_eq!(check_path("Read", "id_ecdsa_sk", false).tier, Tier::Block);
+        assert_eq!(check_path("Read", "id_rsa_sk", false).tier, Tier::Block);
+        assert_eq!(check_path("Read", "id_dsa_sk", false).tier, Tier::Block);
         assert_eq!(
             check_path("Read", "aws_credentials.txt", false).tier,
             Tier::Block

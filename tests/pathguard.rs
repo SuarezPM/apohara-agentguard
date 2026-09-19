@@ -60,6 +60,8 @@ fn read_secret_blocks() {
     assert_eq!(check_path("Read", "id_rsa", false).tier, Tier::Block);
     assert_eq!(check_path("Read", "id_ed25519_sk", false).tier, Tier::Block);
     assert_eq!(check_path("Read", "id_ecdsa_sk", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", "id_rsa_sk", false).tier, Tier::Block);
+    assert_eq!(check_path("Read", "id_dsa_sk", false).tier, Tier::Block);
     assert_eq!(
         check_path("Read", "aws_credentials", false).tier,
         Tier::Block
