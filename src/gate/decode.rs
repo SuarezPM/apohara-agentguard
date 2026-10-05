@@ -92,7 +92,10 @@ fn is_wrapper(token: &str) -> bool {
 
 fn is_env_var_assignment(token: &str) -> bool {
     if let Some(eq_pos) = token.find('=') {
-        eq_pos > 0 && token[..eq_pos].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        eq_pos > 0
+            && token[..eq_pos]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
     } else {
         false
     }
