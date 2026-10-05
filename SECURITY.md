@@ -171,6 +171,11 @@ seccomp (last)**.
 - **Fail-closed setup.** If the kernel cannot enforce Landlock (too old,
   disabled at boot) or seccomp install fails, the sandbox **refuses to run**
   (non-zero exit) — it never falls back to an unconfined process.
+  Compatibility: kernels 5.13–6.1 provide only Landlock ABI v1/v2 and are
+  **explicitly rejected** (loud `need ABI v3` error, `PartiallyEnforced` never
+  accepted — `FullyEnforced` required); ABI v3 normally means Linux ≥6.2
+  (backports may qualify). File FDs (`/etc/ld.so.cache`, `/dev/null`, …) carry
+  file-only grants so dir-only rights never trigger `EINVAL`.
 
 **Does NOT cover:**
 

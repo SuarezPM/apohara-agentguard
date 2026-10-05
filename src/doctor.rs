@@ -445,7 +445,8 @@ fn landlock_abi_check(version: u32) -> Check {
             "sandbox",
             format!(
                 "Landlock kernel ABI v{version} is below required v{} \
-                 (normally Linux >= 6.2); sandbox commands will refuse to run (fail-closed)",
+                 (normally Linux >= 6.2; 5.13–6.1 provide only v1/v2); \
+                 sandbox commands will refuse to run (fail-closed)",
                 crate::sandbox::REQUIRED_LANDLOCK_ABI
             ),
         )

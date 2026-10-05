@@ -22,7 +22,11 @@
 //! Both enforcing tiers require Landlock ABI v3. This is the first ABI that
 //! mediates `truncate(2)`, `ftruncate(2)`, `creat(2)`, and `open(2)` with
 //! `O_TRUNC`. Older kernels are rejected rather than silently dropping that
-//! access right and running with weaker confinement.
+//! access right and running with weaker confinement. Concretely, 5.13–6.1
+//! (ABI v1/v2) are refused loudly and `PartiallyEnforced` is never accepted
+//! (only `FullyEnforced` runs). File FDs (`/etc/ld.so.cache`, `/dev/null`, …)
+//! get file-only grants so dir-only rights (`ReadDir`, `Refer`, …) never cause
+//! `EINVAL`.
 //!
 //! ## Fail-closed errno taxonomy
 //!
