@@ -46,6 +46,53 @@ fn run(tier: PermissionTier, root: &Path, argv: &[&str]) -> SandboxResult {
         .expect("sandbox run should not fail at setup on this Landlock-capable box")
 }
 
+/// Minimum Landlock ABI the enforcing tiers require (mirrors
+/// `crate::sandbox::REQUIRED_LANDLOCK_ABI`; kept literal here because
+/// integration tests only use the public sandbox API).
+const REQUIRED_ABI: u32 = 3;
+
+/// Non-mutating probe of the kernel's highest Landlock ABI via
+/// `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`.
+/// Returns `None` when Landlock is unavailable (ENOSYS/EOPNOTSUPP).
+fn landlock_abi() -> Option<u32> {
+    const SYS_LANDLOCK_CREATE_RULESET: libc::c_long = 444;
+    const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1 << 0;
+    // SAFETY: pure VERSION query per UAPI — no allocation, no confinement.
+    let v = unsafe {
+        libc::syscall(
+            SYS_LANDLOCK_CREATE_RULESET,
+            std::ptr::null::<libc::c_void>(),
+            0usize,
+            LANDLOCK_CREATE_RULESET_VERSION,
+        )
+    };
+    if v < 0 {
+        None
+    } else {
+        Some(v as u32)
+    }
+}
+
+/// Skip (not fail) when the kernel cannot provide ABI v3. Returns `true` when
+/// the caller should proceed. Kernels 5.13–6.1 only provide ABI v1/v2 and the
+/// enforcing tiers refuse loudly there — the confinement tests cannot run.
+fn require_abi_v3(test: &str) -> bool {
+    match landlock_abi() {
+        Some(v) if v >= REQUIRED_ABI => true,
+        Some(v) => {
+            eprintln!(
+                "SKIP {test}: need Landlock ABI v{REQUIRED_ABI}, kernel has v{v} \
+                 (5.13–6.1 provide only v1/v2; sandbox refuses fail-closed there)"
+            );
+            false
+        }
+        None => {
+            eprintln!("SKIP {test}: Landlock unavailable on this kernel");
+            false
+        }
+    }
+}
+
 #[derive(Debug, Eq, PartialEq)]
 struct StableFileMetadata {
     device: u64,
@@ -110,6 +157,9 @@ fn assert_unchanged(path: &Path, before: &FileSnapshot) {
 /// THE non-vacuous test. One WorkspaceWrite run, both halves asserted.
 #[test]
 fn workspace_write_confines_to_root_nonvacuous() {
+    if !require_abi_v3("workspace_write_confines_to_root_nonvacuous") {
+        return;
+    }
     let dir = TempDir::new("ll-nonvacuous");
     let root = dir.path();
 
@@ -187,6 +237,9 @@ fn workspace_write_confines_to_root_nonvacuous() {
 /// also proves the file's content, size, and stable metadata were preserved.
 #[test]
 fn truncation_operations_are_scoped_to_workspace() {
+    if !require_abi_v3("truncation_operations_are_scoped_to_workspace") {
+        return;
+    }
     let Some(python) = python3() else {
         eprintln!("SKIP truncation_operations_are_scoped_to_workspace: python3 not found");
         return;
@@ -389,6 +442,9 @@ fn ftruncate_fd_is_scoped_to_workspace() {
     if std::env::var_os(FTRUNCATE_HELPER).is_some() {
         run_ftruncate_helper();
     }
+    if !require_abi_v3("ftruncate_fd_is_scoped_to_workspace") {
+        return;
+    }
 
     let workspace = TempDir::new("ll-ftruncate-workspace");
     let outside = TempDir::new("ll-ftruncate-outside");
@@ -412,6 +468,9 @@ fn ftruncate_fd_is_scoped_to_workspace() {
 /// ReadOnly tier: read inside ok, write inside denied.
 #[test]
 fn read_only_allows_read_denies_write() {
+    if !require_abi_v3("read_only_allows_read_denies_write") {
+        return;
+    }
     let dir = TempDir::new("ll-readonly");
     let root = dir.path();
     // Seed a file with a WorkspaceWrite run so ReadOnly has something to read.
@@ -456,6 +515,9 @@ fn read_only_allows_read_denies_write() {
 /// must NOT be inherited by the exec'd command (runner closes all fd > 2).
 #[test]
 fn inherited_fd_outside_workspace_is_not_leaked() {
+    if !require_abi_v3("inherited_fd_outside_workspace_is_not_leaked") {
+        return;
+    }
     let dir = TempDir::new("ll-fdleak");
     let root = dir.path();
 
@@ -492,6 +554,9 @@ fn inherited_fd_outside_workspace_is_not_leaked() {
 /// fully enforced (the inverse of the fail-closed path).
 #[test]
 fn capable_kernel_enforces_without_refusal() {
+    if !require_abi_v3("capable_kernel_enforces_without_refusal") {
+        return;
+    }
     let dir = TempDir::new("ll-ordering");
     let root = dir.path();
     let r = run(PermissionTier::WorkspaceWrite, root, &[sh(), "-c", "true"]);
